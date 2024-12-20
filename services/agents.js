@@ -24,6 +24,36 @@ class VacationBudgetAgent {
     }
   }
 
+  async queryPerplexity(query) {
+    try {
+      console.log('Querying Perplexity with:', query);
+      
+      const response = await fetch('https://api.perplexity.ai/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${this.apiKey}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          model: 'llama-3.1-sonar-small-128k-online',
+          messages: [{ role: 'user', content: query }]
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error(`Perplexity API error: ${response.status} ${response.statusText}`);
+      }
+
+      const data = await response.json();
+      console.log('Perplexity response:', data);
+      
+      return data;
+    } catch (error) {
+      console.error('Error querying Perplexity:', error);
+      throw error;
+    }
+  }
+
   // Helper function to clean JSON response
   cleanJsonResponse(content) {
     console.log('[Perplexity] Cleaning JSON response:', content);
@@ -56,7 +86,7 @@ class VacationBudgetAgent {
         'Authorization': `Bearer ${this.apiKey}`
       },
       body: JSON.stringify({
-        model: "pplx-7b-chat",
+        model: "llama-3.1-sonar-small-128k-online",
         messages: [
           {
             role: "system",
@@ -72,6 +102,8 @@ class VacationBudgetAgent {
     });
 
     if (!response.ok) {
+      const errorText = await response.text();
+      console.error(`[${category.toUpperCase()}] API error:`, errorText);
       throw new Error(`API error for ${category}: ${response.status}`);
     }
 
