@@ -1,23 +1,23 @@
 {
-  "name": "frontend",
+  "name": "backend",
   "version": "1.0.0",
   "main": "index.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "nodemon server.js"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "description": "",
+  "repository": "https://github.com/kirillshavlovskiy/travel-agent-backend.git",
+  "author": "kirillshavlovskiy <kirillshavlovsky@me.com>",
+  "license": "MIT",
   "dependencies": {
+    "axios": "^1.7.9",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
     "node-fetch": "^3.3.2",
-    "nodemon": "^3.1.7",
+    "nodemon": "^3.1.9",
     "openai-swarm-node": "^1.0.6",
     "perplexity": "^1.0.1"
   },
-  "type": "module"
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js",
+    "build": "echo 'Build step not required'"
+  }
 }
