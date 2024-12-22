@@ -1,0 +1,230 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "../node_modules/.prisma/client"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id            String     @id @default(cuid())
+  name          String?
+  email         String?    @unique
+  emailVerified DateTime?
+  image         String?
+  redditId      String?    @unique
+  username      String?
+  profileImage  String?
+  lastLogin     DateTime?
+  verified      Boolean    @default(false)
+  redditCreated DateTime?
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+  accounts      Account[]
+  sessions      Session[]
+  tripPlans     TripPlan[]
+
+  @@index([email])
+  @@index([redditId])
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String?
+  access_token      String?
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?
+  session_state     String?
+  user              User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model TripPlan {
+  id                 String             @id @default(cuid())
+  userId             String
+  name               String
+  status             TripStatus         @default(DRAFT)
+  country            String?
+  city               Json?
+  cities             Json[]             @default([])
+  startDate          DateTime?
+  endDate            DateTime?
+  travelers          Int?
+  currency           String?
+  overallBudget      Float?
+  selectedCategories String[]           @default([])
+  estimates          Json?
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+  departureLocation  DepartureLocation?
+  expenses           ExpenseCategory[]
+  estimate_history   estimate_history[]
+  user               User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("trip_plans")
+}
+
+model ExpenseCategory {
+  id                String   @id @default(cuid())
+  tripPlanId        String
+  name              String
+  key               String
+  preBooked         Boolean  @default(false)
+  cost              Float?
+  budgetType        String
+  budgetValue       Float
+  defaultPercentage Float
+  selectedTier      String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  estimates         Json?
+  tripPlan          TripPlan @relation(fields: [tripPlanId], references: [id], onDelete: Cascade)
+
+  @@unique([tripPlanId, key])
+  @@index([tripPlanId])
+}
+
+model DepartureLocation {
+  id         String   @id @default(cuid())
+  lat        Float?
+  lng        Float?
+  name       String
+  code       String?
+  airport    String?
+  tripPlanId String   @unique
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  tripPlan   TripPlan @relation(fields: [tripPlanId], references: [id], onDelete: Cascade)
+
+  @@index([tripPlanId])
+}
+
+model estimate_history {
+  tripPlanId          String?
+  category            String
+  createdAt           DateTime              @default(now())
+  estimates           Json
+  updatedAt           DateTime              @updatedAt
+  id                  Int                   @id @default(autoincrement())
+  perplexityReference PerplexityReference[]
+  tripPlan            TripPlan?             @relation(fields: [tripPlanId], references: [id])
+
+  @@unique([tripPlanId, category])
+  @@index([tripPlanId])
+  @@index([category])
+  @@map("estimate_history")
+}
+
+model PerplexityReference {
+  id                     Int                     @id @default(autoincrement())
+  estimateHistoryId      Int
+  category               String
+  priceTier              String
+  provider               String
+  details                String
+  price                  Float
+  date                   DateTime?
+  link                   String?
+  perplexityComment      String?
+  overview               String
+  createdAt              DateTime                @default(now())
+  updatedAt              DateTime                @updatedAt
+  accommodationReference AccommodationReference?
+  activityReference      ActivityReference?
+  flightReference        FlightReference?
+  estimateHistory        estimate_history        @relation(fields: [estimateHistoryId], references: [id], onDelete: Cascade)
+  restaurantReference    RestaurantReference?
+
+  @@index([estimateHistoryId])
+  @@index([category])
+  @@index([priceTier])
+}
+
+model FlightReference {
+  id                    String              @id @default(cuid())
+  perplexityReferenceId Int                 @unique
+  airline               String
+  outboundFlight        String
+  inboundFlight         String?
+  outboundDate          DateTime
+  inboundDate           DateTime?
+  layovers              Int                 @default(0)
+  flightDuration        String?
+  baggageAllowance      String?
+  bookingClass          String
+  perplexityReference   PerplexityReference @relation(fields: [perplexityReferenceId], references: [id], onDelete: Cascade)
+
+  @@index([perplexityReferenceId])
+}
+
+model AccommodationReference {
+  id                    String              @id @default(cuid())
+  perplexityReferenceId Int                 @unique
+  roomType              String
+  bedConfiguration      String?
+  amenities             String[]
+  location              String
+  checkInTime           String?
+  checkOutTime          String?
+  cancellationPolicy    String?
+  perplexityReference   PerplexityReference @relation(fields: [perplexityReferenceId], references: [id], onDelete: Cascade)
+
+  @@index([perplexityReferenceId])
+}
+
+model RestaurantReference {
+  id                    String              @id @default(cuid())
+  perplexityReferenceId Int                 @unique
+  cuisine               String
+  mealType              String[]
+  averageMealPrice      Float
+  menuHighlights        String[]
+  atmosphere            String?
+  reservationRequired   Boolean             @default(false)
+  openingHours          String?
+  perplexityReference   PerplexityReference @relation(fields: [perplexityReferenceId], references: [id], onDelete: Cascade)
+
+  @@index([perplexityReferenceId])
+}
+
+model ActivityReference {
+  id                    String              @id @default(cuid())
+  perplexityReferenceId Int                 @unique
+  activityType          String
+  duration              String
+  groupSize             String?
+  includedItems         String[]
+  restrictions          String?
+  availability          String?
+  perplexityReference   PerplexityReference @relation(fields: [perplexityReferenceId], references: [id], onDelete: Cascade)
+
+  @@index([perplexityReferenceId])
+}
+
+enum TripStatus {
+  DRAFT
+  PLANNED
+  ACTIVE
+  CLOSED
+}
