@@ -11,12 +11,14 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
-    "allowJs": true
+    "allowJs": true,
+    "types": ["node"],
+    "typeRoots": ["./node_modules/@types", "./src/types"]
   },
   "ts-node": {
     "esm": true,
     "experimentalSpecifierResolution": "node"
   },
-  "include": ["*.ts", "src/**/*"],
+  "include": ["*.ts", "src/**/*", "api/**/*"],
   "exclude": ["node_modules", "dist"]
 } 

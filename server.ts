@@ -1,38 +1,58 @@
 import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import cookieParser from 'cookie-parser';
-import dotenv from 'dotenv';
+import { config } from 'dotenv';
 import redditAuthRoutes from './src/routes/auth/reddit.js';
 import VacationBudgetAgent from './src/services/agents.js';
-import { fileURLToPath } from 'url';
-import { dirname } from 'path';
-import { config } from 'dotenv';
-
-// Get current file path in ES modules
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
 
 // Load environment variables
 config();
 
 const app = express();
-const PORT = process.env.PORT || 3001;
+
+// Configure CORS with environment-aware origin
+const FRONTEND_URL = process.env.VERCEL_URL 
+  ? `https://${process.env.VERCEL_URL}`
+  : 'http://localhost:3002';
+
+// List of allowed origins
+const allowedOrigins = [
+  FRONTEND_URL,
+  'http://localhost:3002',
+  'https://ai-trip-advisor.vercel.app',
+  'https://ai-trip-advisor-server.vercel.app',
+  'https://ai-trip-advisor-1b18b6eyj-kirills-projects-bfbcd3f8.vercel.app'
+];
 
 // Configure CORS
 app.use(cors({
-  origin: 'http://localhost:3002',
+  origin: (origin, callback) => {
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) {
+      return callback(null, true);
+    }
+
+    console.log('[CORS] Request from origin:', origin);
+
+    if (allowedOrigins.includes(origin) || origin.endsWith('.vercel.app')) {
+      callback(null, true);
+    } else {
+      console.log('[CORS] Origin not allowed:', origin);
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  allowedHeaders: ['Content-Type', 'Authorization', 'Cookie']
 }));
 
 // Request logging middleware
 app.use((req, res, next) => {
-  console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
-  console.log('Headers:', req.headers);
-  if (req.body && Object.keys(req.body).length > 0) {
-    console.log('Body:', req.body);
-  }
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`, {
+    headers: req.headers,
+    query: req.query,
+    body: req.body
+  });
   next();
 });
 
@@ -44,14 +64,28 @@ app.use('/api/auth', redditAuthRoutes);
 
 const agent = new VacationBudgetAgent();
 
+// Root endpoint
+app.get('/', (req: Request, res: Response) => {
+  res.json({
+    status: 'ok',
+    message: 'AI Trip Advisor API',
+    version: '1.0.0',
+    timestamp: new Date().toISOString()
+  });
+});
+
 // Health check endpoint
-app.get('/health', (req: Request, res: Response) => {
+app.get('/api/health', (req: Request, res: Response) => {
   res.json({ 
     status: 'ok', 
     timestamp: new Date().toISOString(),
+    environment: process.env.VERCEL_ENV || 'development',
+    url: process.env.VERCEL_URL || 'localhost',
+    region: process.env.VERCEL_REGION || 'local',
     perplexityApiKey: !!process.env.PERPLEXITY_API_KEY,
     redditClientId: !!process.env.REDDIT_CLIENT_ID,
-    redditClientSecret: !!process.env.REDDIT_CLIENT_SECRET
+    redditClientSecret: !!process.env.REDDIT_CLIENT_SECRET,
+    allowedOrigins: allowedOrigins
   });
 });
 
@@ -78,34 +112,25 @@ app.use((req: Request, res: Response) => {
   res.status(404).json({
     error: 'Not Found',
     message: 'The requested endpoint does not exist',
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
+    path: req.url
   });
 });
 
-// Start server with error handling
-const server = app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-  console.log(`Health check available at http://localhost:${PORT}/health`);
-  console.log('Environment:', {
-    nodeEnv: process.env.NODE_ENV,
-    perplexityApiKey: !!process.env.PERPLEXITY_API_KEY,
-    redditClientId: !!process.env.REDDIT_CLIENT_ID,
-    redditClientSecret: !!process.env.REDDIT_CLIENT_SECRET
+// Only start the server in development
+if (process.env.NODE_ENV !== 'production') {
+  const PORT = process.env.PORT || 3001;
+  app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+    console.log(`Health check available at http://localhost:${PORT}/api/health`);
+    console.log('Environment:', {
+      nodeEnv: process.env.NODE_ENV,
+      perplexityApiKey: !!process.env.PERPLEXITY_API_KEY,
+      redditClientId: !!process.env.REDDIT_CLIENT_ID,
+      redditClientSecret: !!process.env.REDDIT_CLIENT_SECRET
+    });
   });
-});
+}
 
-server.on('error', (error: NodeJS.ErrnoException) => {
-  console.error('Server error:', {
-    code: error.code,
-    message: error.message,
-    stack: error.stack
-  });
-  
-  if (error.code === 'EADDRINUSE') {
-    console.error(`Port ${PORT} is already in use. Please try a different port or kill the process using this port.`);
-    process.exit(1);
-  } else {
-    console.error('Unhandled server error');
-    process.exit(1);
-  }
-});
+// Export the Express app for Vercel
+export default app;
