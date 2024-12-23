@@ -32,7 +32,7 @@ const SYSTEM_MESSAGE = `You are an AI travel budget expert. Your role is to:
 6. Consider local market conditions and currency
 7. Base estimates on real-world data and current market rates`;
 
-class VacationBudgetAgent {
+export class VacationBudgetAgent {
   private async fetchWithRetry(url: string, options: any, retries = 3): Promise<FetchResponse> {
     let lastError: Error | unknown;
 
@@ -108,37 +108,30 @@ class VacationBudgetAgent {
     return cleaned;
   }
 
-  async handleTravelRequest(req: Request, res: Response): Promise<void> {
+  async handleTravelRequest(request: TravelRequest): Promise<Record<string, any>> {
     try {
-      const travelRequest = req.body as TravelRequest;
-
       console.log('[VacationBudgetAgent] Processing request:', {
-        type: travelRequest.type,
-        departure: travelRequest.departureLocation.name,
-        country: travelRequest.country,
+        type: request.type,
+        departure: request.departureLocation.name,
+        country: request.country,
         dates: {
-          outbound: travelRequest.departureLocation.outboundDate,
-          inbound: travelRequest.departureLocation.inboundDate
+          outbound: request.departureLocation.outboundDate,
+          inbound: request.departureLocation.inboundDate
         },
-        travelers: travelRequest.travelers,
-        budget: travelRequest.budget
+        travelers: request.travelers,
+        budget: request.budget
       });
 
       // Validate request
-      if (!travelRequest.departureLocation?.name || !travelRequest.country) {
-        res.status(400).json({
-          success: false,
-          error: 'Missing required fields: departure location or country',
-          timestamp: new Date().toISOString()
-        });
-        return;
+      if (!request.departureLocation?.name || !request.country) {
+        throw new Error('Missing required fields: departure location or country');
       }
 
       // Process all categories in parallel
       const categories = ['flights', 'hotels', 'localTransportation', 'food', 'activities'];
       const categoryPromises = categories.map(async (category) => {
         try {
-          const prompt = this.constructPrompt(category, travelRequest);
+          const prompt = this.constructPrompt(category, request);
           const response = await this.queryPerplexity(prompt, category);
           return { category, data: JSON.parse(response) };
         } catch (error) {
@@ -157,19 +150,10 @@ class VacationBudgetAgent {
 
       console.log('[VacationBudgetAgent] All categories processed');
 
-      res.json({
-        success: true,
-        data: estimatesData,
-        timestamp: new Date().toISOString()
-      });
+      return estimatesData;
     } catch (error) {
       console.error('[VacationBudgetAgent] Error:', error);
-      const errorMessage = error instanceof Error ? error.message : 'Internal server error';
-      res.status(500).json({
-        success: false,
-        error: errorMessage,
-        timestamp: new Date().toISOString()
-      });
+      throw error;
     }
   }
 
@@ -379,6 +363,4 @@ class VacationBudgetAgent {
         throw new Error(`Invalid category: ${category}`);
     }
   }
-}
-
-export { VacationBudgetAgent as default }; 
+} 

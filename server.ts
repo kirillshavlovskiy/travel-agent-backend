@@ -3,7 +3,8 @@ import cors from 'cors';
 import cookieParser from 'cookie-parser';
 import { config } from 'dotenv';
 import redditAuthRoutes from './src/routes/auth/reddit.js';
-import VacationBudgetAgent from './src/services/agents.js';
+import budgetRoutes from './src/routes/budget.js';
+import { VacationBudgetAgent } from './src/services/agents.js';
 
 // Load environment variables
 config();
@@ -61,6 +62,9 @@ app.use(cookieParser());
 
 // Auth routes
 app.use('/api/auth', redditAuthRoutes);
+
+// Budget routes
+app.use('/api', budgetRoutes);
 
 const agent = new VacationBudgetAgent();
 

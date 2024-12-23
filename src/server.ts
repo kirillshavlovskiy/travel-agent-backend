@@ -86,26 +86,6 @@ app.get('/api/health', (req: Request, res: Response) => {
   });
 });
 
-// Calculate budget endpoint
-app.post('/calculate-budget', async (req: Request, res: Response) => {
-  console.log('[Calculate Budget] Received request:', {
-    body: req.body,
-    query: req.query,
-    origin: req.headers.origin
-  });
-
-  try {
-    await agent.handleTravelRequest(req, res);
-  } catch (error) {
-    console.error('[Calculate Budget] Error:', error);
-    res.status(500).json({
-      success: false,
-      error: error instanceof Error ? error.message : 'Internal server error',
-      timestamp: new Date().toISOString()
-    });
-  }
-});
-
 // Error handling middleware
 app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
   console.error('Global error handler:', {
