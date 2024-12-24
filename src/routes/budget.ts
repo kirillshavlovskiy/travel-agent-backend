@@ -1,126 +1,94 @@
 import { Router, Request, Response } from 'express';
 import { VacationBudgetAgent } from '../services/agents.js';
+import { PrismaClient } from '@prisma/client';
 
 const router = Router();
 const agent = new VacationBudgetAgent();
+const prisma = new PrismaClient();
 
 // Calculate budget endpoint
 router.post('/calculate-budget', async (req: Request, res: Response) => {
-  console.log('[Calculate Budget] Received request:', {
-    body: req.body,
-    query: req.query,
-    origin: req.headers.origin
-  });
-
   try {
-    const { departureLocation, destinations, startDate, endDate, travelers, budgetLimit, currency } = req.body;
+    console.log('[Calculate Budget] Received request:', {
+      body: req.body,
+      query: req.query,
+      origin: req.headers.origin
+    });
 
-    // Validate required fields with detailed error messages
+    // Validate required fields
     const missingFields = [];
-    if (!departureLocation?.code) missingFields.push('departure location code');
-    if (!destinations?.[0]?.code) missingFields.push('destination country code');
-    if (!startDate) missingFields.push('start date');
-    if (!endDate) missingFields.push('end date');
-    if (!travelers) missingFields.push('number of travelers');
+    if (!req.body.departureLocation?.code) missingFields.push('departure location code');
+    if (!req.body.departureLocation?.label) missingFields.push('departure location label');
+    if (!req.body.startDate) missingFields.push('start date');
+    if (!req.body.endDate) missingFields.push('end date');
+    if (!req.body.destinations?.[0]?.code) missingFields.push('destination code');
+    if (!req.body.travelers) missingFields.push('number of travelers');
 
     if (missingFields.length > 0) {
-      return res.status(400).json({
-        success: false,
-        error: `Missing required fields: ${missingFields.join(', ')}`,
-        timestamp: new Date().toISOString()
-      });
+      throw new Error(`Missing required fields: ${missingFields.join(', ')}`);
     }
 
-    // Transform request for the agent
-    const travelRequest = {
+    // Transform the request to match our internal format
+    const transformedRequest = {
       type: 'full',
       departureLocation: {
-        name: departureLocation.label || departureLocation.code,
-        outboundDate: startDate,
-        inboundDate: endDate,
+        code: req.body.departureLocation.code,
+        label: req.body.departureLocation.label,
+        airport: req.body.departureLocation.airport || req.body.departureLocation.code,
+        outboundDate: req.body.startDate,
+        inboundDate: req.body.endDate,
         isRoundTrip: true
       },
-      country: destinations[0].code,
-      travelers: parseInt(travelers.toString()),
-      currency: currency || 'USD',
-      budget: budgetLimit ? parseFloat(budgetLimit.toString()) : undefined
+      destinations: req.body.destinations.map((dest: any) => ({
+        code: dest.code,
+        label: dest.label || dest.code,
+        airport: dest.airport || dest.code
+      })),
+      country: req.body.destinations[0].code,
+      travelers: parseInt(req.body.travelers) || 1,
+      currency: req.body.currency || 'USD',
+      budget: req.body.budgetLimit ? parseInt(req.body.budgetLimit) : undefined,
+      startDate: req.body.startDate,
+      endDate: req.body.endDate
     };
 
-    console.log('[Calculate Budget] Transformed request:', travelRequest);
+    console.log('[Calculate Budget] Transformed request:', transformedRequest);
 
-    // Pass the transformed request to the agent
-    const result = await agent.handleTravelRequest(travelRequest);
+    const estimates = await agent.handleTravelRequest(transformedRequest);
 
-    // Transform the result to match the frontend's expected format
-    const transformedResult = {
-      flights: {
-        budget: result.flights?.budget || {
-          min: 0,
-          max: 0,
-          average: 0,
-          confidence: 0,
-          source: 'default',
-          references: []
-        },
-        medium: result.flights?.medium || {
-          min: 0,
-          max: 0,
-          average: 0,
-          confidence: 0,
-          source: 'default',
-          references: []
-        },
-        premium: result.flights?.premium || {
-          min: 0,
-          max: 0,
-          average: 0,
-          confidence: 0,
-          source: 'default',
-          references: []
-        }
-      },
-      hotels: {
-        budget: result.hotels?.budget || {
-          min: 0,
-          max: 0,
-          average: 0,
-          confidence: 0,
-          source: 'default',
-          references: []
-        },
-        medium: result.hotels?.medium || {
-          min: 0,
-          max: 0,
-          average: 0,
-          confidence: 0,
-          source: 'default',
-          references: []
-        },
-        premium: result.hotels?.premium || {
-          min: 0,
-          max: 0,
-          average: 0,
-          confidence: 0,
-          source: 'default',
-          references: []
-        }
-      },
-      destinations: [{
-        city: destinations[0].label || destinations[0].code,
-        country: destinations[0].code
-      }]
-    };
+    // Save search results to database
+    const searchResult = await prisma.searchResult.create({
+      data: {
+        tripId: req.body.tripId || undefined,
+        departureLocation: transformedRequest.departureLocation.code,
+        destinations: transformedRequest.destinations.map(d => d.code),
+        startDate: new Date(transformedRequest.startDate),
+        endDate: new Date(transformedRequest.endDate),
+        travelers: transformedRequest.travelers,
+        currency: transformedRequest.currency,
+        budgetLimit: transformedRequest.budget,
+        results: estimates,
+        createdAt: new Date(),
+        updatedAt: new Date()
+      }
+    });
+
+    console.log('[Calculate Budget] Saved search results:', searchResult.id);
 
     res.json({
       success: true,
-      data: transformedResult,
+      data: {
+        ...estimates,
+        destinations: req.body.destinations,
+        searchId: searchResult.id
+      },
       timestamp: new Date().toISOString()
     });
   } catch (error) {
     console.error('[Calculate Budget] Error:', error);
     res.status(500).json({
       success: false,
-      error: error instanceof Error ? error.message : 'Internal server error',
+      error: error instanceof Error ? error.message : 'Unknown error',
       timestamp: new Date().toISOString()
     });
   }
