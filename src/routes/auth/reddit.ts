@@ -92,6 +92,7 @@ router.post('/reddit/callback', async (req, res) => {
         'https://ai-trip-advisor-web.vercel.app/api/auth/callback/reddit'
       ],
       development: [
+        'http://localhost:3003/api/auth/callback/reddit',
         'http://localhost:3002/api/auth/callback/reddit',
         'http://localhost:3000/api/auth/callback/reddit'
       ]

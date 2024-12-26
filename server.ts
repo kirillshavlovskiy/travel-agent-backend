@@ -19,7 +19,9 @@ const FRONTEND_URL = process.env.VERCEL_URL
 // List of allowed origins
 const allowedOrigins = [
   FRONTEND_URL,
+  'http://localhost:3000',
   'http://localhost:3002',
+  'http://localhost:3003',
   'https://ai-trip-advisor.vercel.app',
   'https://ai-trip-advisor-server.vercel.app',
   'https://ai-trip-advisor-1b18b6eyj-kirills-projects-bfbcd3f8.vercel.app'
@@ -44,7 +46,8 @@ app.use(cors({
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'Cookie']
+  allowedHeaders: ['Content-Type', 'Authorization', 'Cookie', 'Accept'],
+  exposedHeaders: ['Set-Cookie']
 }));
 
 // Request logging middleware

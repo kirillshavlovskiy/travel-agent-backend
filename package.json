@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "postinstall": "prisma generate",
-    "dev": "tsx watch server.ts",
+    "dev": "tsx watch src/server.ts",
     "build": "prisma generate && tsc",
     "start": "node dist/server.js"
   },

@@ -253,14 +253,23 @@ CRITICAL JSON FORMATTING RULES:
       const data = await response.json() as PerplexityResponse;
       let content = data.choices[0].message.content;
       
-      // Clean the response
+      // Log raw content for debugging
+      console.log(`[${category.toUpperCase()}] Raw content:`, content);
+
+      // Step 1: Remove markdown and code blocks
+      content = content.replace(/```json\n|\n```|```/g, '').trim();
+      console.log(`[${category.toUpperCase()}] After markdown removal:`, content);
+
+      // Step 2: Extract JSON object
+      const jsonMatch = content.match(/({[\s\S]*})/);
+      if (!jsonMatch) {
+        throw new Error('No valid JSON object found in response');
+      }
+      content = jsonMatch[1];
+      console.log(`[${category.toUpperCase()}] Extracted JSON:`, content);
+
+      // Step 3: Fix common JSON issues
       content = content
-        // Remove markdown
-        .replace(/```json\n|\n```|```/g, '')
-        // Remove any text before the first {
-        .replace(/^[^{]*/, '')
-        // Remove any text after the last }
-        .replace(/}[^}]*$/, '}')
         // Remove escaped quotes
         .replace(/\\"/g, '"')
         // Fix property names - ensure they're double-quoted
@@ -278,9 +287,51 @@ CRITICAL JSON FORMATTING RULES:
         .replace(/\s+/g, ' ')
         .trim();
 
+      console.log(`[${category.toUpperCase()}] Cleaned content:`, content);
+
       try {
         // Parse the JSON
         const parsed = JSON.parse(content);
+        console.log(`[${category.toUpperCase()}] Successfully parsed JSON:`, parsed);
+
+        // Special handling for hotels category
+        if (category === 'hotels') {
+          // Ensure the hotels object exists and has the correct structure
+          if (!parsed.hotels || !parsed.hotels.searchDetails || !parsed.hotels.budget) {
+            console.error(`[${category.toUpperCase()}] Invalid hotel data structure:`, parsed);
+            return this.getDefaultData(category);
+          }
+
+          // Validate and clean hotel references
+          ['budget', 'medium', 'premium'].forEach(tier => {
+            if (parsed.hotels[tier]?.references) {
+              parsed.hotels[tier].references = parsed.hotels[tier].references
+                .filter(ref => ref && typeof ref === 'object')
+                .map(ref => ({
+                  name: ref.name || '',
+                  location: ref.location || '',
+                  price: typeof ref.price === 'number' ? ref.price : parseFloat(ref.price) || 0,
+                  type: ref.type || 'Hotel',
+                  amenities: ref.amenities || '',
+                  rating: ref.rating || 0,
+                  reviewScore: ref.reviewScore || 0,
+                  reviewCount: ref.reviewCount || 0,
+                  images: Array.isArray(ref.images) ? ref.images : [],
+                  referenceUrl: ref.referenceUrl || '',
+                  coordinates: {
+                    latitude: ref.coordinates?.latitude || 0,
+                    longitude: ref.coordinates?.longitude || 0
+                  },
+                  features: Array.isArray(ref.features) ? ref.features : [],
+                  policies: {
+                    checkIn: ref.policies?.checkIn || '',
+                    checkOut: ref.policies?.checkOut || '',
+                    cancellation: ref.policies?.cancellation || ''
+                  }
+                }));
+            }
+          });
+        }
 
         // Validate the structure matches our expected type
         if (!this.validateCategoryData(parsed, category)) {
@@ -306,9 +357,12 @@ CRITICAL JSON FORMATTING RULES:
     const categoryKey = category === 'localTransportation' ? 'localTransportation' : 
                        category.endsWith('s') ? category : `${category}s`;
 
-    if (!data[categoryKey]) return false;
+    // Special handling for food category which doesn't follow the plural pattern
+    const key = category === 'food' ? 'food' : categoryKey;
 
-    const categoryData = data[categoryKey];
+    if (!data[key]) return false;
+
+    const categoryData = data[key];
     
     // Validate tiers
     for (const tier of ['budget', 'medium', 'premium']) {
@@ -324,6 +378,21 @@ CRITICAL JSON FORMATTING RULES:
         !Array.isArray(tierData.references)
       ) {
         return false;
+      }
+
+      // Special validation for food references
+      if (category === 'food') {
+        for (const ref of tierData.references) {
+          if (
+            typeof ref !== 'object' ||
+            typeof ref.type !== 'string' ||
+            typeof ref.description !== 'string' ||
+            typeof ref.price !== 'number' ||
+            typeof ref.mealType !== 'string'
+          ) {
+            return false;
+          }
+        }
       }
     }
 
@@ -382,10 +451,24 @@ CRITICAL JSON FORMATTING RULES:
         })
       );
 
-      return results.reduce((acc, { category, data }) => {
-        acc[category] = data[category as keyof CategoryData];
-        return acc;
-      }, {} as Record<string, any>);
+      // Create the response object with request details
+      const response: Record<string, any> = {
+        requestDetails: {
+          departureLocation: formattedRequest.departureLocation,
+          destinations: formattedRequest.destinations,
+          travelers: formattedRequest.travelers,
+          startDate: formattedRequest.startDate,
+          endDate: formattedRequest.endDate,
+          currency: formattedRequest.currency
+        }
+      };
+
+      // Add category data to the response
+      results.forEach(({ category, data }) => {
+        response[category] = data[category as keyof CategoryData];
+      });
+
+      return response;
     } catch (error) {
       console.error('[VacationBudgetAgent] Error:', error);
       throw error;
@@ -462,16 +545,16 @@ CRITICAL JSON FORMATTING RULES:
         - Guests: ${params.travelers}
         ${params.budget ? `- Budget: ${params.budget} ${params.currency}` : ''}
 
-        Provide a detailed JSON response with:
+        Return a valid JSON object with this EXACT structure:
         {
           "hotels": {
             "searchDetails": {
-              "location": "string",
+              "location": "${params.country}",
               "dates": {
-                "checkIn": "string",
-                "checkOut": "string"
+                "checkIn": "${params.departureLocation.outboundDate}",
+                "checkOut": "${params.departureLocation.inboundDate}"
               },
-              "guests": number
+              "guests": ${params.travelers}
             },
             "budget": {
               "min": number,
@@ -484,43 +567,57 @@ CRITICAL JSON FORMATTING RULES:
                   "name": "string",
                   "location": "string",
                   "price": number,
-                  "type": "string (e.g., 'Hotel', 'Hostel', 'Apartment')",
-                  "amenities": "string (comma-separated list)",
-                  "rating": number (1-5 stars),
-                  "reviewScore": number (0-10),
+                  "type": "string",
+                  "amenities": "string",
+                  "rating": number,
+                  "reviewScore": number,
                   "reviewCount": number,
-                  "images": ["string (image URLs)"],
-                  "referenceUrl": "string (booking URL)",
+                  "images": ["string"],
+                  "referenceUrl": "string",
                   "coordinates": {
                     "latitude": number,
                     "longitude": number
                   },
-                  "features": ["string (key features)"],
+                  "features": ["string"],
                   "policies": {
-                    "checkIn": "string (e.g., '14:00')",
-                    "checkOut": "string (e.g., '11:00')",
+                    "checkIn": "string",
+                    "checkOut": "string",
                     "cancellation": "string"
                   }
                 }
               ]
             },
-            "medium": { same structure },
-            "premium": { same structure }
+            "medium": {
+              "min": number,
+              "max": number,
+              "average": number,
+              "confidence": number,
+              "source": "string",
+              "references": [/* same structure as budget references */]
+            },
+            "premium": {
+              "min": number,
+              "max": number,
+              "average": number,
+              "confidence": number,
+              "source": "string",
+              "references": [/* same structure as budget references */]
+            }
           }
         }
 
-        Requirements:
-        1. Include actual booking URLs from major travel sites (Booking.com, Hotels.com, etc.)
-        2. Provide real hotel names and locations
-        3. Include accurate amenities and features
-        4. Add real review scores and counts when available
-        5. Include at least 3 references per tier
-        6. Ensure all prices are in ${params.currency}
-        7. Include actual hotel images when available
-        8. Provide accurate location coordinates
-        9. Include detailed cancellation policies
-
-        Return ONLY the JSON object, no additional text.`;
+        IMPORTANT RULES:
+        1. Use ONLY double quotes for all strings and property names
+        2. Do NOT use single quotes anywhere
+        3. Do NOT include any trailing commas
+        4. All prices must be numbers (no currency symbols or commas)
+        5. All coordinates must be valid numbers
+        6. All arrays must be properly closed
+        7. All objects must be properly closed
+        8. Include at least 2 references per tier
+        9. All prices must be in ${params.currency}
+        10. All URLs must be valid and properly escaped
+        11. Return ONLY the JSON object, no additional text`;
 
       case 'localTransportation':
         return `Analyze local transportation options in ${params.country} for ${params.travelers} travelers.
@@ -637,5 +734,79 @@ CRITICAL JSON FORMATTING RULES:
       default:
         throw new Error(`Invalid category: ${category}`);
     }
+  }
+
+  private constructHotelPrompt(request: TravelRequest): string {
+    const destination = request.destinations[0].label;
+    const checkIn = request.startDate;
+    const checkOut = request.endDate;
+    const travelers = request.travelers;
+    const budget = request.budget;
+
+    return `Provide detailed hotel recommendations in ${destination} for ${travelers} travelers, checking in on ${checkIn} and checking out on ${checkOut}.
+For each price category (budget, medium, premium), provide at least 5 real hotels with:
+1. Full hotel name (use real, well-known hotels)
+2. Exact location within ${destination}
+3. Price per night in USD (realistic market rates)
+4. Star rating (out of 5)
+5. At least 3-5 key amenities (e.g., "Free WiFi, Pool, Restaurant")
+6. Direct booking URL - IMPORTANT:
+   - Prefer direct hotel website booking URLs (e.g., hilton.com, marriott.com)
+   - Include the specific dates: ${checkIn} to ${checkOut}
+   - Include number of guests: ${travelers}
+   - Only use Booking.com as a last resort
+7. At least 2 high-quality images of the hotel:
+   - Exterior view
+   - Room or amenity view
+   - Must be real images from the hotel's website or official sources
+
+Return in this exact JSON structure:
+{
+  "hotels": {
+    "searchDetails": {
+      "location": "${destination}",
+      "dates": {
+        "checkIn": "${checkIn}",
+        "checkOut": "${checkOut}"
+      },
+      "guests": ${travelers}
+    },
+    "budget": {
+      "min": [minimum price in category],
+      "max": [maximum price in category],
+      "average": [average price in category],
+      "confidence": 0.9,
+      "source": "Direct hotel websites and market research",
+      "references": [
+        {
+          "name": "Hotel Name",
+          "location": "Exact address",
+          "price": 100,
+          "rating": 4.5,
+          "amenities": ["amenity1", "amenity2", "amenity3"],
+          "link": "https://www.hilton.com/...",
+          "images": [
+            "https://www.hotel-website.com/image1.jpg",
+            "https://www.hotel-website.com/image2.jpg"
+          ],
+          "hotelChain": "Hilton/Marriott/etc or Independent",
+          "directBooking": true
+        }
+      ]
+    },
+    "medium": { [same structure as budget] },
+    "premium": { [same structure as budget] }
+  }
+}
+
+${budget ? `Consider total budget of ${budget} USD when suggesting options.` : ''}
+IMPORTANT RULES:
+1. Prioritize hotels with direct booking websites
+2. All URLs must be complete and include check-in/out dates when possible
+3. All images must be from official hotel sources
+4. Prices must reflect actual rates for the specified dates
+5. Only include hotels that can be booked online
+6. Verify that all links and images are accessible
+7. Include major hotel chains when available in each tier`;
   }
 } 
