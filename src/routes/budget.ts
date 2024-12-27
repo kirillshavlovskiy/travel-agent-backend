@@ -194,9 +194,10 @@ router.post('/calculate-budget', async (req: Request, res: Response) => {
     console.log('[Budget Route] Searching for real-time flights with Amadeus...');
     try {
       // Search for flights in all cabin classes
-      const cabinClasses = ['ECONOMY', 'PREMIUM_ECONOMY', 'BUSINESS', 'FIRST'];
+      const cabinClasses = ['ECONOMY', 'PREMIUM_ECONOMY', 'BUSINESS', 'FIRST'] as const;
+      type CabinClass = typeof cabinClasses[number];
       const allFlights = await Promise.all(
-        cabinClasses.map(async (travelClass) => {
+        cabinClasses.map(async (travelClass: CabinClass) => {
           try {
             return await amadeusService.searchFlights({
               originLocationCode: transformedRequest.departureLocation.code,
