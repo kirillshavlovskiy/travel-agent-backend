@@ -49,11 +49,11 @@ interface AmadeusFlightOffer {
 }
 
 export class AmadeusService {
-  private token: string | null = null;
-  private tokenExpiry: number = 0;
+  private token = '';
+  private tokenExpiry = 0;
   private readonly clientId: string;
   private readonly clientSecret: string;
-  private readonly baseURL: string = 'https://test.api.amadeus.com';
+  private readonly baseURL: string = 'https://api.amadeus.com';
 
   constructor() {
     this.clientId = process.env.AMADEUS_CLIENT_ID || '';
@@ -71,7 +71,7 @@ export class AmadeusService {
 
     try {
       const response = await axios.post(
-        'https://test.api.amadeus.com/v1/security/oauth2/token',
+        `${this.baseURL}/v1/security/oauth2/token`,
         new URLSearchParams({
           grant_type: 'client_credentials',
           client_id: this.clientId,
@@ -83,6 +83,10 @@ export class AmadeusService {
           }
         }
       );
+
+      if (!response.data?.access_token) {
+        throw new Error('No access token received from Amadeus');
+      }
 
       this.token = response.data.access_token;
       this.tokenExpiry = Date.now() + (response.data.expires_in * 1000);
@@ -108,9 +112,25 @@ export class AmadeusService {
         }
       });
 
+      if (!response.data || !response.data.data) {
+        console.error('Invalid response from Amadeus:', response.data);
+        throw new Error('Invalid response from Amadeus API');
+      }
+
       return response.data.data;
     } catch (error) {
-      console.error('Error searching flights:', error);
+      if (axios.isAxiosError(error)) {
+        console.error('Amadeus API error:', {
+          status: error.response?.status,
+          data: error.response?.data,
+          config: {
+            url: error.config?.url,
+            params: error.config?.params
+          }
+        });
+      } else {
+        console.error('Error searching flights:', error);
+      }
       throw error;
     }
   }

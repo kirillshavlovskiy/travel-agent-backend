@@ -234,15 +234,22 @@ router.post('/calculate-budget', async (req: Request, res: Response) => {
               // Try to get airline info, but don't fail if it's not available
               let airlineInfo;
               try {
-                airlineInfo = await amadeusService.getAirlineInfo(offer.validatingAirlineCodes[0]);
+                // First try to get airline info for the actual carrier
+                airlineInfo = await amadeusService.getAirlineInfo(firstSegment.carrierCode);
+                if (!airlineInfo) {
+                  // Fallback to validating airline if carrier info not found
+                  airlineInfo = await amadeusService.getAirlineInfo(offer.validatingAirlineCodes[0]);
+                }
               } catch (error) {
                 console.warn('[Budget Route] Error fetching airline info:', error);
+                // Use the carrier code as fallback
+                airlineInfo = { commonName: firstSegment.carrierCode };
               }
 
               // Create a consistent flight data structure
               const flightData = {
                 // Basic flight info for table view
-                airline: airlineInfo?.commonName || airlineInfo?.businessName || offer.validatingAirlineCodes[0],
+                airline: airlineInfo?.commonName || airlineInfo?.businessName || firstSegment.carrierCode,
                 route: `${firstSegment.departure.iataCode} - ${lastOutboundSegment.arrival.iataCode}`,
                 duration: amadeusService.calculateTotalDuration(offer.itineraries[0].segments),
                 layovers: offer.itineraries[0].segments.length - 1,
@@ -334,27 +341,10 @@ router.post('/calculate-budget', async (req: Request, res: Response) => {
               return flightData;
             } catch (error) {
               console.warn('[Budget Route] Error transforming flight offer:', error);
-              // Return a simplified version if transformation fails
-              const firstSegment = offer.itineraries[0].segments[0];
-              const lastOutboundSegment = offer.itineraries[0].segments[offer.itineraries[0].segments.length - 1];
-              const cabinClass = offer.travelerPricings[0].fareDetailsBySegment[0].cabin;
-              return {
-                airline: offer.validatingAirlineCodes[0],
-                route: `${firstSegment.departure.iataCode} - ${lastOutboundSegment.arrival.iataCode}`,
-                duration: '(duration not available)',
-                layovers: offer.itineraries[0].segments.length - 1,
-                outbound: firstSegment.departure.at,
-                inbound: lastOutboundSegment.arrival.at,
-                price: parseFloat(offer.price.total),
-                tier: amadeusService.determineTier(parseFloat(offer.price.total), cabinClass),
-                flightNumber: `${firstSegment.carrierCode}${firstSegment.number}`,
-                referenceUrl: '#',
-                cabinClass,
-                details: null
-              };
+              return null;
             }
           })
-        );
+        ).then(flights => flights.filter(flight => flight !== null));
 
         // Group flights by tier
         const groupedFlights = transformedFlights.reduce((acc, flight) => {
@@ -382,10 +372,11 @@ router.post('/calculate-budget', async (req: Request, res: Response) => {
           groupedFlights[tier].average = flights.reduce((sum: number, f: any) => sum + f.price, 0) / flights.length;
         });
 
-        // Merge with existing flight data
+        // Only use Perplexity results if Amadeus search fails for a tier
         result.flights = {
-          ...result.flights,
-          ...groupedFlights
+          budget: groupedFlights.budget || result.flights?.budget,
+          medium: groupedFlights.medium || result.flights?.medium,
+          premium: groupedFlights.premium || result.flights?.premium
         };
       }
     } catch (error) {
@@ -403,7 +394,11 @@ router.post('/calculate-budget', async (req: Request, res: Response) => {
     console.log('[Budget Route] ====== END BUDGET CALCULATION ======');
     return res.json({
       success: true,
-      data: result,
+      data: {
+        ...result,
+        totalBudget: transformedRequest.budget,
+        requestDetails: transformedRequest
+      },
       timestamp: new Date().toISOString()
     });
   } catch (error) {
