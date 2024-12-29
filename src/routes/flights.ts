@@ -4,6 +4,12 @@ import { VacationBudgetAgent } from '../services/agents.js';
 
 const router = express.Router();
 
+interface Destination {
+  code: string;
+  label: string;
+  airport?: string;
+}
+
 // Test endpoint to verify the router is working
 router.get('/test', (req: Request, res: Response) => {
   console.log('Flight test endpoint called');
@@ -59,51 +65,112 @@ router.post('/', async (req: Request, res: Response) => {
 
     if (process.env.AMADEUS_CLIENT_ID && process.env.AMADEUS_CLIENT_SECRET) {
       try {
+        // Validate and format IATA codes
+        const originCode = departureLocation.code.trim().toUpperCase();
+        const destinationCode = destinations[0].code.trim().toUpperCase();
+        
+        // Validate and format dates
+        const outboundDate = new Date(departureLocation.outboundDate);
+        const inboundDate = departureLocation.inboundDate ? new Date(departureLocation.inboundDate) : null;
+        
+        if (isNaN(outboundDate.getTime()) || (inboundDate && isNaN(inboundDate.getTime()))) {
+          throw new Error('Invalid date format. Please use YYYY-MM-DD format.');
+        }
+        
+        // Format dates to YYYY-MM-DD
+        const formattedOutboundDate = outboundDate.toISOString().split('T')[0];
+        const formattedInboundDate = inboundDate ? inboundDate.toISOString().split('T')[0] : undefined;
+        
+        // Validate cabin class
+        const validCabinClasses = ['ECONOMY', 'PREMIUM_ECONOMY', 'BUSINESS', 'FIRST'];
+        const formattedCabinClass = cabinClass ? cabinClass.toUpperCase() : undefined;
+        
+        if (formattedCabinClass && !validCabinClasses.includes(formattedCabinClass)) {
+          throw new Error(`Invalid cabin class. Must be one of: ${validCabinClasses.join(', ')}`);
+        }
+
         console.log('Searching flights with Amadeus:', {
-          origin: departureLocation.code,
-          destination: destinations[0].code,
+          origin: originCode,
+          destination: destinationCode,
           dates: {
-            outbound: departureLocation.outboundDate,
-            inbound: departureLocation.inboundDate
-          }
+            outbound: formattedOutboundDate,
+            inbound: formattedInboundDate
+          },
+          cabinClass: formattedCabinClass,
+          travelers
         });
 
         const amadeusResults = await amadeusService.searchFlights({
-          originLocationCode: departureLocation.code,
-          destinationLocationCode: destinations[0].code,
-          departureDate: departureLocation.outboundDate,
-          returnDate: departureLocation.inboundDate,
+          originLocationCode: originCode,
+          destinationLocationCode: destinationCode,
+          departureDate: formattedOutboundDate,
+          returnDate: formattedInboundDate,
           adults: travelers,
-          travelClass: cabinClass
+          travelClass: formattedCabinClass as 'ECONOMY' | 'PREMIUM_ECONOMY' | 'BUSINESS' | 'FIRST'
         });
 
         if (amadeusResults && amadeusResults.length > 0) {
           console.log(`Found ${amadeusResults.length} Amadeus results`);
           
-          // Create a map to store airline info to avoid duplicate requests
-          const airlineInfoMap = new Map();
+          // Get unique airline codes from all results
+          const uniqueAirlineCodes = [...new Set(
+            amadeusResults.flatMap(offer => 
+              offer.itineraries.flatMap(itinerary => 
+                itinerary.segments.map(segment => segment.carrierCode)
+              )
+            )
+          )];
           
-          const transformedResults = await Promise.all(
-            amadeusResults.map(async (offer) => {
-              const carrierCode = offer.itineraries[0].segments[0].carrierCode;
-              let airlineInfo;
-              
-              if (airlineInfoMap.has(carrierCode)) {
-                airlineInfo = airlineInfoMap.get(carrierCode);
-              } else {
-                try {
-                  airlineInfo = await amadeusService.getAirlineInfo(carrierCode);
-                  airlineInfoMap.set(carrierCode, airlineInfo);
-                } catch (error) {
-                  console.log(`Could not fetch info for airline ${carrierCode}, using code as name`);
-                  airlineInfo = { commonName: carrierCode };
-                  airlineInfoMap.set(carrierCode, airlineInfo);
-                }
-              }
-              
-              return amadeusService.transformFlightOffer(offer, airlineInfo);
-            })
+          console.log('Unique airline codes:', uniqueAirlineCodes);
+          
+          // Fetch airline information for all carriers at once
+          let airlineInfoArray;
+          try {
+            airlineInfoArray = await amadeusService.getAirlineInfo(uniqueAirlineCodes);
+          } catch (error) {
+            console.error('Failed to fetch airline information:', error);
+            airlineInfoArray = uniqueAirlineCodes.map(code => ({
+              type: 'airline',
+              iataCode: code,
+              icaoCode: code,
+              businessName: code,
+              commonName: code
+            }));
+          }
+          
+          const transformedResults = amadeusResults.map(offer => 
+            amadeusService.transformFlightOffer(offer, airlineInfoArray)
           );
+          
+          console.log('\n=== Transformed Flight Results ===');
+          console.log('Total transformed results:', transformedResults.length);
+          if (transformedResults.length > 0) {
+            console.log('Sample transformed result:', JSON.stringify(transformedResults[0], null, 2));
+            
+            // Group flights by tier and analyze price ranges
+            const flightsByTier = {
+              budget: transformedResults.filter(f => f.tier === 'budget'),
+              medium: transformedResults.filter(f => f.tier === 'medium'),
+              premium: transformedResults.filter(f => f.tier === 'premium')
+            };
+
+            console.log('\n=== Price Analysis by Tier ===');
+            Object.entries(flightsByTier).forEach(([tier, flights]) => {
+              if (flights.length > 0) {
+                const prices = flights.map(f => f.price.amount);
+                console.log(`${tier.charAt(0).toUpperCase() + tier.slice(1)} Class (${flights.length} flights):`);
+                console.log(`  Price Range: $${Math.min(...prices).toFixed(2)} - $${Math.max(...prices).toFixed(2)}`);
+                console.log(`  IDs: ${flights.map(f => f.amadeusId).join(', ')}`);
+              }
+            });
+
+            console.log('\nUnique airlines:', [...new Set(transformedResults.map(r => r.outbound.segments[0].airline.code))]);
+            console.log('Overall price range:', {
+              min: Math.min(...transformedResults.map(r => r.price.amount)),
+              max: Math.max(...transformedResults.map(r => r.price.amount)),
+              currency: transformedResults[0].price.currency
+            });
+          }
           
           flightOffers = transformedResults;
         } else {
@@ -126,7 +193,7 @@ router.post('/', async (req: Request, res: Response) => {
           ...departureLocation,
           airport: departureLocation.code
         },
-        destinations: destinations.map(dest => ({
+        destinations: destinations.map((dest: Destination) => ({
           ...dest,
           airport: dest.code
         })),

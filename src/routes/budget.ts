@@ -157,7 +157,7 @@ router.post('/calculate-budget', async (req: Request, res: Response) => {
       country: destinationCity.value,
       travelers: travelers,
       currency: String(req.body.currency || 'USD'),
-      budget: req.body.budgetLimit ? parseInt(String(req.body.budgetLimit)) : undefined,
+      budget: req.body.budgetLimit ? parseFloat(String(req.body.budgetLimit)) : undefined,
       startDate: String(req.body.startDate),
       endDate: String(req.body.endDate)
     };
