@@ -1,0 +1,1475 @@
+[2024-12-31T19:34:20.230Z] 
+=== Amadeus Flight Search Request ===
+[2024-12-31T19:34:20.231Z] Raw params: {
+  "originLocationCode": "JFK",
+  "destinationLocationCode": "AMS",
+  "departureDate": "2024-12-31",
+  "returnDate": "2025-01-10",
+  "adults": 3,
+  "travelClass": "ECONOMY"
+}
+[2024-12-31T19:34:21.232Z] Final request params: {
+  "originLocationCode": "JFK",
+  "destinationLocationCode": "AMS",
+  "departureDate": "2024-12-31",
+  "returnDate": "2025-01-10",
+  "adults": 3,
+  "travelClass": "ECONOMY",
+  "max": 50,
+  "currencyCode": "USD",
+  "nonStop": false
+}
+[2024-12-31T19:34:21.233Z] Request URL: https://test.api.amadeus.com/v2/shopping/flight-offers
+[2024-12-31T19:34:21.233Z] Authorization: Bearer 7AoJVuojqA...
+[2024-12-31T19:34:29.303Z] 
+=== Amadeus Flight Search Response ===
+[2024-12-31T19:34:29.304Z] Status: 200
+[2024-12-31T19:34:29.304Z] Headers: {
+  "date": "Tue, 31 Dec 2024 19:34:29 GMT",
+  "content-type": "application/vnd.amadeus+json",
+  "transfer-encoding": "chunked",
+  "connection": "keep-alive",
+  "ama-internal-message-version": "14.1",
+  "ama-request-id": "000129RREPDID9",
+  "ama-gateway-request-id": "rrt-0d3ab56aa9111fc8f-a-de-2728685-275331482-1",
+  "access-control-allow-headers": "origin, x-requested-with, accept, Content-Type, Authorization",
+  "access-control-max-age": "3628800",
+  "access-control-allow-methods": "*",
+  "server": "Amadeus",
+  "access-control-allow-origin": "*"
+}
+[2024-12-31T19:34:29.304Z] 
+=== Amadeus Search Results ===
+[2024-12-31T19:34:29.305Z] Total results: 50
+[2024-12-31T19:34:29.305Z] First result: {
+  "type": "flight-offer",
+  "id": "1",
+  "source": "GDS",
+  "instantTicketingRequired": false,
+  "nonHomogeneous": false,
+  "oneWay": false,
+  "isUpsellOffer": false,
+  "lastTicketingDate": "2024-12-31",
+  "lastTicketingDateTime": "2024-12-31",
+  "numberOfBookableSeats": 7,
+  "itineraries": [
+    {
+      "duration": "PT7H39M",
+      "segments": [
+        {
+          "departure": {
+            "iataCode": "JFK",
+            "terminal": "5",
+            "at": "2024-12-31T21:56:00"
+          },
+          "arrival": {
+            "iataCode": "AMS",
+            "at": "2025-01-01T11:35:00"
+          },
+          "carrierCode": "B6",
+          "number": "2288",
+          "aircraft": {
+            "code": "32Q"
+          },
+          "operating": {
+            "carrierCode": "B6"
+          },
+          "duration": "PT7H39M",
+          "id": "14",
+          "numberOfStops": 0,
+          "blacklistedInEU": false
+        }
+      ]
+    },
+    {
+      "duration": "PT8H37M",
+      "segments": [
+        {
+          "departure": {
+            "iataCode": "AMS",
+            "at": "2025-01-10T13:40:00"
+          },
+          "arrival": {
+            "iataCode": "JFK",
+            "terminal": "5",
+            "at": "2025-01-10T16:17:00"
+          },
+          "carrierCode": "B6",
+          "number": "2289",
+          "aircraft": {
+            "code": "32Q"
+          },
+          "operating": {
+            "carrierCode": "B6"
+          },
+          "duration": "PT8H37M",
+          "id": "49",
+          "numberOfStops": 0,
+          "blacklistedInEU": false
+        }
+      ]
+    }
+  ],
+  "price": {
+    "currency": "USD",
+    "total": "1445.73",
+    "base": "48.00",
+    "fees": [
+      {
+        "amount": "0.00",
+        "type": "SUPPLIER"
+      },
+      {
+        "amount": "0.00",
+        "type": "TICKETING"
+      }
+    ],
+    "grandTotal": "1445.73",
+    "additionalServices": [
+      {
+        "amount": "135.00",
+        "type": "CHECKED_BAGS"
+      }
+    ]
+  },
+  "pricingOptions": {
+    "fareType": [
+      "PUBLISHED"
+    ],
+    "includedCheckedBagsOnly": false
+  },
+  "validatingAirlineCodes": [
+    "B6"
+  ],
+  "travelerPricings": [
+    {
+      "travelerId": "1",
+      "fareOption": "STANDARD",
+      "travelerType": "ADULT",
+      "price": {
+        "currency": "USD",
+        "total": "481.91",
+        "base": "16.00"
+      },
+      "fareDetailsBySegment": [
+        {
+          "segmentId": "14",
+          "cabin": "ECONOMY",
+          "fareBasis": "SL06BZL1",
+          "brandedFare": "DN",
+          "brandedFareLabel": "BLUE BASIC",
+          "class": "L",
+          "includedCheckedBags": {
+            "quantity": 0
+          },
+          "amenities": [
+            {
+              "description": "CHECKED BAG FIRST",
+              "isChargeable": true,
+              "amenityType": "BAGGAGE",
+              "amenityProvider": {
+                "name": "BrandedFare"
+              }
+            },
+            {
+              "description": "CHECKED BAG SECOND",
+              "isChargeable": true,
+              "amenityType": "BAGGAGE",
+              "amenityProvider": {
+                "name": "BrandedFare"
+              }
+            },
+            {
+              "description": "EXTRA LEGROOM",
+              "isChargeable": true,
+              "amenityType": "PRE_RESERVED_SEAT",
+              "amenityProvider": {
+                "name": "BrandedFare"
+              }
+            },
+            {
+              "description": "ADVANCE SEAT SELECTION",
+              "isChargeable": true,
+              "amenityType": "PRE_RESERVED_SEAT",
+              "amenityProvider": {
+                "name": "BrandedFare"
+              }
+            },
+            {
+              "description": "SNACK",
+              "isChargeable": false,
+              "amenityType": "MEAL",
+              "amenityProvider": {
+                "name": "BrandedFare"
+              }
+            },
+            {
+              "description": "ALCOHOLIC DRINK",
+              "isChargeable": false,
+              "amenityType": "MEAL",
+              "amenityProvider": {
+                "name": "BrandedFare"
+              }
+            },
+            {
+              "description": "NON ALCOHOLIC DRINK",
+              "isChargeable": false,
+              "amenityType": "MEAL",
+              "amenityProvider": {
+                "name": "BrandedFare"
+              }
+            }
+          ]
+        },
+        {
+          "segmentId": "49",
+          "cabin": "ECONOMY",
+          "fareBasis": "PL06BZL1",
+          "brandedFare": "DN",
+          "brandedFareLabel": "BLUE BASIC",
+          "class": "L",
+          "includedCheckedBags": {
+            "quantity": 0
+          },
+          "amenities": [
+            {
+              "description": "CHECKED BAG FIRST",
+              "isChargeable": true,
+              "amenityType": "BAGGAGE",
+              "amenityProvider": {
+                "name": "BrandedFare"
+              }
+            },
+            {
+              "description": "CHECKED BAG SECOND",
+              "isChargeable": true,
+              "amenityType": "BAGGAGE",
+              "amenityProvider": {
+                "name": "BrandedFare"
+              }
+            },
+            {
+              "description": "EXTRA LEGROOM",
+              "isChargeable": true,
+              "amenityType": "PRE_RESERVED_SEAT",
+              "amenityProvider": {
+                "name": "BrandedFare"
+              }
+            },
+            {
+              "description": "ADVANCE SEAT SELECTION",
+              "isChargeable": true,
+              "amenityType": "PRE_RESERVED_SEAT",
+              "amenityProvider": {
+                "name": "BrandedFare"
+              }
+            },
+            {
+              "description": "SNACK",
+              "isChargeable": false,
+              "amenityType": "MEAL",
+              "amenityProvider": {
+                "name": "BrandedFare"
+              }
+            },
+            {
+              "description": "ALCOHOLIC DRINK",
+              "isChargeable": false,
+              "amenityType": "MEAL",
+              "amenityProvider": {
+                "name": "BrandedFare"
+              }
+            },
+            {
+              "description": "NON ALCOHOLIC DRINK",
+              "isChargeable": false,
+              "amenityType": "MEAL",
+              "amenityProvider": {
+                "name": "BrandedFare"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "travelerId": "2",
+      "fareOption": "STANDARD",
+      "travelerType": "ADULT",
+      "price": {
+        "currency": "USD",
+        "total": "481.91",
+        "base": "16.00"
+      },
+      "fareDetailsBySegment": [
+        {
+          "segmentId": "14",
+          "cabin": "ECONOMY",
+          "fareBasis": "SL06BZL1",
+          "brandedFare": "DN",
+          "brandedFareLabel": "BLUE BASIC",
+          "class": "L",
+          "includedCheckedBags": {
+            "quantity": 0
+          },
+          "amenities": [
+            {
+              "description": "CHECKED BAG FIRST",
+              "isChargeable": true,
+              "amenityType": "BAGGAGE",
+              "amenityProvider": {
+                "name": "BrandedFare"
+              }
+            },
+            {
+              "description": "CHECKED BAG SECOND",
+              "isChargeable": true,
+              "amenityType": "BAGGAGE",
+              "amenityProvider": {
+                "name": "BrandedFare"
+              }
+            },
+            {
+              "description": "EXTRA LEGROOM",
+              "isChargeable": true,
+              "amenityType": "PRE_RESERVED_SEAT",
+              "amenityProvider": {
+                "name": "BrandedFare"
+              }
+            },
+            {
+              "description": "ADVANCE SEAT SELECTION",
+              "isChargeable": true,
+              "amenityType": "PRE_RESERVED_SEAT",
+              "amenityProvider": {
+                "name": "BrandedFare"
+              }
+            },
+            {
+              "description": "SNACK",
+              "isChargeable": false,
+              "amenityType": "MEAL",
+              "amenityProvider": {
+                "name": "BrandedFare"
+              }
+            },
+            {
+              "description": "ALCOHOLIC DRINK",
+              "isChargeable": false,
+              "amenityType": "MEAL",
+              "amenityProvider": {
+                "name": "BrandedFare"
+              }
+            },
+            {
+              "description": "NON ALCOHOLIC DRINK",
+              "isChargeable": false,
+              "amenityType": "MEAL",
+              "amenityProvider": {
+                "name": "BrandedFare"
+              }
+            }
+          ]
+        },
+        {
+          "segmentId": "49",
+          "cabin": "ECONOMY",
+          "fareBasis": "PL06BZL1",
+          "brandedFare": "DN",
+          "brandedFareLabel": "BLUE BASIC",
+          "class": "L",
+          "includedCheckedBags": {
+            "quantity": 0
+          },
+          "amenities": [
+            {
+              "description": "CHECKED BAG FIRST",
+              "isChargeable": true,
+              "amenityType": "BAGGAGE",
+              "amenityProvider": {
+                "name": "BrandedFare"
+              }
+            },
+            {
+              "description": "CHECKED BAG SECOND",
+              "isChargeable": true,
+              "amenityType": "BAGGAGE",
+              "amenityProvider": {
+                "name": "BrandedFare"
+              }
+            },
+            {
+              "description": "EXTRA LEGROOM",
+              "isChargeable": true,
+              "amenityType": "PRE_RESERVED_SEAT",
+              "amenityProvider": {
+                "name": "BrandedFare"
+              }
+            },
+            {
+              "description": "ADVANCE SEAT SELECTION",
+              "isChargeable": true,
+              "amenityType": "PRE_RESERVED_SEAT",
+              "amenityProvider": {
+                "name": "BrandedFare"
+              }
+            },
+            {
+              "description": "SNACK",
+              "isChargeable": false,
+              "amenityType": "MEAL",
+              "amenityProvider": {
+                "name": "BrandedFare"
+              }
+            },
+            {
+              "description": "ALCOHOLIC DRINK",
+              "isChargeable": false,
+              "amenityType": "MEAL",
+              "amenityProvider": {
+                "name": "BrandedFare"
+              }
+            },
+            {
+              "description": "NON ALCOHOLIC DRINK",
+              "isChargeable": false,
+              "amenityType": "MEAL",
+              "amenityProvider": {
+                "name": "BrandedFare"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "travelerId": "3",
+      "fareOption": "STANDARD",
+      "travelerType": "ADULT",
+      "price": {
+        "currency": "USD",
+        "total": "481.91",
+        "base": "16.00"
+      },
+      "fareDetailsBySegment": [
+        {
+          "segmentId": "14",
+          "cabin": "ECONOMY",
+          "fareBasis": "SL06BZL1",
+          "brandedFare": "DN",
+          "brandedFareLabel": "BLUE BASIC",
+          "class": "L",
+          "includedCheckedBags": {
+            "quantity": 0
+          },
+          "amenities": [
+            {
+              "description": "CHECKED BAG FIRST",
+              "isChargeable": true,
+              "amenityType": "BAGGAGE",
+              "amenityProvider": {
+                "name": "BrandedFare"
+              }
+            },
+            {
+              "description": "CHECKED BAG SECOND",
+              "isChargeable": true,
+              "amenityType": "BAGGAGE",
+              "amenityProvider": {
+                "name": "BrandedFare"
+              }
+            },
+            {
+              "description": "EXTRA LEGROOM",
+              "isChargeable": true,
+              "amenityType": "PRE_RESERVED_SEAT",
+              "amenityProvider": {
+                "name": "BrandedFare"
+              }
+            },
+            {
+              "description": "ADVANCE SEAT SELECTION",
+              "isChargeable": true,
+              "amenityType": "PRE_RESERVED_SEAT",
+              "amenityProvider": {
+                "name": "BrandedFare"
+              }
+            },
+            {
+              "description": "SNACK",
+              "isChargeable": false,
+              "amenityType": "MEAL",
+              "amenityProvider": {
+                "name": "BrandedFare"
+              }
+            },
+            {
+              "description": "ALCOHOLIC DRINK",
+              "isChargeable": false,
+              "amenityType": "MEAL",
+              "amenityProvider": {
+                "name": "BrandedFare"
+              }
+            },
+            {
+              "description": "NON ALCOHOLIC DRINK",
+              "isChargeable": false,
+              "amenityType": "MEAL",
+              "amenityProvider": {
+                "name": "BrandedFare"
+              }
+            }
+          ]
+        },
+        {
+          "segmentId": "49",
+          "cabin": "ECONOMY",
+          "fareBasis": "PL06BZL1",
+          "brandedFare": "DN",
+          "brandedFareLabel": "BLUE BASIC",
+          "class": "L",
+          "includedCheckedBags": {
+            "quantity": 0
+          },
+          "amenities": [
+            {
+              "description": "CHECKED BAG FIRST",
+              "isChargeable": true,
+              "amenityType": "BAGGAGE",
+              "amenityProvider": {
+                "name": "BrandedFare"
+              }
+            },
+            {
+              "description": "CHECKED BAG SECOND",
+              "isChargeable": true,
+              "amenityType": "BAGGAGE",
+              "amenityProvider": {
+                "name": "BrandedFare"
+              }
+            },
+            {
+              "description": "EXTRA LEGROOM",
+              "isChargeable": true,
+              "amenityType": "PRE_RESERVED_SEAT",
+              "amenityProvider": {
+                "name": "BrandedFare"
+              }
+            },
+            {
+              "description": "ADVANCE SEAT SELECTION",
+              "isChargeable": true,
+              "amenityType": "PRE_RESERVED_SEAT",
+              "amenityProvider": {
+                "name": "BrandedFare"
+              }
+            },
+            {
+              "description": "SNACK",
+              "isChargeable": false,
+              "amenityType": "MEAL",
+              "amenityProvider": {
+                "name": "BrandedFare"
+              }
+            },
+            {
+              "description": "ALCOHOLIC DRINK",
+              "isChargeable": false,
+              "amenityType": "MEAL",
+              "amenityProvider": {
+                "name": "BrandedFare"
+              }
+            },
+            {
+              "description": "NON ALCOHOLIC DRINK",
+              "isChargeable": false,
+              "amenityType": "MEAL",
+              "amenityProvider": {
+                "name": "BrandedFare"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+[2024-12-31T19:34:29.305Z] Meta: {
+  "count": 50,
+  "links": {
+    "self": "https://test.api.amadeus.com/v2/shopping/flight-offers?originLocationCode=JFK&destinationLocationCode=AMS&departureDate=2024-12-31&returnDate=2025-01-10&adults=3&travelClass=ECONOMY&max=50&currencyCode=USD&nonStop=false"
+  }
+}
+[2024-12-31T19:34:29.306Z] Dictionaries: {
+  "locations": {
+    "ZRH": {
+      "cityCode": "ZRH",
+      "countryCode": "CH"
+    },
+    "FCO": {
+      "cityCode": "ROM",
+      "countryCode": "IT"
+    },
+    "FRA": {
+      "cityCode": "FRA",
+      "countryCode": "DE"
+    },
+    "CDG": {
+      "cityCode": "PAR",
+      "countryCode": "FR"
+    },
+    "AMS": {
+      "cityCode": "AMS",
+      "countryCode": "NL"
+    },
+    "LHR": {
+      "cityCode": "LON",
+      "countryCode": "GB"
+    },
+    "YYZ": {
+      "cityCode": "YTO",
+      "countryCode": "CA"
+    },
+    "MAN": {
+      "cityCode": "MAN",
+      "countryCode": "GB"
+    },
+    "KEF": {
+      "cityCode": "REK",
+      "countryCode": "IS"
+    },
+    "JFK": {
+      "cityCode": "NYC",
+      "countryCode": "US"
+    }
+  },
+  "aircraft": {
+    "223": "AIRBUS  A220-300",
+    "319": "AIRBUS A319",
+    "320": "AIRBUS A320",
+    "333": "AIRBUS A330-300",
+    "339": "AIRBUS A330-900NEO PASSENGER",
+    "343": "AIRBUS A340-300",
+    "346": "AIRBUS A340-600",
+    "359": "AIRBUS A350-900",
+    "781": "BOEING 787-10",
+    "788": "BOEING 787-8",
+    "789": "BOEING 787-9",
+    "E75": "EMBRAER 175",
+    "32A": "AIRBUS A320 (SHARKLETS)",
+    "7M8": "BOEING 737 MAX 8",
+    "73H": "BOEING 737-800 (WINGLETS)",
+    "32N": "AIRBUS A320NEO",
+    "32Q": "AIRBUS A321NEO",
+    "77W": "BOEING 777-300ER",
+    "76W": "BOEING 767-300 (WINGLETS)",
+    "73W": "BOEING 737-700 (WINGLETS)",
+    "E90": "EMBRAER 190"
+  },
+  "currencies": {
+    "USD": "US DOLLAR"
+  },
+  "carriers": {
+    "KL": "KLM ROYAL DUTCH AIRLINES",
+    "AC": "AIR CANADA",
+    "FI": "ICELANDAIR",
+    "B6": "JETBLUE AIRWAYS",
+    "AF": "AIR FRANCE",
+    "DL": "DELTA AIR LINES",
+    "AZ": "ITA AIRWAYS",
+    "UA": "UNITED AIRLINES",
+    "LH": "LUFTHANSA",
+    "LX": "SWISS INTERNATIONAL AIR LINES",
+    "VS": "VIRGIN ATLANTIC"
+  }
+}
+[2024-12-31T19:34:29.731Z] Error fetching airline info: AxiosError: Request failed with status code 429
+[2024-12-31T19:34:29.731Z] 
+=== Determining Price Tier ===
+[2024-12-31T19:34:29.732Z] Total Price: $2295.63
+[2024-12-31T19:34:29.732Z] Number of Travelers: 1
+[2024-12-31T19:34:29.732Z] Cabin Class: ECONOMY
+[2024-12-31T19:34:29.733Z] Price per traveler: $2295.63
+[2024-12-31T19:34:29.733Z] Price per traveler $2295.63 > $2000 -> PREMIUM
+[2024-12-31T19:34:29.733Z] Initial tier based on price per traveler: PREMIUM
+[2024-12-31T19:34:29.733Z] Final categorization: PREMIUM
+[2024-12-31T19:34:29.734Z] Price breakdown:
+      Total price: $2295.63
+      Per traveler: $2295.63
+      Cabin class: ECONOMY
+      Tier: PREMIUM
+    
+[2024-12-31T19:34:29.735Z] Error fetching airline info: AxiosError: Request failed with status code 429
+[2024-12-31T19:34:29.736Z] 
+=== Determining Price Tier ===
+[2024-12-31T19:34:29.736Z] Total Price: $2277.93
+[2024-12-31T19:34:29.736Z] Number of Travelers: 1
+[2024-12-31T19:34:29.737Z] Cabin Class: ECONOMY
+[2024-12-31T19:34:29.737Z] Price per traveler: $2277.93
+[2024-12-31T19:34:29.737Z] Price per traveler $2277.93 > $2000 -> PREMIUM
+[2024-12-31T19:34:29.737Z] Initial tier based on price per traveler: PREMIUM
+[2024-12-31T19:34:29.738Z] Final categorization: PREMIUM
+[2024-12-31T19:34:29.738Z] Price breakdown:
+      Total price: $2277.93
+      Per traveler: $2277.93
+      Cabin class: ECONOMY
+      Tier: PREMIUM
+    
+[2024-12-31T19:34:29.739Z] Error fetching airline info: AxiosError: Request failed with status code 429
+[2024-12-31T19:34:29.740Z] 
+=== Determining Price Tier ===
+[2024-12-31T19:34:29.740Z] Total Price: $2277.93
+[2024-12-31T19:34:29.740Z] Number of Travelers: 1
+[2024-12-31T19:34:29.741Z] Cabin Class: ECONOMY
+[2024-12-31T19:34:29.741Z] Price per traveler: $2277.93
+[2024-12-31T19:34:29.741Z] Price per traveler $2277.93 > $2000 -> PREMIUM
+[2024-12-31T19:34:29.741Z] Initial tier based on price per traveler: PREMIUM
+[2024-12-31T19:34:29.741Z] Final categorization: PREMIUM
+[2024-12-31T19:34:29.741Z] Price breakdown:
+      Total price: $2277.93
+      Per traveler: $2277.93
+      Cabin class: ECONOMY
+      Tier: PREMIUM
+    
+[2024-12-31T19:34:29.747Z] Error fetching airline info: AxiosError: Request failed with status code 429
+[2024-12-31T19:34:29.747Z] 
+=== Determining Price Tier ===
+[2024-12-31T19:34:29.747Z] Total Price: $1673.73
+[2024-12-31T19:34:29.748Z] Number of Travelers: 1
+[2024-12-31T19:34:29.748Z] Cabin Class: ECONOMY
+[2024-12-31T19:34:29.748Z] Price per traveler: $1673.73
+[2024-12-31T19:34:29.748Z] $800 < Price per traveler $1673.73 <= $2000 -> MEDIUM
+[2024-12-31T19:34:29.749Z] Initial tier based on price per traveler: MEDIUM
+[2024-12-31T19:34:29.749Z] Final categorization: MEDIUM
+[2024-12-31T19:34:29.749Z] Price breakdown:
+      Total price: $1673.73
+      Per traveler: $1673.73
+      Cabin class: ECONOMY
+      Tier: MEDIUM
+    
+[2024-12-31T19:34:29.751Z] Error fetching airline info: AxiosError: Request failed with status code 429
+[2024-12-31T19:34:29.751Z] 
+=== Determining Price Tier ===
+[2024-12-31T19:34:29.751Z] Total Price: $2286.63
+[2024-12-31T19:34:29.751Z] Number of Travelers: 1
+[2024-12-31T19:34:29.751Z] Cabin Class: ECONOMY
+[2024-12-31T19:34:29.752Z] Price per traveler: $2286.63
+[2024-12-31T19:34:29.752Z] Price per traveler $2286.63 > $2000 -> PREMIUM
+[2024-12-31T19:34:29.752Z] Initial tier based on price per traveler: PREMIUM
+[2024-12-31T19:34:29.752Z] Final categorization: PREMIUM
+[2024-12-31T19:34:29.753Z] Price breakdown:
+      Total price: $2286.63
+      Per traveler: $2286.63
+      Cabin class: ECONOMY
+      Tier: PREMIUM
+    
+[2024-12-31T19:34:29.754Z] Error fetching airline info: AxiosError: Request failed with status code 429
+[2024-12-31T19:34:29.754Z] 
+=== Determining Price Tier ===
+[2024-12-31T19:34:29.754Z] Total Price: $2306.13
+[2024-12-31T19:34:29.755Z] Number of Travelers: 1
+[2024-12-31T19:34:29.755Z] Cabin Class: ECONOMY
+[2024-12-31T19:34:29.755Z] Price per traveler: $2306.13
+[2024-12-31T19:34:29.756Z] Price per traveler $2306.13 > $2000 -> PREMIUM
+[2024-12-31T19:34:29.756Z] Initial tier based on price per traveler: PREMIUM
+[2024-12-31T19:34:29.756Z] Final categorization: PREMIUM
+[2024-12-31T19:34:29.756Z] Price breakdown:
+      Total price: $2306.13
+      Per traveler: $2306.13
+      Cabin class: ECONOMY
+      Tier: PREMIUM
+    
+[2024-12-31T19:34:29.758Z] Error fetching airline info: AxiosError: Request failed with status code 429
+[2024-12-31T19:34:29.758Z] 
+=== Determining Price Tier ===
+[2024-12-31T19:34:29.759Z] Total Price: $2306.13
+[2024-12-31T19:34:29.759Z] Number of Travelers: 1
+[2024-12-31T19:34:29.759Z] Cabin Class: ECONOMY
+[2024-12-31T19:34:29.759Z] Price per traveler: $2306.13
+[2024-12-31T19:34:29.759Z] Price per traveler $2306.13 > $2000 -> PREMIUM
+[2024-12-31T19:34:29.759Z] Initial tier based on price per traveler: PREMIUM
+[2024-12-31T19:34:29.760Z] Final categorization: PREMIUM
+[2024-12-31T19:34:29.760Z] Price breakdown:
+      Total price: $2306.13
+      Per traveler: $2306.13
+      Cabin class: ECONOMY
+      Tier: PREMIUM
+    
+[2024-12-31T19:34:29.761Z] Error fetching airline info: AxiosError: Request failed with status code 429
+[2024-12-31T19:34:29.761Z] 
+=== Determining Price Tier ===
+[2024-12-31T19:34:29.761Z] Total Price: $2355.93
+[2024-12-31T19:34:29.762Z] Number of Travelers: 1
+[2024-12-31T19:34:29.762Z] Cabin Class: ECONOMY
+[2024-12-31T19:34:29.762Z] Price per traveler: $2355.93
+[2024-12-31T19:34:29.762Z] Price per traveler $2355.93 > $2000 -> PREMIUM
+[2024-12-31T19:34:29.762Z] Initial tier based on price per traveler: PREMIUM
+[2024-12-31T19:34:29.762Z] Final categorization: PREMIUM
+[2024-12-31T19:34:29.762Z] Price breakdown:
+      Total price: $2355.93
+      Per traveler: $2355.93
+      Cabin class: ECONOMY
+      Tier: PREMIUM
+    
+[2024-12-31T19:34:29.766Z] Error fetching airline info: AxiosError: Request failed with status code 429
+[2024-12-31T19:34:29.766Z] 
+=== Determining Price Tier ===
+[2024-12-31T19:34:29.766Z] Total Price: $2355.93
+[2024-12-31T19:34:29.766Z] Number of Travelers: 1
+[2024-12-31T19:34:29.766Z] Cabin Class: ECONOMY
+[2024-12-31T19:34:29.767Z] Price per traveler: $2355.93
+[2024-12-31T19:34:29.767Z] Price per traveler $2355.93 > $2000 -> PREMIUM
+[2024-12-31T19:34:29.767Z] Initial tier based on price per traveler: PREMIUM
+[2024-12-31T19:34:29.767Z] Final categorization: PREMIUM
+[2024-12-31T19:34:29.767Z] Price breakdown:
+      Total price: $2355.93
+      Per traveler: $2355.93
+      Cabin class: ECONOMY
+      Tier: PREMIUM
+    
+[2024-12-31T19:34:29.769Z] Error fetching airline info: AxiosError: Request failed with status code 429
+[2024-12-31T19:34:29.769Z] 
+=== Determining Price Tier ===
+[2024-12-31T19:34:29.769Z] Total Price: $2306.13
+[2024-12-31T19:34:29.769Z] Number of Travelers: 1
+[2024-12-31T19:34:29.770Z] Cabin Class: ECONOMY
+[2024-12-31T19:34:29.770Z] Price per traveler: $2306.13
+[2024-12-31T19:34:29.770Z] Price per traveler $2306.13 > $2000 -> PREMIUM
+[2024-12-31T19:34:29.770Z] Initial tier based on price per traveler: PREMIUM
+[2024-12-31T19:34:29.770Z] Final categorization: PREMIUM
+[2024-12-31T19:34:29.770Z] Price breakdown:
+      Total price: $2306.13
+      Per traveler: $2306.13
+      Cabin class: ECONOMY
+      Tier: PREMIUM
+    
+[2024-12-31T19:34:29.772Z] Error fetching airline info: AxiosError: Request failed with status code 429
+[2024-12-31T19:34:29.772Z] 
+=== Determining Price Tier ===
+[2024-12-31T19:34:29.772Z] Total Price: $2295.63
+[2024-12-31T19:34:29.773Z] Number of Travelers: 1
+[2024-12-31T19:34:29.773Z] Cabin Class: ECONOMY
+[2024-12-31T19:34:29.773Z] Price per traveler: $2295.63
+[2024-12-31T19:34:29.773Z] Price per traveler $2295.63 > $2000 -> PREMIUM
+[2024-12-31T19:34:29.773Z] Initial tier based on price per traveler: PREMIUM
+[2024-12-31T19:34:29.773Z] Final categorization: PREMIUM
+[2024-12-31T19:34:29.773Z] Price breakdown:
+      Total price: $2295.63
+      Per traveler: $2295.63
+      Cabin class: ECONOMY
+      Tier: PREMIUM
+    
+[2024-12-31T19:34:29.775Z] Error fetching airline info: AxiosError: Request failed with status code 429
+[2024-12-31T19:34:29.775Z] 
+=== Determining Price Tier ===
+[2024-12-31T19:34:29.776Z] Total Price: $2355.93
+[2024-12-31T19:34:29.776Z] Number of Travelers: 1
+[2024-12-31T19:34:29.776Z] Cabin Class: ECONOMY
+[2024-12-31T19:34:29.776Z] Price per traveler: $2355.93
+[2024-12-31T19:34:29.776Z] Price per traveler $2355.93 > $2000 -> PREMIUM
+[2024-12-31T19:34:29.776Z] Initial tier based on price per traveler: PREMIUM
+[2024-12-31T19:34:29.776Z] Final categorization: PREMIUM
+[2024-12-31T19:34:29.776Z] Price breakdown:
+      Total price: $2355.93
+      Per traveler: $2355.93
+      Cabin class: ECONOMY
+      Tier: PREMIUM
+    
+[2024-12-31T19:34:29.778Z] Error fetching airline info: AxiosError: Request failed with status code 429
+[2024-12-31T19:34:29.778Z] 
+=== Determining Price Tier ===
+[2024-12-31T19:34:29.778Z] Total Price: $2356.53
+[2024-12-31T19:34:29.779Z] Number of Travelers: 1
+[2024-12-31T19:34:29.779Z] Cabin Class: ECONOMY
+[2024-12-31T19:34:29.779Z] Price per traveler: $2356.53
+[2024-12-31T19:34:29.779Z] Price per traveler $2356.53 > $2000 -> PREMIUM
+[2024-12-31T19:34:29.779Z] Initial tier based on price per traveler: PREMIUM
+[2024-12-31T19:34:29.779Z] Final categorization: PREMIUM
+[2024-12-31T19:34:29.779Z] Price breakdown:
+      Total price: $2356.53
+      Per traveler: $2356.53
+      Cabin class: ECONOMY
+      Tier: PREMIUM
+    
+[2024-12-31T19:34:29.781Z] Error fetching airline info: AxiosError: Request failed with status code 429
+[2024-12-31T19:34:29.781Z] 
+=== Determining Price Tier ===
+[2024-12-31T19:34:29.781Z] Total Price: $2356.53
+[2024-12-31T19:34:29.781Z] Number of Travelers: 1
+[2024-12-31T19:34:29.781Z] Cabin Class: ECONOMY
+[2024-12-31T19:34:29.781Z] Price per traveler: $2356.53
+[2024-12-31T19:34:29.781Z] Price per traveler $2356.53 > $2000 -> PREMIUM
+[2024-12-31T19:34:29.781Z] Initial tier based on price per traveler: PREMIUM
+[2024-12-31T19:34:29.781Z] Final categorization: PREMIUM
+[2024-12-31T19:34:29.782Z] Price breakdown:
+      Total price: $2356.53
+      Per traveler: $2356.53
+      Cabin class: ECONOMY
+      Tier: PREMIUM
+    
+[2024-12-31T19:34:29.782Z] Error fetching airline info: AxiosError: Request failed with status code 429
+[2024-12-31T19:34:29.782Z] 
+=== Determining Price Tier ===
+[2024-12-31T19:34:29.783Z] Total Price: $2277.93
+[2024-12-31T19:34:29.783Z] Number of Travelers: 1
+[2024-12-31T19:34:29.783Z] Cabin Class: ECONOMY
+[2024-12-31T19:34:29.783Z] Price per traveler: $2277.93
+[2024-12-31T19:34:29.783Z] Price per traveler $2277.93 > $2000 -> PREMIUM
+[2024-12-31T19:34:29.783Z] Initial tier based on price per traveler: PREMIUM
+[2024-12-31T19:34:29.783Z] Final categorization: PREMIUM
+[2024-12-31T19:34:29.784Z] Price breakdown:
+      Total price: $2277.93
+      Per traveler: $2277.93
+      Cabin class: ECONOMY
+      Tier: PREMIUM
+    
+[2024-12-31T19:34:29.784Z] Error fetching airline info: AxiosError: Request failed with status code 429
+[2024-12-31T19:34:29.784Z] 
+=== Determining Price Tier ===
+[2024-12-31T19:34:29.785Z] Total Price: $2277.93
+[2024-12-31T19:34:29.785Z] Number of Travelers: 1
+[2024-12-31T19:34:29.785Z] Cabin Class: ECONOMY
+[2024-12-31T19:34:29.785Z] Price per traveler: $2277.93
+[2024-12-31T19:34:29.785Z] Price per traveler $2277.93 > $2000 -> PREMIUM
+[2024-12-31T19:34:29.785Z] Initial tier based on price per traveler: PREMIUM
+[2024-12-31T19:34:29.786Z] Final categorization: PREMIUM
+[2024-12-31T19:34:29.786Z] Price breakdown:
+      Total price: $2277.93
+      Per traveler: $2277.93
+      Cabin class: ECONOMY
+      Tier: PREMIUM
+    
+[2024-12-31T19:34:29.786Z] Error fetching airline info: AxiosError: Request failed with status code 429
+[2024-12-31T19:34:29.787Z] 
+=== Determining Price Tier ===
+[2024-12-31T19:34:29.787Z] Total Price: $2355.93
+[2024-12-31T19:34:29.787Z] Number of Travelers: 1
+[2024-12-31T19:34:29.787Z] Cabin Class: ECONOMY
+[2024-12-31T19:34:29.787Z] Price per traveler: $2355.93
+[2024-12-31T19:34:29.787Z] Price per traveler $2355.93 > $2000 -> PREMIUM
+[2024-12-31T19:34:29.787Z] Initial tier based on price per traveler: PREMIUM
+[2024-12-31T19:34:29.787Z] Final categorization: PREMIUM
+[2024-12-31T19:34:29.787Z] Price breakdown:
+      Total price: $2355.93
+      Per traveler: $2355.93
+      Cabin class: ECONOMY
+      Tier: PREMIUM
+    
+[2024-12-31T19:34:29.788Z] Error fetching airline info: AxiosError: Request failed with status code 429
+[2024-12-31T19:34:29.788Z] 
+=== Determining Price Tier ===
+[2024-12-31T19:34:29.788Z] Total Price: $2318.73
+[2024-12-31T19:34:29.789Z] Number of Travelers: 1
+[2024-12-31T19:34:29.789Z] Cabin Class: ECONOMY
+[2024-12-31T19:34:29.789Z] Price per traveler: $2318.73
+[2024-12-31T19:34:29.789Z] Price per traveler $2318.73 > $2000 -> PREMIUM
+[2024-12-31T19:34:29.789Z] Initial tier based on price per traveler: PREMIUM
+[2024-12-31T19:34:29.789Z] Final categorization: PREMIUM
+[2024-12-31T19:34:29.789Z] Price breakdown:
+      Total price: $2318.73
+      Per traveler: $2318.73
+      Cabin class: ECONOMY
+      Tier: PREMIUM
+    
+[2024-12-31T19:34:29.790Z] Error fetching airline info: AxiosError: Request failed with status code 429
+[2024-12-31T19:34:29.790Z] 
+=== Determining Price Tier ===
+[2024-12-31T19:34:29.790Z] Total Price: $2355.93
+[2024-12-31T19:34:29.790Z] Number of Travelers: 1
+[2024-12-31T19:34:29.790Z] Cabin Class: ECONOMY
+[2024-12-31T19:34:29.790Z] Price per traveler: $2355.93
+[2024-12-31T19:34:29.790Z] Price per traveler $2355.93 > $2000 -> PREMIUM
+[2024-12-31T19:34:29.791Z] Initial tier based on price per traveler: PREMIUM
+[2024-12-31T19:34:29.791Z] Final categorization: PREMIUM
+[2024-12-31T19:34:29.791Z] Price breakdown:
+      Total price: $2355.93
+      Per traveler: $2355.93
+      Cabin class: ECONOMY
+      Tier: PREMIUM
+    
+[2024-12-31T19:34:29.791Z] Error fetching airline info: AxiosError: Request failed with status code 429
+[2024-12-31T19:34:29.792Z] 
+=== Determining Price Tier ===
+[2024-12-31T19:34:29.792Z] Total Price: $2277.93
+[2024-12-31T19:34:29.792Z] Number of Travelers: 1
+[2024-12-31T19:34:29.792Z] Cabin Class: ECONOMY
+[2024-12-31T19:34:29.792Z] Price per traveler: $2277.93
+[2024-12-31T19:34:29.792Z] Price per traveler $2277.93 > $2000 -> PREMIUM
+[2024-12-31T19:34:29.792Z] Initial tier based on price per traveler: PREMIUM
+[2024-12-31T19:34:29.792Z] Final categorization: PREMIUM
+[2024-12-31T19:34:29.792Z] Price breakdown:
+      Total price: $2277.93
+      Per traveler: $2277.93
+      Cabin class: ECONOMY
+      Tier: PREMIUM
+    
+[2024-12-31T19:34:29.793Z] Error fetching airline info: AxiosError: Request failed with status code 429
+[2024-12-31T19:34:29.793Z] 
+=== Determining Price Tier ===
+[2024-12-31T19:34:29.794Z] Total Price: $2306.13
+[2024-12-31T19:34:29.794Z] Number of Travelers: 1
+[2024-12-31T19:34:29.794Z] Cabin Class: ECONOMY
+[2024-12-31T19:34:29.794Z] Price per traveler: $2306.13
+[2024-12-31T19:34:29.794Z] Price per traveler $2306.13 > $2000 -> PREMIUM
+[2024-12-31T19:34:29.794Z] Initial tier based on price per traveler: PREMIUM
+[2024-12-31T19:34:29.794Z] Final categorization: PREMIUM
+[2024-12-31T19:34:29.794Z] Price breakdown:
+      Total price: $2306.13
+      Per traveler: $2306.13
+      Cabin class: ECONOMY
+      Tier: PREMIUM
+    
+[2024-12-31T19:34:29.795Z] Error fetching airline info: AxiosError: Request failed with status code 429
+[2024-12-31T19:34:29.795Z] 
+=== Determining Price Tier ===
+[2024-12-31T19:34:29.795Z] Total Price: $2355.93
+[2024-12-31T19:34:29.795Z] Number of Travelers: 1
+[2024-12-31T19:34:29.796Z] Cabin Class: ECONOMY
+[2024-12-31T19:34:29.796Z] Price per traveler: $2355.93
+[2024-12-31T19:34:29.796Z] Price per traveler $2355.93 > $2000 -> PREMIUM
+[2024-12-31T19:34:29.796Z] Initial tier based on price per traveler: PREMIUM
+[2024-12-31T19:34:29.797Z] Final categorization: PREMIUM
+[2024-12-31T19:34:29.797Z] Price breakdown:
+      Total price: $2355.93
+      Per traveler: $2355.93
+      Cabin class: ECONOMY
+      Tier: PREMIUM
+    
+[2024-12-31T19:34:29.798Z] Error fetching airline info: AxiosError: Request failed with status code 429
+[2024-12-31T19:34:29.798Z] 
+=== Determining Price Tier ===
+[2024-12-31T19:34:29.798Z] Total Price: $2306.13
+[2024-12-31T19:34:29.798Z] Number of Travelers: 1
+[2024-12-31T19:34:29.798Z] Cabin Class: ECONOMY
+[2024-12-31T19:34:29.798Z] Price per traveler: $2306.13
+[2024-12-31T19:34:29.798Z] Price per traveler $2306.13 > $2000 -> PREMIUM
+[2024-12-31T19:34:29.799Z] Initial tier based on price per traveler: PREMIUM
+[2024-12-31T19:34:29.799Z] Final categorization: PREMIUM
+[2024-12-31T19:34:29.799Z] Price breakdown:
+      Total price: $2306.13
+      Per traveler: $2306.13
+      Cabin class: ECONOMY
+      Tier: PREMIUM
+    
+[2024-12-31T19:34:29.800Z] Error fetching airline info: AxiosError: Request failed with status code 429
+[2024-12-31T19:34:29.800Z] 
+=== Determining Price Tier ===
+[2024-12-31T19:34:29.800Z] Total Price: $2286.63
+[2024-12-31T19:34:29.800Z] Number of Travelers: 1
+[2024-12-31T19:34:29.800Z] Cabin Class: ECONOMY
+[2024-12-31T19:34:29.800Z] Price per traveler: $2286.63
+[2024-12-31T19:34:29.801Z] Price per traveler $2286.63 > $2000 -> PREMIUM
+[2024-12-31T19:34:29.801Z] Initial tier based on price per traveler: PREMIUM
+[2024-12-31T19:34:29.801Z] Final categorization: PREMIUM
+[2024-12-31T19:34:29.801Z] Price breakdown:
+      Total price: $2286.63
+      Per traveler: $2286.63
+      Cabin class: ECONOMY
+      Tier: PREMIUM
+    
+[2024-12-31T19:34:29.802Z] Error fetching airline info: AxiosError: Request failed with status code 429
+[2024-12-31T19:34:29.802Z] 
+=== Determining Price Tier ===
+[2024-12-31T19:34:29.802Z] Total Price: $2355.93
+[2024-12-31T19:34:29.803Z] Number of Travelers: 1
+[2024-12-31T19:34:29.803Z] Cabin Class: ECONOMY
+[2024-12-31T19:34:29.803Z] Price per traveler: $2355.93
+[2024-12-31T19:34:29.803Z] Price per traveler $2355.93 > $2000 -> PREMIUM
+[2024-12-31T19:34:29.803Z] Initial tier based on price per traveler: PREMIUM
+[2024-12-31T19:34:29.803Z] Final categorization: PREMIUM
+[2024-12-31T19:34:29.803Z] Price breakdown:
+      Total price: $2355.93
+      Per traveler: $2355.93
+      Cabin class: ECONOMY
+      Tier: PREMIUM
+    
+[2024-12-31T19:34:29.804Z] Error fetching airline info: AxiosError: Request failed with status code 429
+[2024-12-31T19:34:29.804Z] 
+=== Determining Price Tier ===
+[2024-12-31T19:34:29.804Z] Total Price: $2286.63
+[2024-12-31T19:34:29.805Z] Number of Travelers: 1
+[2024-12-31T19:34:29.805Z] Cabin Class: ECONOMY
+[2024-12-31T19:34:29.805Z] Price per traveler: $2286.63
+[2024-12-31T19:34:29.805Z] Price per traveler $2286.63 > $2000 -> PREMIUM
+[2024-12-31T19:34:29.805Z] Initial tier based on price per traveler: PREMIUM
+[2024-12-31T19:34:29.805Z] Final categorization: PREMIUM
+[2024-12-31T19:34:29.805Z] Price breakdown:
+      Total price: $2286.63
+      Per traveler: $2286.63
+      Cabin class: ECONOMY
+      Tier: PREMIUM
+    
+[2024-12-31T19:34:29.806Z] Error fetching airline info: AxiosError: Request failed with status code 429
+[2024-12-31T19:34:29.806Z] 
+=== Determining Price Tier ===
+[2024-12-31T19:34:29.806Z] Total Price: $2306.13
+[2024-12-31T19:34:29.806Z] Number of Travelers: 1
+[2024-12-31T19:34:29.806Z] Cabin Class: ECONOMY
+[2024-12-31T19:34:29.806Z] Price per traveler: $2306.13
+[2024-12-31T19:34:29.806Z] Price per traveler $2306.13 > $2000 -> PREMIUM
+[2024-12-31T19:34:29.806Z] Initial tier based on price per traveler: PREMIUM
+[2024-12-31T19:34:29.806Z] Final categorization: PREMIUM
+[2024-12-31T19:34:29.806Z] Price breakdown:
+      Total price: $2306.13
+      Per traveler: $2306.13
+      Cabin class: ECONOMY
+      Tier: PREMIUM
+    
+[2024-12-31T19:34:29.808Z] Error fetching airline info: AxiosError: Request failed with status code 429
+[2024-12-31T19:34:29.808Z] 
+=== Determining Price Tier ===
+[2024-12-31T19:34:29.808Z] Total Price: $2355.93
+[2024-12-31T19:34:29.808Z] Number of Travelers: 1
+[2024-12-31T19:34:29.808Z] Cabin Class: ECONOMY
+[2024-12-31T19:34:29.808Z] Price per traveler: $2355.93
+[2024-12-31T19:34:29.808Z] Price per traveler $2355.93 > $2000 -> PREMIUM
+[2024-12-31T19:34:29.808Z] Initial tier based on price per traveler: PREMIUM
+[2024-12-31T19:34:29.809Z] Final categorization: PREMIUM
+[2024-12-31T19:34:29.809Z] Price breakdown:
+      Total price: $2355.93
+      Per traveler: $2355.93
+      Cabin class: ECONOMY
+      Tier: PREMIUM
+    
+[2024-12-31T19:34:29.810Z] Error fetching airline info: AxiosError: Request failed with status code 429
+[2024-12-31T19:34:29.810Z] 
+=== Determining Price Tier ===
+[2024-12-31T19:34:29.810Z] Total Price: $2306.13
+[2024-12-31T19:34:29.810Z] Number of Travelers: 1
+[2024-12-31T19:34:29.810Z] Cabin Class: ECONOMY
+[2024-12-31T19:34:29.811Z] Price per traveler: $2306.13
+[2024-12-31T19:34:29.811Z] Price per traveler $2306.13 > $2000 -> PREMIUM
+[2024-12-31T19:34:29.811Z] Initial tier based on price per traveler: PREMIUM
+[2024-12-31T19:34:29.811Z] Final categorization: PREMIUM
+[2024-12-31T19:34:29.811Z] Price breakdown:
+      Total price: $2306.13
+      Per traveler: $2306.13
+      Cabin class: ECONOMY
+      Tier: PREMIUM
+    
+[2024-12-31T19:34:29.812Z] Error fetching airline info: AxiosError: Request failed with status code 429
+[2024-12-31T19:34:29.813Z] 
+=== Determining Price Tier ===
+[2024-12-31T19:34:29.813Z] Total Price: $2356.53
+[2024-12-31T19:34:29.813Z] Number of Travelers: 1
+[2024-12-31T19:34:29.813Z] Cabin Class: ECONOMY
+[2024-12-31T19:34:29.813Z] Price per traveler: $2356.53
+[2024-12-31T19:34:29.813Z] Price per traveler $2356.53 > $2000 -> PREMIUM
+[2024-12-31T19:34:29.813Z] Initial tier based on price per traveler: PREMIUM
+[2024-12-31T19:34:29.813Z] Final categorization: PREMIUM
+[2024-12-31T19:34:29.813Z] Price breakdown:
+      Total price: $2356.53
+      Per traveler: $2356.53
+      Cabin class: ECONOMY
+      Tier: PREMIUM
+    
+[2024-12-31T19:34:29.820Z] Error fetching airline info: AxiosError: Request failed with status code 429
+[2024-12-31T19:34:29.820Z] 
+=== Determining Price Tier ===
+[2024-12-31T19:34:29.820Z] Total Price: $2355.93
+[2024-12-31T19:34:29.820Z] Number of Travelers: 1
+[2024-12-31T19:34:29.820Z] Cabin Class: ECONOMY
+[2024-12-31T19:34:29.820Z] Price per traveler: $2355.93
+[2024-12-31T19:34:29.821Z] Price per traveler $2355.93 > $2000 -> PREMIUM
+[2024-12-31T19:34:29.821Z] Initial tier based on price per traveler: PREMIUM
+[2024-12-31T19:34:29.821Z] Final categorization: PREMIUM
+[2024-12-31T19:34:29.821Z] Price breakdown:
+      Total price: $2355.93
+      Per traveler: $2355.93
+      Cabin class: ECONOMY
+      Tier: PREMIUM
+    
+[2024-12-31T19:34:29.822Z] Error fetching airline info: AxiosError: Request failed with status code 429
+[2024-12-31T19:34:29.822Z] 
+=== Determining Price Tier ===
+[2024-12-31T19:34:29.822Z] Total Price: $2356.53
+[2024-12-31T19:34:29.822Z] Number of Travelers: 1
+[2024-12-31T19:34:29.822Z] Cabin Class: ECONOMY
+[2024-12-31T19:34:29.823Z] Price per traveler: $2356.53
+[2024-12-31T19:34:29.823Z] Price per traveler $2356.53 > $2000 -> PREMIUM
+[2024-12-31T19:34:29.823Z] Initial tier based on price per traveler: PREMIUM
+[2024-12-31T19:34:29.823Z] Final categorization: PREMIUM
+[2024-12-31T19:34:29.823Z] Price breakdown:
+      Total price: $2356.53
+      Per traveler: $2356.53
+      Cabin class: ECONOMY
+      Tier: PREMIUM
+    
+[2024-12-31T19:34:29.824Z] Error fetching airline info: AxiosError: Request failed with status code 429
+[2024-12-31T19:34:29.824Z] 
+=== Determining Price Tier ===
+[2024-12-31T19:34:29.824Z] Total Price: $2306.73
+[2024-12-31T19:34:29.824Z] Number of Travelers: 1
+[2024-12-31T19:34:29.824Z] Cabin Class: ECONOMY
+[2024-12-31T19:34:29.824Z] Price per traveler: $2306.73
+[2024-12-31T19:34:29.824Z] Price per traveler $2306.73 > $2000 -> PREMIUM
+[2024-12-31T19:34:29.825Z] Initial tier based on price per traveler: PREMIUM
+[2024-12-31T19:34:29.825Z] Final categorization: PREMIUM
+[2024-12-31T19:34:29.825Z] Price breakdown:
+      Total price: $2306.73
+      Per traveler: $2306.73
+      Cabin class: ECONOMY
+      Tier: PREMIUM
+    
+[2024-12-31T19:34:29.825Z] Error fetching airline info: AxiosError: Request failed with status code 429
+[2024-12-31T19:34:29.826Z] 
+=== Determining Price Tier ===
+[2024-12-31T19:34:29.826Z] Total Price: $2356.53
+[2024-12-31T19:34:29.826Z] Number of Travelers: 1
+[2024-12-31T19:34:29.826Z] Cabin Class: ECONOMY
+[2024-12-31T19:34:29.826Z] Price per traveler: $2356.53
+[2024-12-31T19:34:29.826Z] Price per traveler $2356.53 > $2000 -> PREMIUM
+[2024-12-31T19:34:29.826Z] Initial tier based on price per traveler: PREMIUM
+[2024-12-31T19:34:29.826Z] Final categorization: PREMIUM
+[2024-12-31T19:34:29.826Z] Price breakdown:
+      Total price: $2356.53
+      Per traveler: $2356.53
+      Cabin class: ECONOMY
+      Tier: PREMIUM
+    
+[2024-12-31T19:34:29.827Z] Error fetching airline info: AxiosError: Request failed with status code 429
+[2024-12-31T19:34:29.827Z] 
+=== Determining Price Tier ===
+[2024-12-31T19:34:29.827Z] Total Price: $2318.73
+[2024-12-31T19:34:29.828Z] Number of Travelers: 1
+[2024-12-31T19:34:29.828Z] Cabin Class: ECONOMY
+[2024-12-31T19:34:29.828Z] Price per traveler: $2318.73
+[2024-12-31T19:34:29.828Z] Price per traveler $2318.73 > $2000 -> PREMIUM
+[2024-12-31T19:34:29.828Z] Initial tier based on price per traveler: PREMIUM
+[2024-12-31T19:34:29.828Z] Final categorization: PREMIUM
+[2024-12-31T19:34:29.828Z] Price breakdown:
+      Total price: $2318.73
+      Per traveler: $2318.73
+      Cabin class: ECONOMY
+      Tier: PREMIUM
+    
+[2024-12-31T19:34:29.829Z] Error fetching airline info: AxiosError: Request failed with status code 429
+[2024-12-31T19:34:29.829Z] 
+=== Determining Price Tier ===
+[2024-12-31T19:34:29.829Z] Total Price: $2356.53
+[2024-12-31T19:34:29.829Z] Number of Travelers: 1
+[2024-12-31T19:34:29.829Z] Cabin Class: ECONOMY
+[2024-12-31T19:34:29.829Z] Price per traveler: $2356.53
+[2024-12-31T19:34:29.829Z] Price per traveler $2356.53 > $2000 -> PREMIUM
+[2024-12-31T19:34:29.829Z] Initial tier based on price per traveler: PREMIUM
+[2024-12-31T19:34:29.829Z] Final categorization: PREMIUM
+[2024-12-31T19:34:29.830Z] Price breakdown:
+      Total price: $2356.53
+      Per traveler: $2356.53
+      Cabin class: ECONOMY
+      Tier: PREMIUM
+    
+[2024-12-31T19:34:29.830Z] Error fetching airline info: AxiosError: Request failed with status code 429
+[2024-12-31T19:34:29.830Z] 
+=== Determining Price Tier ===
+[2024-12-31T19:34:29.831Z] Total Price: $2306.13
+[2024-12-31T19:34:29.831Z] Number of Travelers: 1
+[2024-12-31T19:34:29.831Z] Cabin Class: ECONOMY
+[2024-12-31T19:34:29.831Z] Price per traveler: $2306.13
+[2024-12-31T19:34:29.831Z] Price per traveler $2306.13 > $2000 -> PREMIUM
+[2024-12-31T19:34:29.831Z] Initial tier based on price per traveler: PREMIUM
+[2024-12-31T19:34:29.831Z] Final categorization: PREMIUM
+[2024-12-31T19:34:29.832Z] Price breakdown:
+      Total price: $2306.13
+      Per traveler: $2306.13
+      Cabin class: ECONOMY
+      Tier: PREMIUM
+    
+[2024-12-31T19:34:29.832Z] Error fetching airline info: AxiosError: Request failed with status code 429
+[2024-12-31T19:34:29.833Z] 
+=== Determining Price Tier ===
+[2024-12-31T19:34:29.833Z] Total Price: $2355.93
+[2024-12-31T19:34:29.833Z] Number of Travelers: 1
+[2024-12-31T19:34:29.833Z] Cabin Class: ECONOMY
+[2024-12-31T19:34:29.833Z] Price per traveler: $2355.93
+[2024-12-31T19:34:29.833Z] Price per traveler $2355.93 > $2000 -> PREMIUM
+[2024-12-31T19:34:29.833Z] Initial tier based on price per traveler: PREMIUM
+[2024-12-31T19:34:29.833Z] Final categorization: PREMIUM
+[2024-12-31T19:34:29.833Z] Price breakdown:
+      Total price: $2355.93
+      Per traveler: $2355.93
+      Cabin class: ECONOMY
+      Tier: PREMIUM
+    
+[2024-12-31T19:34:29.834Z] Error fetching airline info: AxiosError: Request failed with status code 429
+[2024-12-31T19:34:29.834Z] 
+=== Determining Price Tier ===
+[2024-12-31T19:34:29.834Z] Total Price: $2355.93
+[2024-12-31T19:34:29.834Z] Number of Travelers: 1
+[2024-12-31T19:34:29.835Z] Cabin Class: ECONOMY
+[2024-12-31T19:34:29.835Z] Price per traveler: $2355.93
+[2024-12-31T19:34:29.835Z] Price per traveler $2355.93 > $2000 -> PREMIUM
+[2024-12-31T19:34:29.835Z] Initial tier based on price per traveler: PREMIUM
+[2024-12-31T19:34:29.835Z] Final categorization: PREMIUM
+[2024-12-31T19:34:29.835Z] Price breakdown:
+      Total price: $2355.93
+      Per traveler: $2355.93
+      Cabin class: ECONOMY
+      Tier: PREMIUM
+    
+[2024-12-31T19:34:29.836Z] Error fetching airline info: AxiosError: Request failed with status code 429
+[2024-12-31T19:34:29.836Z] 
+=== Determining Price Tier ===
+[2024-12-31T19:34:29.836Z] Total Price: $2355.93
+[2024-12-31T19:34:29.836Z] Number of Travelers: 1
+[2024-12-31T19:34:29.836Z] Cabin Class: ECONOMY
+[2024-12-31T19:34:29.837Z] Price per traveler: $2355.93
+[2024-12-31T19:34:29.837Z] Price per traveler $2355.93 > $2000 -> PREMIUM
+[2024-12-31T19:34:29.837Z] Initial tier based on price per traveler: PREMIUM
+[2024-12-31T19:34:29.837Z] Final categorization: PREMIUM
+[2024-12-31T19:34:29.837Z] Price breakdown:
+      Total price: $2355.93
+      Per traveler: $2355.93
+      Cabin class: ECONOMY
+      Tier: PREMIUM
+    
+[2024-12-31T19:34:29.839Z] 
+=== Determining Price Tier ===
+[2024-12-31T19:34:29.839Z] Total Price: $1445.73
+[2024-12-31T19:34:29.839Z] Number of Travelers: 1
+[2024-12-31T19:34:29.839Z] Cabin Class: ECONOMY
+[2024-12-31T19:34:29.839Z] Price per traveler: $1445.73
+[2024-12-31T19:34:29.839Z] $800 < Price per traveler $1445.73 <= $2000 -> MEDIUM
+[2024-12-31T19:34:29.839Z] Initial tier based on price per traveler: MEDIUM
+[2024-12-31T19:34:29.840Z] Final categorization: MEDIUM
+[2024-12-31T19:34:29.840Z] Price breakdown:
+      Total price: $1445.73
+      Per traveler: $1445.73
+      Cabin class: ECONOMY
+      Tier: MEDIUM
+    
+[2024-12-31T19:34:29.872Z] 
+=== Determining Price Tier ===
+[2024-12-31T19:34:29.873Z] Total Price: $1673.73
+[2024-12-31T19:34:29.873Z] Number of Travelers: 1
+[2024-12-31T19:34:29.873Z] Cabin Class: ECONOMY
+[2024-12-31T19:34:29.873Z] Price per traveler: $1673.73
+[2024-12-31T19:34:29.874Z] $800 < Price per traveler $1673.73 <= $2000 -> MEDIUM
+[2024-12-31T19:34:29.874Z] Initial tier based on price per traveler: MEDIUM
+[2024-12-31T19:34:29.874Z] Final categorization: MEDIUM
+[2024-12-31T19:34:29.874Z] Price breakdown:
+      Total price: $1673.73
+      Per traveler: $1673.73
+      Cabin class: ECONOMY
+      Tier: MEDIUM
+    
+[2024-12-31T19:34:29.908Z] 
+=== Determining Price Tier ===
+[2024-12-31T19:34:29.908Z] Total Price: $1997.73
+[2024-12-31T19:34:29.909Z] Number of Travelers: 1
+[2024-12-31T19:34:29.909Z] Cabin Class: ECONOMY
+[2024-12-31T19:34:29.909Z] Price per traveler: $1997.73
+[2024-12-31T19:34:29.910Z] $800 < Price per traveler $1997.73 <= $2000 -> MEDIUM
+[2024-12-31T19:34:29.910Z] Initial tier based on price per traveler: MEDIUM
+[2024-12-31T19:34:29.910Z] Final categorization: MEDIUM
+[2024-12-31T19:34:29.910Z] Price breakdown:
+      Total price: $1997.73
+      Per traveler: $1997.73
+      Cabin class: ECONOMY
+      Tier: MEDIUM
+    
+[2024-12-31T19:34:29.918Z] 
+=== Determining Price Tier ===
+[2024-12-31T19:34:29.918Z] Total Price: $2306.73
+[2024-12-31T19:34:29.918Z] Number of Travelers: 1
+[2024-12-31T19:34:29.919Z] Cabin Class: ECONOMY
+[2024-12-31T19:34:29.919Z] Price per traveler: $2306.73
+[2024-12-31T19:34:29.919Z] Price per traveler $2306.73 > $2000 -> PREMIUM
+[2024-12-31T19:34:29.919Z] Initial tier based on price per traveler: PREMIUM
+[2024-12-31T19:34:29.919Z] Final categorization: PREMIUM
+[2024-12-31T19:34:29.920Z] Price breakdown:
+      Total price: $2306.73
+      Per traveler: $2306.73
+      Cabin class: ECONOMY
+      Tier: PREMIUM
+    
+[2024-12-31T19:34:29.921Z] 
+=== Determining Price Tier ===
+[2024-12-31T19:34:29.921Z] Total Price: $1721.73
+[2024-12-31T19:34:29.921Z] Number of Travelers: 1
+[2024-12-31T19:34:29.921Z] Cabin Class: ECONOMY
+[2024-12-31T19:34:29.922Z] Price per traveler: $1721.73
+[2024-12-31T19:34:29.922Z] $800 < Price per traveler $1721.73 <= $2000 -> MEDIUM
+[2024-12-31T19:34:29.922Z] Initial tier based on price per traveler: MEDIUM
+[2024-12-31T19:34:29.922Z] Final categorization: MEDIUM
+[2024-12-31T19:34:29.922Z] Price breakdown:
+      Total price: $1721.73
+      Per traveler: $1721.73
+      Cabin class: ECONOMY
+      Tier: MEDIUM
+    
+[2024-12-31T19:34:29.947Z] 
+=== Determining Price Tier ===
+[2024-12-31T19:34:29.947Z] Total Price: $2277.93
+[2024-12-31T19:34:29.948Z] Number of Travelers: 1
+[2024-12-31T19:34:29.948Z] Cabin Class: ECONOMY
+[2024-12-31T19:34:29.948Z] Price per traveler: $2277.93
+[2024-12-31T19:34:29.948Z] Price per traveler $2277.93 > $2000 -> PREMIUM
+[2024-12-31T19:34:29.949Z] Initial tier based on price per traveler: PREMIUM
+[2024-12-31T19:34:29.949Z] Final categorization: PREMIUM
+[2024-12-31T19:34:29.949Z] Price breakdown:
+      Total price: $2277.93
+      Per traveler: $2277.93
+      Cabin class: ECONOMY
+      Tier: PREMIUM
+    
+[2024-12-31T19:34:29.950Z] 
+=== Determining Price Tier ===
+[2024-12-31T19:34:29.950Z] Total Price: $2277.93
+[2024-12-31T19:34:29.950Z] Number of Travelers: 1
+[2024-12-31T19:34:29.951Z] Cabin Class: ECONOMY
+[2024-12-31T19:34:29.951Z] Price per traveler: $2277.93
+[2024-12-31T19:34:29.951Z] Price per traveler $2277.93 > $2000 -> PREMIUM
+[2024-12-31T19:34:29.951Z] Initial tier based on price per traveler: PREMIUM
+[2024-12-31T19:34:29.951Z] Final categorization: PREMIUM
+[2024-12-31T19:34:29.952Z] Price breakdown:
+      Total price: $2277.93
+      Per traveler: $2277.93
+      Cabin class: ECONOMY
+      Tier: PREMIUM
+    
+[2024-12-31T19:34:29.953Z] 
+=== Determining Price Tier ===
+[2024-12-31T19:34:29.953Z] Total Price: $2286.63
+[2024-12-31T19:34:29.954Z] Number of Travelers: 1
+[2024-12-31T19:34:29.954Z] Cabin Class: ECONOMY
+[2024-12-31T19:34:29.954Z] Price per traveler: $2286.63
+[2024-12-31T19:34:29.954Z] Price per traveler $2286.63 > $2000 -> PREMIUM
+[2024-12-31T19:34:29.955Z] Initial tier based on price per traveler: PREMIUM
+[2024-12-31T19:34:29.955Z] Final categorization: PREMIUM
+[2024-12-31T19:34:29.955Z] Price breakdown:
+      Total price: $2286.63
+      Per traveler: $2286.63
+      Cabin class: ECONOMY
+      Tier: PREMIUM
+    
+[2024-12-31T19:34:29.957Z] 
+=== Determining Price Tier ===
+[2024-12-31T19:34:29.957Z] Total Price: $1976.73
+[2024-12-31T19:34:29.957Z] Number of Travelers: 1
+[2024-12-31T19:34:29.958Z] Cabin Class: ECONOMY
+[2024-12-31T19:34:29.958Z] Price per traveler: $1976.73
+[2024-12-31T19:34:29.958Z] $800 < Price per traveler $1976.73 <= $2000 -> MEDIUM
+[2024-12-31T19:34:29.958Z] Initial tier based on price per traveler: MEDIUM
+[2024-12-31T19:34:29.958Z] Final categorization: MEDIUM
+[2024-12-31T19:34:29.958Z] Price breakdown:
+      Total price: $1976.73
+      Per traveler: $1976.73
+      Cabin class: ECONOMY
+      Tier: MEDIUM
+    
+[2024-12-31T19:34:29.990Z] 
+=== Determining Price Tier ===
+[2024-12-31T19:34:29.990Z] Total Price: $2277.93
+[2024-12-31T19:34:29.991Z] Number of Travelers: 1
+[2024-12-31T19:34:29.991Z] Cabin Class: ECONOMY
+[2024-12-31T19:34:29.991Z] Price per traveler: $2277.93
+[2024-12-31T19:34:29.991Z] Price per traveler $2277.93 > $2000 -> PREMIUM
+[2024-12-31T19:34:29.991Z] Initial tier based on price per traveler: PREMIUM
+[2024-12-31T19:34:29.992Z] Final categorization: PREMIUM
+[2024-12-31T19:34:29.992Z] Price breakdown:
+      Total price: $2277.93
+      Per traveler: $2277.93
+      Cabin class: ECONOMY
+      Tier: PREMIUM
+    
