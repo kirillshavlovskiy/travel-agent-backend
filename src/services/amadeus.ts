@@ -164,5 +164,176 @@ interface AmadeusHotelOffer {
 }
 
 export class AmadeusService {
-  // ... rest of the class implementation ...
+  private token = '';
+  private tokenExpiry = 0;
+  private clientId: string;
+  private clientSecret: string;
+  private baseURL = 'https://test.api.amadeus.com';
+  private commonAirlines = {
+    'AA': 'American Airlines',
+    'UA': 'United Airlines',
+    'DL': 'Delta Air Lines',
+    'LH': 'Lufthansa',
+    'BA': 'British Airways',
+    'AF': 'Air France',
+    'KL': 'KLM Royal Dutch Airlines',
+    'IB': 'Iberia',
+    'B6': 'JetBlue Airways',
+    'WN': 'Southwest Airlines',
+    'AS': 'Alaska Airlines',
+    'VS': 'Virgin Atlantic',
+    'EK': 'Emirates',
+    'QR': 'Qatar Airways',
+    'EY': 'Etihad Airways',
+    'TK': 'Turkish Airlines',
+    'LX': 'SWISS',
+    'AC': 'Air Canada',
+    'FI': 'Icelandair',
+    'SK': 'SAS Scandinavian Airlines',
+    'AZ': 'ITA Airways',
+    'TP': 'TAP Air Portugal'
+  };
+
+  constructor() {
+    this.clientId = process.env.AMADEUS_CLIENT_ID || '';
+    this.clientSecret = process.env.AMADEUS_CLIENT_SECRET || '';
+    if (!this.clientId || !this.clientSecret) {
+      const error = 'Amadeus API credentials are not configured';
+      logToFile(`ERROR: ${error}`);
+      console.error(error);
+    }
+  }
+
+  private async getToken(): Promise<string> {
+    if (this.token && Date.now() < this.tokenExpiry) {
+      return this.token;
+    }
+
+    try {
+      logToFile('Requesting new Amadeus access token');
+      const response = await axios.post(
+        `${this.baseURL}/v1/security/oauth2/token`,
+        new URLSearchParams({
+          grant_type: 'client_credentials',
+          client_id: this.clientId,
+          client_secret: this.clientSecret
+        }),
+        {
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded'
+          }
+        }
+      );
+
+      if (!response.data?.access_token) {
+        const error = 'No access token received from Amadeus';
+        logToFile(`ERROR: ${error}`);
+        throw new Error(error);
+      }
+
+      this.token = response.data.access_token;
+      this.tokenExpiry = Date.now() + (response.data.expires_in * 1000);
+      logToFile('Successfully obtained new access token');
+      return this.token;
+    } catch (error) {
+      const errorMsg = 'Failed to get Amadeus access token:';
+      logToFile(`ERROR: ${errorMsg} ${error}`);
+      console.error(errorMsg, error);
+      throw error;
+    }
+  }
+
+  async searchFlights(params: {
+    originLocationCode: string;
+    destinationLocationCode: string;
+    departureDate: string;
+    returnDate?: string;
+    adults: number;
+    travelClass?: 'ECONOMY' | 'PREMIUM_ECONOMY' | 'BUSINESS' | 'FIRST';
+  }): Promise<any[]> {
+    try {
+      logToFile('\n=== Amadeus Flight Search Request ===');
+      logToFile(`Raw params: ${JSON.stringify(params, null, 2)}`);
+      const token = await this.getToken();
+      
+      // Add delay between requests to avoid rate limiting
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      
+      const requestParams = {
+        ...params,
+        max: 50,
+        currencyCode: 'USD',
+        nonStop: false
+      };
+      
+      logToFile(`Final request params: ${JSON.stringify(requestParams, null, 2)}`);
+      logToFile(`Request URL: ${this.baseURL}/v2/shopping/flight-offers`);
+      logToFile(`Authorization: Bearer ${token.substring(0, 10)}...`);
+      
+      const response = await axios.get(`${this.baseURL}/v2/shopping/flight-offers`, {
+        headers: {
+          Authorization: `Bearer ${token}`
+        },
+        params: requestParams
+      });
+
+      logToFile('\n=== Amadeus Flight Search Response ===');
+      logToFile(`Status: ${response.status}`);
+      logToFile(`Headers: ${JSON.stringify(response.headers, null, 2)}`);
+
+      if (!response.data?.data) {
+        const error = {
+          status: response.status,
+          statusText: response.statusText,
+          data: JSON.stringify(response.data, null, 2),
+          headers: response.headers
+        };
+        logToFile(`ERROR: Invalid response structure: ${JSON.stringify(error, null, 2)}`);
+        throw new Error('Invalid response from Amadeus API');
+      }
+
+      const results = response.data.data;
+      logToFile('\n=== Amadeus Search Results ===');
+      logToFile(`Total results: ${results.length}`);
+      if (results.length > 0) {
+        logToFile(`First result: ${JSON.stringify(results[0], null, 2)}`);
+      }
+      logToFile(`Meta: ${JSON.stringify(response.data.meta, null, 2)}`);
+      logToFile(`Dictionaries: ${JSON.stringify(response.data.dictionaries, null, 2)}`);
+
+      return results;
+    } catch (error) {
+      logToFile('\n=== Amadeus API Error ===');
+      if (axios.isAxiosError(error)) {
+        if (error.response?.status === 429) {
+          logToFile('Rate limit exceeded, retrying after delay...');
+          await new Promise(resolve => setTimeout(resolve, 2000));
+          return this.searchFlights(params);
+        }
+        logToFile(`Request config: ${JSON.stringify({
+          url: error.config?.url,
+          method: error.config?.method,
+          params: error.config?.params,
+          headers: error.config?.headers
+        }, null, 2)}`);
+        logToFile(`Response error details: ${JSON.stringify({
+          status: error.response?.status,
+          statusText: error.response?.statusText,
+          data: error.response?.data,
+          errors: error.response?.data?.errors,
+          headers: error.response?.headers
+        }, null, 2)}`);
+        // Log the specific error message from Amadeus
+        if (error.response?.data?.errors) {
+          logToFile('Amadeus Error Messages:');
+          error.response.data.errors.forEach((err: any) => {
+            logToFile(`- ${err.title}: ${err.detail} (${err.code})`);
+          });
+        }
+      } else {
+        logToFile(`Non-Axios error: ${error}`);
+      }
+      throw error;
+    }
+  }
 } 
