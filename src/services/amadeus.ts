@@ -132,6 +132,38 @@ interface FlightDetails {
     bookingClass: string;
     fareBasis: string;
     validatingAirline: string;
+    fareDetailsBySegment: Array<{
+      cabin: string;
+      class: string;
+      includedCheckedBags?: {
+        quantity: number;
+        weight?: number;
+        weightUnit?: string;
+      };
+      brandedFare?: string;
+      fareBasis?: string;
+    }>;
+    services: Array<{
+      name: string;
+      description: string;
+      isChargeable: boolean;
+    }>;
+    policies: {
+      checkedBags: number;
+      carryOn: number;
+      seatSelection: boolean;
+      cancellation: string;
+      changes: string;
+      refund: string;
+    };
+    amenities: Array<{
+      description: string;
+      isChargeable: boolean;
+      amenityType: string;
+      amenityProvider: {
+        name: string;
+      };
+    }>;
   };
 }
 
@@ -856,10 +888,141 @@ export class AmadeusService {
     // Get aircraft info from dictionaries
     const aircraftInfo = offer.dictionaries?.aircraft || {};
 
+    // Calculate total duration
+    const outboundDuration = this.calculateTotalDuration(offer.itineraries[0].segments);
+    const inboundDuration = inboundSegments.length ? this.calculateTotalDuration(inboundSegments) : '0H';
+
+    // Determine services based on cabin class
+    const services = [];
+    if (cabinClass === 'FIRST' || cabinClass === 'BUSINESS') {
+      services.push(
+        {
+          name: 'Priority Check-in',
+          description: 'Dedicated check-in counters',
+          isChargeable: false
+        },
+        {
+          name: 'Lounge Access',
+          description: 'Access to airline lounges',
+          isChargeable: false
+        },
+        {
+          name: 'Fast Track Security',
+          description: 'Priority security screening',
+          isChargeable: false
+        }
+      );
+      if (cabinClass === 'FIRST') {
+        services.push({
+          name: 'Chauffeur Service',
+          description: 'Complimentary airport transfer (where available)',
+          isChargeable: false
+        });
+      }
+    } else if (cabinClass === 'PREMIUM_ECONOMY') {
+      services.push(
+        {
+          name: 'Priority Boarding',
+          description: 'Board before economy class',
+          isChargeable: false
+        },
+        {
+          name: 'Extra Legroom',
+          description: 'More space between seats',
+          isChargeable: false
+        }
+      );
+    }
+
+    // Determine amenities based on cabin class
+    const amenities = [];
+    if (cabinClass === 'FIRST' || cabinClass === 'BUSINESS') {
+      amenities.push(
+        {
+          description: 'Premium Meal Service',
+          isChargeable: false,
+          amenityType: 'MEAL',
+          amenityProvider: { name: 'Airline' }
+        },
+        {
+          description: 'Premium Amenity Kit',
+          isChargeable: false,
+          amenityType: 'COMFORT',
+          amenityProvider: { name: 'Airline' }
+        },
+        {
+          description: 'Lie-flat Seats',
+          isChargeable: false,
+          amenityType: 'SEAT',
+          amenityProvider: { name: 'Airline' }
+        }
+      );
+    } else if (cabinClass === 'PREMIUM_ECONOMY') {
+      amenities.push(
+        {
+          description: 'Enhanced Meal Service',
+          isChargeable: false,
+          amenityType: 'MEAL',
+          amenityProvider: { name: 'Airline' }
+        },
+        {
+          description: 'Basic Amenity Kit',
+          isChargeable: false,
+          amenityType: 'COMFORT',
+          amenityProvider: { name: 'Airline' }
+        }
+      );
+    } else {
+      amenities.push(
+        {
+          description: 'Standard Meal Service',
+          isChargeable: true,
+          amenityType: 'MEAL',
+          amenityProvider: { name: 'Airline' }
+        }
+      );
+    }
+
+    // Add common amenities
+    amenities.push(
+      {
+        description: 'In-flight Entertainment',
+        isChargeable: false,
+        amenityType: 'ENTERTAINMENT',
+        amenityProvider: { name: 'Airline' }
+      },
+      {
+        description: 'Wi-Fi',
+        isChargeable: true,
+        amenityType: 'WIFI',
+        amenityProvider: { name: 'Airline' }
+      }
+    );
+
+    // Determine policies based on cabin class
+    const policies = {
+      checkedBags: offer.travelerPricings[0].fareDetailsBySegment[0].includedCheckedBags?.quantity || 0,
+      carryOn: 1,
+      seatSelection: cabinClass === 'FIRST' || cabinClass === 'BUSINESS',
+      cancellation: cabinClass === 'FIRST' || cabinClass === 'BUSINESS'
+        ? 'Flexible booking with reduced fees'
+        : cabinClass === 'PREMIUM_ECONOMY'
+        ? 'Changes allowed with fee'
+        : 'Non-refundable',
+      changes: cabinClass === 'FIRST' || cabinClass === 'BUSINESS'
+        ? 'Free changes'
+        : cabinClass === 'PREMIUM_ECONOMY'
+        ? 'Changes allowed with fee'
+        : 'Changes may be allowed with fee',
+      refund: cabinClass === 'FIRST' || cabinClass === 'BUSINESS'
+        ? 'Refundable with fees'
+        : 'Non-refundable'
+    };
+
     return {
       airline: firstSegment.carrierCode,
       route: `${firstSegment.departure.iataCode} - ${lastOutboundSegment.arrival.iataCode}`,
-      duration: this.calculateTotalDuration(offer.itineraries[0].segments),
+      duration: outboundDuration,
       layovers: offer.itineraries[0].segments.length - 1,
       outbound: firstSegment.departure.at,
       inbound: lastInboundSegment?.arrival.at || lastOutboundSegment.arrival.at,
@@ -872,7 +1035,6 @@ export class AmadeusService {
       flightNumber: `${firstSegment.carrierCode}${firstSegment.number}`,
       referenceUrl: this.generateBookingUrl(offer),
       cabinClass,
-
       details: {
         price: {
           amount: parseFloat(offer.price.total),
@@ -890,7 +1052,7 @@ export class AmadeusService {
             terminal: lastOutboundSegment.arrival.terminal,
             time: lastOutboundSegment.arrival.at
           },
-          duration: this.calculateTotalDuration(offer.itineraries[0].segments),
+          duration: outboundDuration,
           segments: offer.itineraries[0].segments.map(segment => ({
             airline: segment.carrierCode,
             flightNumber: `${segment.carrierCode}${segment.number}`,
@@ -925,7 +1087,7 @@ export class AmadeusService {
             terminal: lastInboundSegment.arrival.terminal,
             time: lastInboundSegment.arrival.at
           },
-          duration: this.calculateTotalDuration(inboundSegments),
+          duration: inboundDuration,
           segments: inboundSegments.map(segment => ({
             airline: segment.carrierCode,
             flightNumber: `${segment.carrierCode}${segment.number}`,
@@ -951,7 +1113,17 @@ export class AmadeusService {
         } : undefined,
         bookingClass: offer.travelerPricings[0].fareDetailsBySegment[0].class,
         fareBasis: offer.travelerPricings[0].fareDetailsBySegment[0].fareBasis,
-        validatingAirline: offer.validatingAirlineCodes[0]
+        validatingAirline: offer.validatingAirlineCodes[0],
+        fareDetailsBySegment: offer.travelerPricings[0].fareDetailsBySegment.map(fare => ({
+          cabin: fare.cabin,
+          class: fare.class,
+          includedCheckedBags: fare.includedCheckedBags,
+          brandedFare: fare.brandedFare,
+          fareBasis: fare.fareBasis
+        })),
+        services,
+        policies,
+        amenities
       }
     };
   }
