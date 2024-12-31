@@ -2,36 +2,138 @@ import axios from 'axios';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-
-interface FlightReference {
-  id: string;
-  airline: string;
-  flightNumber: string;
-  route: string;
-  outbound: string;
-  inbound?: string;
-  duration: string;
-  layovers: number;
-  price: {
-    amount: number;
-    currency?: string;
-  };
-}
+import { AmadeusFlightOffer, FlightReference, AirlineInfo } from '../types.js';
+import { logToFile } from '../utils/logger.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const logsDir = path.join(__dirname, '..', '..', 'logs');
+const logsDir = path.join(__dirname, '../../logs');
 
 // Create logs directory if it doesn't exist
 if (!fs.existsSync(logsDir)) {
   fs.mkdirSync(logsDir, { recursive: true });
 }
 
-const logToFile = (message: string) => {
-  const timestamp = new Date().toISOString();
-  const logMessage = `[${timestamp}] ${message}\n`;
-  fs.appendFileSync(path.join(logsDir, 'amadeus.log'), logMessage);
+const AIRCRAFT_CODES: { [key: string]: string } = {
+  '319': 'Airbus A319',
+  '320': 'Airbus A320',
+  '321': 'Airbus A321',
+  '32A': 'Airbus A320',
+  '32B': 'Airbus A321',
+  '32Q': 'Airbus A321neo',
+  '32S': 'Airbus A321',
+  '32N': 'Airbus A321neo',
+  '333': 'Airbus A330-300',
+  '359': 'Airbus A350-900',
+  '388': 'Airbus A380-800',
+  '738': 'Boeing 737-800',
+  '73H': 'Boeing 737-800',
+  '744': 'Boeing 747-400',
+  '767': 'Boeing 767',
+  '777': 'Boeing 777',
+  '772': 'Boeing 777-200',
+  '77W': 'Boeing 777-300ER',
+  '787': 'Boeing 787 Dreamliner',
+  '788': 'Boeing 787-8 Dreamliner',
+  '789': 'Boeing 787-9 Dreamliner',
+  'E90': 'Embraer E190',
+  'E95': 'Embraer E195',
+  'CR9': 'Bombardier CRJ-900',
+  'CRJ': 'Bombardier CRJ',
+  'DH4': 'Bombardier Q400',
+  'AT7': 'ATR 72',
+  'AT5': 'ATR 42',
+  'E75': 'Embraer E175',
+  'E70': 'Embraer E170',
+  'A20N': 'Airbus A320neo',
+  'A21N': 'Airbus A321neo',
+  'B38M': 'Boeing 737 MAX 8',
+  'B39M': 'Boeing 737 MAX 9',
+  'A339': 'Airbus A330-900neo',
+  'A359': 'Airbus A350-900',
+  'A35K': 'Airbus A350-1000',
+  'B78X': 'Boeing 787-10 Dreamliner',
+  '7M9': 'Boeing 737 MAX 9'
 };
+
+interface FlightSegment {
+  airline: string;
+  flightNumber: string;
+  aircraft: {
+    code: string;
+    name: string;
+  };
+  departure: {
+    airport: string;
+    terminal?: string;
+    time: string;
+  };
+  arrival: {
+    airport: string;
+    terminal?: string;
+    time: string;
+  };
+  duration: string;
+  cabinClass: string;
+}
+
+interface FlightDetails {
+  airline: string;
+  route: string;
+  duration: string;
+  layovers: number;
+  outbound: string;
+  inbound: string;
+  price: {
+    amount: number;
+    currency: string;
+    numberOfTravelers: number;
+    perTraveler?: number;
+  };
+  tier: 'budget' | 'medium' | 'premium';
+  flightNumber: string;
+  referenceUrl: string;
+  cabinClass: string;
+  details: {
+    price: {
+      amount: number;
+      currency: string;
+      numberOfTravelers: number;
+      perTraveler?: number;
+    };
+    outbound: {
+      departure: {
+        airport: string;
+        terminal?: string;
+        time: string;
+      };
+      arrival: {
+        airport: string;
+        terminal?: string;
+        time: string;
+      };
+      duration: string;
+      segments: FlightSegment[];
+    };
+    inbound?: {
+      departure: {
+        airport: string;
+        terminal?: string;
+        time: string;
+      };
+      arrival: {
+        airport: string;
+        terminal?: string;
+        time: string;
+      };
+      duration: string;
+      segments: FlightSegment[];
+    };
+    bookingClass: string;
+    fareBasis: string;
+    validatingAirline: string;
+  };
+}
 
 interface AmadeusFlightSearchParams {
   originLocationCode: string;
@@ -42,51 +144,73 @@ interface AmadeusFlightSearchParams {
   travelClass?: 'ECONOMY' | 'PREMIUM_ECONOMY' | 'BUSINESS' | 'FIRST';
 }
 
-interface AmadeusFlightOffer {
-  id: string;
-  price: {
-    total: string;
-    currency: string;
+interface AmadeusHotelSearchParams {
+  cityCode: string;
+  checkInDate: string;
+  checkOutDate: string;
+  adults: number;
+  roomQuantity?: number;
+  priceRange?: {
+    min: number;
+    max: number;
   };
-  itineraries: Array<{
-    segments: Array<{
-      departure: {
-        iataCode: string;
-        terminal?: string;
-        at: string;
-      };
-      arrival: {
-        iataCode: string;
-        terminal?: string;
-        at: string;
-      };
-      duration: string;
-      carrierCode: string;
-      number: string;
-    }>;
-  }>;
-  validatingAirlineCodes: string[];
-  travelerPricings: Array<{
-    travelerId: string;
-    fareOption: string;
-    travelerType: string;
-    price: {
-      currency: string;
-      total: string;
-    };
-    fareDetailsBySegment: Array<{
-      cabin: string;
-      class: string;
-    }>;
-  }>;
+  ratings?: number[];
 }
 
-interface AirlineInfo {
-  type: string;
-  iataCode: string;
-  icaoCode: string;
-  businessName: string;
-  commonName: string;
+interface AmadeusHotelOffer {
+  hotel: {
+    type: string;
+    hotelId: string;
+    chainCode: string;
+    dupeId: string;
+    name: string;
+    rating: string;
+    cityCode: string;
+    latitude: number;
+    longitude: number;
+  };
+  available: boolean;
+  offers: Array<{
+    id: string;
+    checkInDate: string;
+    checkOutDate: string;
+    rateCode: string;
+    rateFamilyEstimated: {
+      code: string;
+      type: string;
+    };
+    room: {
+      type: string;
+      typeEstimated: {
+        category: string;
+        beds: number;
+        bedType: string;
+      };
+      description: {
+        text: string;
+        lang: string;
+      };
+    };
+    guests: {
+      adults: number;
+    };
+    price: {
+      currency: string;
+      base: string;
+      total: string;
+      variations: {
+        average: {
+          base: string;
+        };
+      };
+    };
+    policies: {
+      paymentType: string;
+      cancellation?: {
+        deadline: string;
+      };
+    };
+  }>;
 }
 
 export class AmadeusService {
@@ -95,6 +219,30 @@ export class AmadeusService {
   private readonly clientId: string;
   private readonly clientSecret: string;
   private readonly baseURL: string = 'https://test.api.amadeus.com';
+  private readonly commonAirlines: Record<string, string> = {
+    'AA': 'American Airlines',
+    'UA': 'United Airlines',
+    'DL': 'Delta Air Lines',
+    'LH': 'Lufthansa',
+    'BA': 'British Airways',
+    'AF': 'Air France',
+    'KL': 'KLM Royal Dutch Airlines',
+    'IB': 'Iberia',
+    'B6': 'JetBlue Airways',
+    'WN': 'Southwest Airlines',
+    'AS': 'Alaska Airlines',
+    'VS': 'Virgin Atlantic',
+    'EK': 'Emirates',
+    'QR': 'Qatar Airways',
+    'EY': 'Etihad Airways',
+    'TK': 'Turkish Airlines',
+    'LX': 'SWISS',
+    'AC': 'Air Canada',
+    'FI': 'Icelandair',
+    'SK': 'SAS Scandinavian Airlines',
+    'AZ': 'ITA Airways',
+    'TP': 'TAP Air Portugal'
+  };
 
   constructor() {
     this.clientId = process.env.AMADEUS_CLIENT_ID || '';
@@ -148,26 +296,33 @@ export class AmadeusService {
 
   async searchFlights(params: AmadeusFlightSearchParams): Promise<AmadeusFlightOffer[]> {
     try {
-      logToFile('\n=== Amadeus API Request ===');
-      logToFile(`Request params: ${JSON.stringify(params, null, 2)}`);
+      logToFile('\n=== Amadeus Flight Search Request ===');
+      logToFile(`Raw params: ${JSON.stringify(params, null, 2)}`);
       
       const token = await this.getToken();
       
       // Add delay between requests to avoid rate limiting
       await new Promise(resolve => setTimeout(resolve, 1000));
       
+      const requestParams = {
+        ...params,
+        max: 50,
+        currencyCode: 'USD',
+        nonStop: false
+      };
+
+      logToFile(`Final request params: ${JSON.stringify(requestParams, null, 2)}`);
+      logToFile(`Request URL: ${this.baseURL}/v2/shopping/flight-offers`);
+      logToFile(`Authorization: Bearer ${token.substring(0, 10)}...`);
+      
       const response = await axios.get(`${this.baseURL}/v2/shopping/flight-offers`, {
         headers: {
           Authorization: `Bearer ${token}`
         },
-        params: {
-          ...params,
-          max: 50,
-          currencyCode: 'USD'
-        }
+        params: requestParams
       });
 
-      logToFile('\n=== Amadeus API Response ===');
+      logToFile('\n=== Amadeus Flight Search Response ===');
       logToFile(`Status: ${response.status}`);
       logToFile(`Headers: ${JSON.stringify(response.headers, null, 2)}`);
       
@@ -207,12 +362,22 @@ export class AmadeusService {
           params: error.config?.params,
           headers: error.config?.headers
         }, null, 2)}`);
-        logToFile(`Response error: ${JSON.stringify({
+
+        logToFile(`Response error details: ${JSON.stringify({
           status: error.response?.status,
           statusText: error.response?.statusText,
           data: error.response?.data,
+          errors: error.response?.data?.errors,
           headers: error.response?.headers
         }, null, 2)}`);
+
+        // Log the specific error message from Amadeus
+        if (error.response?.data?.errors) {
+          logToFile('Amadeus Error Messages:');
+          error.response.data.errors.forEach((err: any) => {
+            logToFile(`- ${err.title}: ${err.detail} (${err.code})`);
+          });
+        }
       } else {
         logToFile(`Non-Axios error: ${error}`);
       }
@@ -222,69 +387,38 @@ export class AmadeusService {
 
   async getAirlineInfo(airlineCodes: string | string[]): Promise<AirlineInfo[]> {
     const codes = Array.isArray(airlineCodes) ? airlineCodes : [airlineCodes];
-    
-    // Common airline code to name mapping
-    const commonAirlines: Record<string, string> = {
-      'AC': 'Air Canada',
-      'AF': 'Air France',
-      'AT': 'Royal Air Maroc',
-      'BA': 'British Airways',
-      'DL': 'Delta Air Lines',
-      'EK': 'Emirates',
-      'IB': 'Iberia',
-      'KL': 'KLM Royal Dutch Airlines',
-      'LH': 'Lufthansa',
-      'LX': 'Swiss International Air Lines',
-      'QR': 'Qatar Airways',
-      'TP': 'TAP Air Portugal',
-      'TK': 'Turkish Airlines',
-      'UA': 'United Airlines',
-      'AA': 'American Airlines',
-      'N0': 'Norse Atlantic Airways',
-      'LV': 'LEVEL',
-      'AZ': 'Alitalia'
-    };
+    const results: AirlineInfo[] = [];
     
     try {
       const token = await this.getToken();
       
-      logToFile('\n=== Fetching Airline Info ===');
-      logToFile(`Airline codes: ${codes.join(', ')}`);
-      
+      // Use the correct endpoint with airlineCodes query parameter
       const response = await axios.get(`${this.baseURL}/v1/reference-data/airlines`, {
-        headers: {
-          Authorization: `Bearer ${token}`
-        },
         params: {
           airlineCodes: codes.join(',')
+        },
+        headers: {
+          Authorization: `Bearer ${token}`
         }
       });
 
-      if (!response.data?.data) {
-        const error = 'Invalid airline info response';
-        logToFile(`ERROR: ${error}`);
-        logToFile(`Response data: ${JSON.stringify(response.data, null, 2)}`);
-        throw new Error(error);
+      if (response.data?.data) {
+        results.push(...response.data.data.map((airline: any) => ({
+          ...airline,
+          commonName: airline.commonName || airline.businessName || airline.iataCode
+        })));
       }
-
-      logToFile(`Airline info response: ${JSON.stringify(response.data, null, 2)}`);
-      return response.data.data;
     } catch (error) {
-      logToFile('\n=== Airline Info Error ===');
-      if (axios.isAxiosError(error)) {
-        logToFile(`Response error: ${JSON.stringify(error.response?.data, null, 2)}`);
-      } else {
-        logToFile(`Error: ${error}`);
-      }
-      // Return common airline names if available, otherwise use code
-      return codes.map((code: string) => ({
-        type: 'airline',
+      logToFile(`Error fetching airline info: ${error}`);
+      // Fallback to dictionaries and common airlines map
+      results.push(...codes.map(code => ({
         iataCode: code,
-        icaoCode: code,
-        businessName: commonAirlines[code] || code,
-        commonName: commonAirlines[code] || code
-      }));
+        commonName: this.commonAirlines[code] || code,
+        businessName: this.commonAirlines[code]
+      })));
     }
+
+    return results;
   }
 
   async getAirportInfo(airportCode: string): Promise<any> {
@@ -304,7 +438,7 @@ export class AmadeusService {
     }
   }
 
-  transformFlightOffer(offer: AmadeusFlightOffer, airlineInfoArray: AirlineInfo[]): any {
+  transformFlightOffer(offer: AmadeusFlightOffer, airlineInfoArray: AirlineInfo[]): FlightReference {
     const outboundSegments = offer.itineraries[0].segments;
     const inboundSegments = offer.itineraries[1]?.segments || [];
     const firstSegment = outboundSegments[0];
@@ -314,6 +448,10 @@ export class AmadeusService {
 
     logToFile('\n=== Transforming Flight Offer ===');
     logToFile(`Offer ID: ${offer.id}`);
+    logToFile(`Raw outbound segments: ${JSON.stringify(outboundSegments, null, 2)}`);
+    if (inboundSegments.length > 0) {
+      logToFile(`Raw inbound segments: ${JSON.stringify(inboundSegments, null, 2)}`);
+    }
     
     const totalPrice = parseFloat(offer.price.total);
     const numberOfTravelers = offer.travelerPricings.length;
@@ -330,68 +468,166 @@ export class AmadeusService {
     const tier = this.determineTier(totalPrice, cabinClass, numberOfTravelers);
     
     const getAirlineInfo = (carrierCode: string) => {
-      const info = airlineInfoArray.find((airline: AirlineInfo) => airline.iataCode === carrierCode);
+      // First try Amadeus dictionaries
+      if (offer.dictionaries?.carriers?.[carrierCode]) {
+        return {
+          code: carrierCode,
+          name: offer.dictionaries.carriers[carrierCode]
+        };
+      }
+
+      // Then check the airline info array from API
+      const info = airlineInfoArray.find(airline => airline.iataCode === carrierCode);
+      if (info) {
+        return {
+          code: carrierCode,
+          name: info.businessName || info.commonName || carrierCode
+        };
+      }
+
+      // Fallback to carrier code if no translation found
       return {
         code: carrierCode,
-        name: info?.businessName || info?.commonName || carrierCode
+        name: carrierCode
       };
+    };
+    
+    // Log aircraft information from dictionaries
+    logToFile('\n=== Aircraft Information ===');
+    logToFile(`Aircraft dictionary: ${JSON.stringify(offer.dictionaries?.aircraft || {}, null, 2)}`);
+
+    const getAircraftInfo = (segment: any, dictionaries: any): { code: string; name: string } => {
+      try {
+        const rawCode = segment?.aircraft?.code;
+        if (!rawCode) {
+          logToFile('No aircraft code found in segment');
+          return { code: 'N/A', name: 'Aircraft information not available' };
+        }
+
+        // Clean the code by removing non-alphanumeric characters and converting to uppercase
+        const code = rawCode.replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
+        logToFile(`Processing aircraft code: ${rawCode} (cleaned: ${code})`);
+
+        // First, check our own mapping
+        if (AIRCRAFT_CODES[code]) {
+          logToFile(`Found exact match in AIRCRAFT_CODES mapping: ${code} -> ${AIRCRAFT_CODES[code]}`);
+          return { code, name: AIRCRAFT_CODES[code] };
+        }
+
+        // Log available codes for debugging
+        logToFile(`Available aircraft codes in mapping: ${Object.keys(AIRCRAFT_CODES).join(', ')}`);
+
+        // Try to find a similar match
+        const similarCodes = Object.keys(AIRCRAFT_CODES).filter(mappedCode => 
+          mappedCode.includes(code) || code.includes(mappedCode)
+        );
+
+        if (similarCodes.length > 0) {
+          const bestMatch = similarCodes[0];
+          logToFile(`Found similar match: ${code} -> ${bestMatch} (${AIRCRAFT_CODES[bestMatch]})`);
+          return { code, name: AIRCRAFT_CODES[bestMatch] };
+        }
+
+        // Check Amadeus dictionary as fallback
+        logToFile('Checking Amadeus dictionary for aircraft code ' + code);
+        logToFile('Amadeus dictionaries: ' + JSON.stringify(dictionaries));
+        
+        if (dictionaries?.aircraft?.[code]) {
+          const name = dictionaries.aircraft[code];
+          logToFile(`Found in Amadeus dictionary: ${code} -> ${name}`);
+          return { code, name };
+        }
+
+        // If no match found, return a formatted version of the code
+        logToFile(`No aircraft match found for code: ${code}`);
+        return { code, name: `Aircraft ${code}` };
+      } catch (error) {
+        logToFile(`Error processing aircraft info: ${error}`);
+        return { code: 'ERR', name: 'Error processing aircraft information' };
+      }
     };
 
     const airlineInfo = getAirlineInfo(firstSegment.carrierCode);
     const flightNumber = `${firstSegment.carrierCode}${firstSegment.number}`;
 
     // Base structure that's common for both simplified and detailed formats
-    const transformed = {
+    const transformed: FlightReference = {
       id: offer.id,
-      amadeusId: offer.id,
       airline: airlineInfo.name,
       airlineCode: airlineInfo.code,
       flightNumber,
       price: {
         amount: totalPrice,
+        currency: offer.price.currency,
         perTraveler: pricePerTraveler,
-        numberOfTravelers,
-        currency: offer.price.currency
+        numberOfTravelers
       },
       route: `${firstSegment.departure.iataCode} - ${lastOutboundSegment.arrival.iataCode}`,
       outbound: firstSegment.departure.at,
       inbound: lastInboundSegment?.arrival.at,
       duration: this.calculateTotalDuration(outboundSegments),
       layovers: outboundSegments.length - 1,
-      segments: outboundSegments.map(segment => ({
-        airline: getAirlineInfo(segment.carrierCode),
-        flightNumber: `${segment.carrierCode}${segment.number}`,
-        departure: {
-          airport: segment.departure.iataCode,
-          terminal: segment.departure.terminal,
-          time: segment.departure.at
-        },
-        arrival: {
-          airport: segment.arrival.iataCode,
-          terminal: segment.arrival.terminal,
-          time: segment.arrival.at
-        },
-        duration: segment.duration
-      })),
-      returnSegments: inboundSegments.length > 0 ? inboundSegments.map(segment => ({
-        airline: getAirlineInfo(segment.carrierCode),
-        flightNumber: `${segment.carrierCode}${segment.number}`,
-        departure: {
-          airport: segment.departure.iataCode,
-          terminal: segment.departure.terminal,
-          time: segment.departure.at
-        },
-        arrival: {
-          airport: segment.arrival.iataCode,
-          terminal: segment.arrival.terminal,
-          time: segment.arrival.at
-        },
-        duration: segment.duration
-      })) : [],
+      segments: outboundSegments.map(segment => {
+        logToFile(`Processing outbound segment: ${JSON.stringify(segment, null, 2)}`);
+        const aircraft = getAircraftInfo(segment, offer.dictionaries);
+        const airline = getAirlineInfo(segment.carrierCode);
+        const fareDetails = offer.travelerPricings[0].fareDetailsBySegment.find(
+          fare => fare.segmentId === segment.id
+        );
+        return {
+          airline: airline.name,
+          flightNumber: `${segment.carrierCode}${segment.number}`,
+          aircraft: {
+            code: aircraft.code,
+            name: aircraft.name
+          },
+          departure: {
+            airport: segment.departure.iataCode,
+            terminal: segment.departure.terminal,
+            time: segment.departure.at
+          },
+          arrival: {
+            airport: segment.arrival.iataCode,
+            terminal: segment.arrival.terminal,
+            time: segment.arrival.at
+          },
+          duration: segment.duration,
+          cabinClass: fareDetails?.cabin || cabinClass
+        };
+      }),
+      returnSegments: inboundSegments.length > 0 ? inboundSegments.map(segment => {
+        logToFile(`Processing inbound segment: ${JSON.stringify(segment, null, 2)}`);
+        const aircraft = getAircraftInfo(segment, offer.dictionaries);
+        const airline = getAirlineInfo(segment.carrierCode);
+        const fareDetails = offer.travelerPricings[0].fareDetailsBySegment.find(
+          fare => fare.segmentId === segment.id
+        );
+        return {
+          airline: airline.name,
+          flightNumber: `${segment.carrierCode}${segment.number}`,
+          aircraft: {
+            code: aircraft.code,
+            name: aircraft.name
+          },
+          departure: {
+            airport: segment.departure.iataCode,
+            terminal: segment.departure.terminal,
+            time: segment.departure.at
+          },
+          arrival: {
+            airport: segment.arrival.iataCode,
+            terminal: segment.arrival.terminal,
+            time: segment.arrival.at
+          },
+          duration: segment.duration,
+          cabinClass: fareDetails?.cabin || cabinClass
+        };
+      }) : undefined,
       cabinClass,
       bookingClass: offer.travelerPricings[0].fareDetailsBySegment[0].class,
       tier,
-      referenceUrl: this.generateBookingUrl(offer)
+      referenceUrl: this.generateBookingUrl(offer),
+      dictionaries: offer.dictionaries
     };
 
     // Log the final transformation for debugging
@@ -399,11 +635,8 @@ export class AmadeusService {
       ID: ${transformed.id}
       Airline: ${transformed.airline}
       Flight Number: ${transformed.flightNumber}
-      Price per traveler: $${transformed.price.perTraveler}
-      Total price: $${transformed.price.amount}
-      Cabin class: ${transformed.cabinClass}
-      Tier: ${transformed.tier}
-      Route: ${transformed.route}
+      Aircraft info: ${JSON.stringify(transformed.segments.map(s => s.aircraft), null, 2)}
+      Dictionaries: ${JSON.stringify(transformed.dictionaries, null, 2)}
     `);
 
     return transformed;
@@ -422,7 +655,7 @@ export class AmadeusService {
     return `PT${hours}H${minutes}M`;
   }
 
-  private determineTier(price: number, cabinClass?: string, numberOfTravelers: number = 1): 'budget' | 'medium' | 'premium' {
+  public determineTier(price: number, cabinClass?: string, numberOfTravelers: number = 1): 'budget' | 'medium' | 'premium' {
     logToFile(`\n=== Determining Price Tier ===`);
     logToFile(`Total Price: $${price}`);
     logToFile(`Number of Travelers: ${numberOfTravelers}`);
@@ -480,19 +713,32 @@ export class AmadeusService {
   }
 
   public generateBookingUrl(offer: AmadeusFlightOffer): string {
-    const segments = offer.itineraries[0].segments;
-    const params = new URLSearchParams({
-      origin: segments[0].departure.iataCode,
-      destination: segments[segments.length - 1].arrival.iataCode,
-      depart: segments[0].departure.at.split('T')[0],
-      cabin: offer.travelerPricings[0].fareDetailsBySegment[0].cabin.toLowerCase()
-    });
-
-    if (offer.itineraries[1]) {
-      params.set('return', offer.itineraries[1].segments[0].departure.at.split('T')[0]);
+    const firstSegment = offer.itineraries[0].segments[0];
+    const lastSegment = offer.itineraries[0].segments[offer.itineraries[0].segments.length - 1];
+    
+    // Extract basic flight info
+    const origin = firstSegment.departure.iataCode;
+    const destination = lastSegment.arrival.iataCode;
+    const departureDate = firstSegment.departure.at.split('T')[0];
+    const returnDate = offer.itineraries[1]?.segments[0]?.departure.at.split('T')[0];
+    const airline = firstSegment.carrierCode;
+    
+    // Generate a generic booking URL based on the airline
+    switch (airline.toUpperCase()) {
+      case 'AA':
+        return `https://www.aa.com/booking/flights?o=${origin}&d=${destination}&d1=${departureDate}${returnDate ? `&d2=${returnDate}` : ''}`;
+      case 'BA':
+        return `https://www.britishairways.com/travel/booking/public/en_gb?o=${origin}&d=${destination}&d1=${departureDate}${returnDate ? `&d2=${returnDate}` : ''}`;
+      case 'LH':
+        return `https://www.lufthansa.com/booking/flights?o=${origin}&d=${destination}&d1=${departureDate}${returnDate ? `&d2=${returnDate}` : ''}`;
+      case 'AF':
+        return `https://www.airfrance.com/booking/flights?o=${origin}&d=${destination}&d1=${departureDate}${returnDate ? `&d2=${returnDate}` : ''}`;
+      case 'KL':
+        return `https://www.klm.com/booking/flights?o=${origin}&d=${destination}&d1=${departureDate}${returnDate ? `&d2=${returnDate}` : ''}`;
+      default:
+        // Default to a generic booking site
+        return `https://www.google.com/flights?hl=en#flt=${origin}.${destination}.${departureDate}${returnDate ? `*${destination}.${origin}.${returnDate}` : ''}`;
     }
-
-    return `https://www.kayak.com/flights?${params.toString()}`;
   }
 
   private createFlightIdentifier(flight: FlightReference): string {
@@ -596,6 +842,252 @@ export class AmadeusService {
       if (priceDiff !== 0) return priceDiff;
       return new Date(a.outbound).getTime() - new Date(b.outbound).getTime();
     });
+  }
+
+  public parseFlightDetails(offer: AmadeusFlightOffer): FlightDetails {
+    const firstSegment = offer.itineraries[0].segments[0];
+    const lastOutboundSegment = offer.itineraries[0].segments[offer.itineraries[0].segments.length - 1];
+    const inboundSegments = offer.itineraries[1]?.segments || [];
+    const firstInboundSegment = inboundSegments[0];
+    const lastInboundSegment = inboundSegments[inboundSegments.length - 1];
+    const cabinClass = offer.travelerPricings[0].fareDetailsBySegment[0].cabin;
+    const numberOfTravelers = offer.travelerPricings.length;
+
+    // Get aircraft info from dictionaries
+    const aircraftInfo = offer.dictionaries?.aircraft || {};
+
+    return {
+      airline: firstSegment.carrierCode,
+      route: `${firstSegment.departure.iataCode} - ${lastOutboundSegment.arrival.iataCode}`,
+      duration: this.calculateTotalDuration(offer.itineraries[0].segments),
+      layovers: offer.itineraries[0].segments.length - 1,
+      outbound: firstSegment.departure.at,
+      inbound: lastInboundSegment?.arrival.at || lastOutboundSegment.arrival.at,
+      price: {
+        amount: parseFloat(offer.price.total),
+        currency: offer.price.currency,
+        numberOfTravelers
+      },
+      tier: this.determineTier(parseFloat(offer.price.total), cabinClass, numberOfTravelers),
+      flightNumber: `${firstSegment.carrierCode}${firstSegment.number}`,
+      referenceUrl: this.generateBookingUrl(offer),
+      cabinClass,
+
+      details: {
+        price: {
+          amount: parseFloat(offer.price.total),
+          currency: offer.price.currency,
+          numberOfTravelers
+        },
+        outbound: {
+          departure: {
+            airport: firstSegment.departure.iataCode,
+            terminal: firstSegment.departure.terminal,
+            time: firstSegment.departure.at
+          },
+          arrival: {
+            airport: lastOutboundSegment.arrival.iataCode,
+            terminal: lastOutboundSegment.arrival.terminal,
+            time: lastOutboundSegment.arrival.at
+          },
+          duration: this.calculateTotalDuration(offer.itineraries[0].segments),
+          segments: offer.itineraries[0].segments.map(segment => ({
+            airline: segment.carrierCode,
+            flightNumber: `${segment.carrierCode}${segment.number}`,
+            aircraft: {
+              code: segment.aircraft.code,
+              name: aircraftInfo[segment.aircraft.code] || segment.aircraft.code
+            },
+            departure: {
+              airport: segment.departure.iataCode,
+              terminal: segment.departure.terminal,
+              time: segment.departure.at
+            },
+            arrival: {
+              airport: segment.arrival.iataCode,
+              terminal: segment.arrival.terminal,
+              time: segment.arrival.at
+            },
+            duration: segment.duration,
+            cabinClass: offer.travelerPricings[0].fareDetailsBySegment.find(
+              fare => fare.segmentId === segment.id
+            )?.cabin || cabinClass
+          }))
+        },
+        inbound: inboundSegments.length ? {
+          departure: {
+            airport: firstInboundSegment.departure.iataCode,
+            terminal: firstInboundSegment.departure.terminal,
+            time: firstInboundSegment.departure.at
+          },
+          arrival: {
+            airport: lastInboundSegment.arrival.iataCode,
+            terminal: lastInboundSegment.arrival.terminal,
+            time: lastInboundSegment.arrival.at
+          },
+          duration: this.calculateTotalDuration(inboundSegments),
+          segments: inboundSegments.map(segment => ({
+            airline: segment.carrierCode,
+            flightNumber: `${segment.carrierCode}${segment.number}`,
+            aircraft: {
+              code: segment.aircraft.code,
+              name: aircraftInfo[segment.aircraft.code] || segment.aircraft.code
+            },
+            departure: {
+              airport: segment.departure.iataCode,
+              terminal: segment.departure.terminal,
+              time: segment.departure.at
+            },
+            arrival: {
+              airport: segment.arrival.iataCode,
+              terminal: segment.arrival.terminal,
+              time: segment.arrival.at
+            },
+            duration: segment.duration,
+            cabinClass: offer.travelerPricings[0].fareDetailsBySegment.find(
+              fare => fare.segmentId === segment.id
+            )?.cabin || cabinClass
+          }))
+        } : undefined,
+        bookingClass: offer.travelerPricings[0].fareDetailsBySegment[0].class,
+        fareBasis: offer.travelerPricings[0].fareDetailsBySegment[0].fareBasis,
+        validatingAirline: offer.validatingAirlineCodes[0]
+      }
+    };
+  }
+
+  async searchHotels(params: AmadeusHotelSearchParams): Promise<AmadeusHotelOffer[]> {
+    try {
+      logToFile('\n=== Amadeus Hotel Search Request ===');
+      logToFile(`Raw params: ${JSON.stringify(params, null, 2)}`);
+      
+      const token = await this.getToken();
+      
+      // Add delay between requests to avoid rate limiting
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      
+      const requestParams = {
+        cityCode: params.cityCode,
+        checkInDate: params.checkInDate,
+        checkOutDate: params.checkOutDate,
+        adults: params.adults,
+        roomQuantity: params.roomQuantity || 1,
+        priceRange: params.priceRange ? `${params.priceRange.min}-${params.priceRange.max}` : undefined,
+        ratings: params.ratings ? params.ratings.join(',') : undefined,
+        currency: 'USD',
+        bestRateOnly: true,
+        view: 'FULL'
+      };
+
+      logToFile(`Final request params: ${JSON.stringify(requestParams, null, 2)}`);
+      logToFile(`Request URL: ${this.baseURL}/v2/shopping/hotel-offers`);
+      
+      const response = await axios.get(`${this.baseURL}/v2/shopping/hotel-offers`, {
+        headers: {
+          Authorization: `Bearer ${token}`
+        },
+        params: requestParams
+      });
+
+      logToFile('\n=== Amadeus Hotel Search Response ===');
+      logToFile(`Status: ${response.status}`);
+      logToFile(`Headers: ${JSON.stringify(response.headers, null, 2)}`);
+      
+      if (!response.data?.data) {
+        const error = {
+          status: response.status,
+          statusText: response.statusText,
+          data: JSON.stringify(response.data, null, 2),
+          headers: response.headers
+        };
+        logToFile(`ERROR: Invalid response structure: ${JSON.stringify(error, null, 2)}`);
+        throw new Error('Invalid response from Amadeus API');
+      }
+
+      const results = response.data.data;
+      logToFile('\n=== Amadeus Hotel Search Results ===');
+      logToFile(`Total results: ${results.length}`);
+      if (results.length > 0) {
+        logToFile(`First result: ${JSON.stringify(results[0], null, 2)}`);
+      }
+
+      return results;
+    } catch (error) {
+      logToFile('\n=== Amadeus API Error ===');
+      if (axios.isAxiosError(error)) {
+        logToFile(`Request config: ${JSON.stringify({
+          url: error.config?.url,
+          method: error.config?.method,
+          params: error.config?.params,
+          headers: error.config?.headers
+        }, null, 2)}`);
+
+        logToFile(`Response error details: ${JSON.stringify({
+          status: error.response?.status,
+          statusText: error.response?.statusText,
+          data: error.response?.data,
+          errors: error.response?.data?.errors,
+          headers: error.response?.headers
+        }, null, 2)}`);
+
+        if (error.response?.data?.errors) {
+          logToFile('Amadeus Error Messages:');
+          error.response.data.errors.forEach((err: any) => {
+            logToFile(`- ${err.title}: ${err.detail} (${err.code})`);
+          });
+        }
+      } else {
+        logToFile(`Non-Axios error: ${error}`);
+      }
+      throw error;
+    }
+  }
+
+  transformHotelOffer(offer: AmadeusHotelOffer) {
+    const hotelOffer = offer.offers[0]; // Get the first/best offer
+    const price = parseFloat(hotelOffer.price.total);
+
+    return {
+      id: hotelOffer.id,
+      name: offer.hotel.name,
+      rating: parseFloat(offer.hotel.rating),
+      location: {
+        cityCode: offer.hotel.cityCode,
+        latitude: offer.hotel.latitude,
+        longitude: offer.hotel.longitude
+      },
+      price: {
+        amount: price,
+        currency: hotelOffer.price.currency,
+        perNight: parseFloat(hotelOffer.price.variations.average.base)
+      },
+      room: {
+        type: hotelOffer.room.type,
+        category: hotelOffer.room.typeEstimated.category,
+        beds: hotelOffer.room.typeEstimated.beds,
+        bedType: hotelOffer.room.typeEstimated.bedType,
+        description: hotelOffer.room.description.text
+      },
+      checkIn: hotelOffer.checkInDate,
+      checkOut: hotelOffer.checkOutDate,
+      cancellationPolicy: {
+        deadline: hotelOffer.policies.cancellation?.deadline,
+        paymentType: hotelOffer.policies.paymentType
+      },
+      hotelChain: offer.hotel.chainCode || 'Independent',
+      tier: this.determineHotelTier(price, parseFloat(offer.hotel.rating)),
+      available: offer.available
+    };
+  }
+
+  private determineHotelTier(price: number, rating: number): 'budget' | 'medium' | 'premium' {
+    // Base tier on both price and rating
+    if (rating >= 4.5 || price > 500) {
+      return 'premium';
+    } else if (rating >= 3.5 || price > 200) {
+      return 'medium';
+    }
+    return 'budget';
   }
 }
 

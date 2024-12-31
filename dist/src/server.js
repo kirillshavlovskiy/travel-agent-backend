@@ -3,33 +3,68 @@ import cors from 'cors';
 import cookieParser from 'cookie-parser';
 import { config } from 'dotenv';
 import redditAuthRoutes from './routes/auth/reddit.js';
-import VacationBudgetAgent from './services/agents.js';
+import budgetRoutes from './routes/budget.js';
+import flightRoutes from './routes/flights.js';
+import hotelRoutes from './routes/hotels.js';
 // Load environment variables
 config();
 const app = express();
-// Configure CORS with environment-aware origin
-const FRONTEND_URL = process.env.VERCEL_URL
-    ? `https://${process.env.VERCEL_URL}`
-    : 'http://localhost:3002';
+// Configure middleware - move this before CORS
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true }));
+app.use(cookieParser());
+// Configure CORS with environment-aware origins
+const FRONTEND_URLS = [
+    'https://ai-trip-advisor-web.vercel.app',
+    'http://localhost:3003',
+    'http://localhost:3002',
+    'http://localhost:3000'
+].filter(Boolean);
+console.log('Allowed origins:', FRONTEND_URLS);
 app.use(cors({
-    origin: [FRONTEND_URL, 'http://localhost:3002'],
+    origin: function (origin, callback) {
+        if (!origin)
+            return callback(null, true);
+        if (FRONTEND_URLS.some(url => origin.startsWith(url))) {
+            callback(null, true);
+        }
+        else {
+            console.log(`Blocked request from unauthorized origin: ${origin}`);
+            callback(new Error('Not allowed by CORS'));
+        }
+    },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization']
+    allowedHeaders: ['Content-Type', 'Authorization', 'Cookie'],
+    exposedHeaders: ['Set-Cookie']
 }));
 // Request logging middleware
 app.use((req, res, next) => {
-    console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
+    console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`, {
+        origin: req.headers.origin,
+        referer: req.headers.referer,
+        userAgent: req.headers['user-agent']
+    });
     if (req.body && Object.keys(req.body).length > 0) {
         console.log('Body:', req.body);
     }
     next();
 });
-app.use(express.json());
-app.use(cookieParser());
-// Auth routes
+// Log available routes
+console.log('Mounting routes...');
+// Mount routes with logging
+console.log('Mounting /api/auth route...');
 app.use('/api/auth', redditAuthRoutes);
-const agent = new VacationBudgetAgent();
+console.log('Auth route mounted');
+console.log('Mounting /api/budget route...');
+app.use('/api/budget', budgetRoutes);
+console.log('Budget route mounted');
+console.log('Mounting /api/flights route...');
+app.use('/api/flights', flightRoutes);
+console.log('Flight route mounted');
+console.log('Mounting /api/hotels route...');
+app.use('/api/hotels', hotelRoutes);
+console.log('Hotel route mounted');
 // Root endpoint
 app.get('/', (req, res) => {
     res.json({
@@ -44,12 +79,12 @@ app.get('/api/health', (req, res) => {
     res.json({
         status: 'ok',
         timestamp: new Date().toISOString(),
-        environment: process.env.VERCEL_ENV || 'development',
-        url: process.env.VERCEL_URL || 'localhost',
-        region: process.env.VERCEL_REGION || 'local',
-        perplexityApiKey: !!process.env.PERPLEXITY_API_KEY,
-        redditClientId: !!process.env.REDDIT_CLIENT_ID,
-        redditClientSecret: !!process.env.REDDIT_CLIENT_SECRET
+        environment: process.env.NODE_ENV || 'development',
+        routes: {
+            auth: !!redditAuthRoutes,
+            budget: !!budgetRoutes,
+            flights: !!flightRoutes
+        }
     });
 });
 // Error handling middleware
@@ -59,7 +94,8 @@ app.use((err, req, res, next) => {
         stack: err.stack,
         url: req.url,
         method: req.method,
-        body: req.body
+        body: req.body,
+        origin: req.headers.origin
     });
     res.status(500).json({
         error: 'Internal server error',
@@ -69,7 +105,14 @@ app.use((err, req, res, next) => {
 });
 // Handle 404
 app.use((req, res) => {
-    console.log(`404 Not Found: ${req.method} ${req.url}`);
+    console.log(`404 Not Found: ${req.method} ${req.url}`, {
+        origin: req.headers.origin,
+        availableRoutes: {
+            auth: !!redditAuthRoutes,
+            budget: !!budgetRoutes,
+            flights: !!flightRoutes
+        }
+    });
     res.status(404).json({
         error: 'Not Found',
         message: 'The requested endpoint does not exist',
@@ -77,18 +120,22 @@ app.use((req, res) => {
         path: req.url
     });
 });
-// Only start the server in development
-if (process.env.NODE_ENV !== 'production') {
-    const PORT = process.env.PORT || 3001;
-    app.listen(PORT, () => {
-        console.log(`Server running on port ${PORT}`);
-        console.log(`Health check available at http://localhost:${PORT}/api/health`);
-        console.log('Environment:', {
-            nodeEnv: process.env.NODE_ENV,
-            perplexityApiKey: !!process.env.PERPLEXITY_API_KEY,
-            redditClientId: !!process.env.REDDIT_CLIENT_ID,
-            redditClientSecret: !!process.env.REDDIT_CLIENT_SECRET
-        });
+const PORT = process.env.PORT || 3001;
+app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+    console.log(`Health check available at http://localhost:${PORT}/api/health`);
+    console.log('Environment:', {
+        nodeEnv: process.env.NODE_ENV,
+        perplexityApiKey: !!process.env.PERPLEXITY_API_KEY,
+        redditClientId: !!process.env.REDDIT_CLIENT_ID,
+        redditClientSecret: !!process.env.REDDIT_CLIENT_SECRET,
+        amadeusClientId: !!process.env.AMADEUS_CLIENT_ID,
+        amadeusClientSecret: !!process.env.AMADEUS_CLIENT_SECRET
     });
-}
+    console.log('Routes mounted:', {
+        auth: !!redditAuthRoutes,
+        budget: !!budgetRoutes,
+        flights: !!flightRoutes
+    });
+});
 export default app;

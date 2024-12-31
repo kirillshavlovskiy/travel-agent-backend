@@ -6,6 +6,7 @@ import redditAuthRoutes from './routes/auth/reddit.js';
 import { VacationBudgetAgent } from './services/agents.js';
 import budgetRoutes from './routes/budget.js';
 import flightRoutes from './routes/flights.js';
+import hotelRoutes from './routes/hotels.js';
 import { amadeusService } from './services/amadeus.js';
 
 // Load environment variables
@@ -72,6 +73,10 @@ console.log('Budget route mounted');
 console.log('Mounting /api/flights route...');
 app.use('/api/flights', flightRoutes);
 console.log('Flight route mounted');
+
+console.log('Mounting /api/hotels route...');
+app.use('/api/hotels', hotelRoutes);
+console.log('Hotel route mounted');
 
 // Root endpoint
 app.get('/', (req: Request, res: Response) => {

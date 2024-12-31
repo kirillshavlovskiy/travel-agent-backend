@@ -3,7 +3,8 @@ import cors from 'cors';
 import cookieParser from 'cookie-parser';
 import { config } from 'dotenv';
 import redditAuthRoutes from './src/routes/auth/reddit.js';
-import VacationBudgetAgent from './src/services/agents.js';
+import budgetRoutes from './src/routes/budget.js';
+import { VacationBudgetAgent } from './src/services/agents.js';
 // Load environment variables
 config();
 const app = express();
@@ -11,11 +12,36 @@ const app = express();
 const FRONTEND_URL = process.env.VERCEL_URL
     ? `https://${process.env.VERCEL_URL}`
     : 'http://localhost:3002';
+// List of allowed origins
+const allowedOrigins = [
+    FRONTEND_URL,
+    'http://localhost:3000',
+    'http://localhost:3002',
+    'http://localhost:3003',
+    'https://ai-trip-advisor.vercel.app',
+    'https://ai-trip-advisor-server.vercel.app',
+    'https://ai-trip-advisor-1b18b6eyj-kirills-projects-bfbcd3f8.vercel.app'
+];
+// Configure CORS
 app.use(cors({
-    origin: [FRONTEND_URL, 'http://localhost:3002'],
+    origin: (origin, callback) => {
+        // Allow requests with no origin (like mobile apps or curl requests)
+        if (!origin) {
+            return callback(null, true);
+        }
+        console.log('[CORS] Request from origin:', origin);
+        if (allowedOrigins.includes(origin) || origin.endsWith('.vercel.app')) {
+            callback(null, true);
+        }
+        else {
+            console.log('[CORS] Origin not allowed:', origin);
+            callback(new Error('Not allowed by CORS'));
+        }
+    },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization']
+    allowedHeaders: ['Content-Type', 'Authorization', 'Cookie', 'Accept'],
+    exposedHeaders: ['Set-Cookie']
 }));
 // Request logging middleware
 app.use((req, res, next) => {
@@ -30,6 +56,8 @@ app.use(express.json());
 app.use(cookieParser());
 // Auth routes
 app.use('/api/auth', redditAuthRoutes);
+// Budget routes
+app.use('/api', budgetRoutes);
 const agent = new VacationBudgetAgent();
 // Root endpoint
 app.get('/', (req, res) => {
@@ -50,7 +78,8 @@ app.get('/api/health', (req, res) => {
         region: process.env.VERCEL_REGION || 'local',
         perplexityApiKey: !!process.env.PERPLEXITY_API_KEY,
         redditClientId: !!process.env.REDDIT_CLIENT_ID,
-        redditClientSecret: !!process.env.REDDIT_CLIENT_SECRET
+        redditClientSecret: !!process.env.REDDIT_CLIENT_SECRET,
+        allowedOrigins: allowedOrigins
     });
 });
 // Error handling middleware

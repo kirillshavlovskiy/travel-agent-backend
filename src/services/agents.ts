@@ -306,8 +306,12 @@ CRITICAL JSON FORMATTING RULES:
           ['budget', 'medium', 'premium'].forEach(tier => {
             if (parsed.hotels[tier]?.references) {
               parsed.hotels[tier].references = parsed.hotels[tier].references
-                .filter(ref => ref && typeof ref === 'object')
-                .map(ref => ({
+                .filter((ref: unknown): ref is HotelReference => {
+                  if (!ref || typeof ref !== 'object') return false;
+                  const r = ref as Partial<HotelReference>;
+                  return typeof r.name === 'string' && typeof r.location === 'string';
+                })
+                .map((ref: HotelReference) => ({
                   name: ref.name || '',
                   location: ref.location || '',
                   price: typeof ref.price === 'number' ? ref.price : parseFloat(ref.price) || 0,
@@ -318,15 +322,12 @@ CRITICAL JSON FORMATTING RULES:
                   reviewCount: ref.reviewCount || 0,
                   images: Array.isArray(ref.images) ? ref.images : [],
                   referenceUrl: ref.referenceUrl || '',
-                  coordinates: {
-                    latitude: ref.coordinates?.latitude || 0,
-                    longitude: ref.coordinates?.longitude || 0
-                  },
+                  coordinates: ref.coordinates || { latitude: 0, longitude: 0 },
                   features: Array.isArray(ref.features) ? ref.features : [],
-                  policies: {
-                    checkIn: ref.policies?.checkIn || '',
-                    checkOut: ref.policies?.checkOut || '',
-                    cancellation: ref.policies?.cancellation || ''
+                  policies: ref.policies || {
+                    checkIn: '',
+                    checkOut: '',
+                    cancellation: ''
                   }
                 }));
             }
