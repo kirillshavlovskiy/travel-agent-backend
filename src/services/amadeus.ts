@@ -169,7 +169,7 @@ export class AmadeusService {
   private clientId: string;
   private clientSecret: string;
   private baseURL = 'https://test.api.amadeus.com';
-  private commonAirlines = {
+  private commonAirlines: { [key: string]: string } = {
     'AA': 'American Airlines',
     'UA': 'United Airlines',
     'DL': 'Delta Air Lines',
@@ -241,6 +241,59 @@ export class AmadeusService {
       console.error(errorMsg, error);
       throw error;
     }
+  }
+
+  async getAirlineInfo(airlineCodes: string | string[]): Promise<any[]> {
+    const codes = Array.isArray(airlineCodes) ? airlineCodes : [airlineCodes];
+    const results = [];
+
+    try {
+      const token = await this.getToken();
+      // Use the correct endpoint with airlineCodes query parameter
+      const response = await axios.get(`${this.baseURL}/v1/reference-data/airlines`, {
+        params: {
+          airlineCodes: codes.join(',')
+        },
+        headers: {
+          Authorization: `Bearer ${token}`
+        }
+      });
+
+      if (response.data?.data) {
+        results.push(...response.data.data.map((airline: any) => ({
+          ...airline,
+          commonName: airline.commonName || airline.businessName || airline.iataCode
+        })));
+      }
+    } catch (error) {
+      logToFile(`Error fetching airline info: ${error}`);
+      // Fallback to dictionaries and common airlines map
+      results.push(...codes.map(code => ({
+        iataCode: code,
+        commonName: this.commonAirlines[code] || code,
+        businessName: this.commonAirlines[code]
+      })));
+    }
+
+    return results;
+  }
+
+  calculateTotalDuration(segments: any[]): string {
+    let totalMinutes = 0;
+
+    segments.forEach(segment => {
+      const duration = segment.duration;
+      if (duration) {
+        // Parse duration in format "PT2H30M"
+        const hours = duration.match(/(\d+)H/)?.[1] || '0';
+        const minutes = duration.match(/(\d+)M/)?.[1] || '0';
+        totalMinutes += parseInt(hours) * 60 + parseInt(minutes);
+      }
+    });
+
+    const hours = Math.floor(totalMinutes / 60);
+    const minutes = totalMinutes % 60;
+    return `PT${hours}H${minutes}M`;
   }
 
   async searchFlights(params: {
