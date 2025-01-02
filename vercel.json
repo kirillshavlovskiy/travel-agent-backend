@@ -2,7 +2,7 @@
   "version": 2,
   "builds": [
     {
-      "src": "server.ts",
+      "src": "src/server.ts",
       "use": "@vercel/node",
       "config": {
         "installCommand": "npm install && npx prisma generate"
@@ -11,9 +11,12 @@
   ],
   "routes": [
     {
+      "src": "/api/(.*)",
+      "dest": "src/server.ts"
+    },
+    {
       "src": "/(.*)",
-      "dest": "server.ts",
-      "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH", "HEAD"]
+      "dest": "src/server.ts"
     }
   ],
   "env": {
