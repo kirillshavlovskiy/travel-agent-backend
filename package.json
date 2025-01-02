@@ -1,12 +1,12 @@
 {
-  "name": "ai-trip-advisor-server",
+  "name": "backend",
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "dev": "nodemon",
-    "build": "tsc && cp package.json dist/",
-    "start": "node dist/index.js",
-    "vercel-build": "npm run build && npx prisma generate"
+    "postinstall": "prisma generate",
+    "dev": "tsx watch src/server.ts",
+    "build": "prisma generate && tsc",
+    "start": "node dist/server.js"
   },
   "dependencies": {
     "@prisma/client": "^5.10.2",
