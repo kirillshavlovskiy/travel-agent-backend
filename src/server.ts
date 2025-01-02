@@ -67,7 +67,10 @@ app.use(cors({
     }
     
     // Check if the origin matches exactly or is a Vercel preview URL
-    if (FRONTEND_URLS.includes(origin) || origin.includes('vercel.app')) {
+    const isAllowed = FRONTEND_URLS.includes(origin) || origin.includes('vercel.app');
+    console.log('[CORS] Origin check:', { origin, isAllowed });
+    
+    if (isAllowed) {
       console.log('[CORS] Allowing request from:', origin);
       callback(null, true);
     } else {
@@ -86,16 +89,28 @@ app.use(cors({
 
 // Add timeout middleware with longer timeout for budget calculation
 app.use((req, res, next) => {
-  // Set a longer timeout (120 seconds) for budget calculation
-  const timeout = req.path.includes('/api/budget/calculate-budget') ? 120000 : 30000;
-  req.setTimeout(timeout, () => {
-    console.error(`[Timeout] Request timed out: ${req.method} ${req.url}`);
-    res.status(504).json({
-      error: 'Gateway Timeout',
-      message: 'Request took too long to process',
-      timestamp: new Date().toISOString()
-    });
-  });
+  // Set a longer timeout (300 seconds) for budget calculation
+  const timeout = req.path.includes('/api/budget/calculate-budget') ? 300000 : 30000;
+  
+  // Set both the request and response timeouts
+  req.setTimeout(timeout);
+  res.setTimeout(timeout);
+  
+  const timeoutHandler = () => {
+    console.error(`[Timeout] Request timed out after ${timeout}ms: ${req.method} ${req.url}`);
+    if (!res.headersSent) {
+      res.status(504).json({
+        error: 'Gateway Timeout',
+        message: 'Request took too long to process',
+        timestamp: new Date().toISOString()
+      });
+    }
+  };
+
+  // Set timeout handlers for both request and response
+  req.on('timeout', timeoutHandler);
+  res.on('timeout', timeoutHandler);
+
   next();
 });
 
