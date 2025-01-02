@@ -49,7 +49,8 @@ app.use(sessionMiddleware as any);
 app.use((req, res, next) => {
   const requestStart = Date.now();
   
-  console.log(`[REQUEST-START][${new Date().toISOString()}] ${req.method} ${req.url}`, {
+  // Log request details
+  console.log(`[REQUEST][${new Date().toISOString()}] ${req.method} ${req.url}`, {
     origin: req.headers.origin,
     referer: req.headers.referer,
     userAgent: req.headers['user-agent'],
@@ -63,43 +64,22 @@ app.use((req, res, next) => {
     console.log('[REQUEST-BODY]', JSON.stringify(req.body, null, 2));
   }
 
-  // Log response
-  const oldWrite = res.write;
-  const oldEnd = res.end;
-
-  const chunks: Buffer[] = [];
-
-  res.write = function (chunk: any, encoding?: BufferEncoding, callback?: (error: Error | null | undefined) => void): boolean {
-    chunks.push(Buffer.from(chunk));
-    return oldWrite.call(res, chunk, encoding, callback);
-  };
-
-  res.end = function (chunk?: any, encoding?: BufferEncoding, callback?: () => void): void {
-    if (chunk) {
-      chunks.push(Buffer.from(chunk));
-    }
-    
+  // Capture response using event listeners
+  res.on('finish', () => {
     const responseTime = Date.now() - requestStart;
-    const responseBody = Buffer.concat(chunks).toString('utf8');
-
-    console.log(`[RESPONSE-END][${new Date().toISOString()}] ${req.method} ${req.url}`, {
+    console.log(`[RESPONSE][${new Date().toISOString()}] ${req.method} ${req.url}`, {
       statusCode: res.statusCode,
       responseTime: `${responseTime}ms`,
-      responseSize: `${responseBody.length} bytes`,
       headers: res.getHeaders()
     });
+  });
 
-    if (responseBody) {
-      try {
-        const parsedBody = JSON.parse(responseBody);
-        console.log('[RESPONSE-BODY]', JSON.stringify(parsedBody, null, 2));
-      } catch (e) {
-        console.log('[RESPONSE-BODY]', responseBody);
-      }
-    }
-
-    oldEnd.call(res, chunk, encoding, callback);
-  };
+  res.on('error', (error) => {
+    console.error(`[RESPONSE-ERROR][${new Date().toISOString()}] ${req.method} ${req.url}`, {
+      error: error.message,
+      stack: error.stack
+    });
+  });
 
   next();
 });
