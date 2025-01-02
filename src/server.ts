@@ -45,6 +45,65 @@ const sessionMiddleware = session({
 
 app.use(sessionMiddleware as any);
 
+// Request logging middleware - move this before CORS
+app.use((req, res, next) => {
+  const requestStart = Date.now();
+  
+  console.log(`[REQUEST-START][${new Date().toISOString()}] ${req.method} ${req.url}`, {
+    origin: req.headers.origin,
+    referer: req.headers.referer,
+    userAgent: req.headers['user-agent'],
+    ip: req.ip,
+    headers: req.headers,
+    query: req.query,
+    params: req.params
+  });
+
+  if (req.body && Object.keys(req.body).length > 0) {
+    console.log('[REQUEST-BODY]', JSON.stringify(req.body, null, 2));
+  }
+
+  // Log response
+  const oldWrite = res.write;
+  const oldEnd = res.end;
+
+  const chunks: Buffer[] = [];
+
+  res.write = function (chunk: any, encoding?: BufferEncoding, callback?: (error: Error | null | undefined) => void): boolean {
+    chunks.push(Buffer.from(chunk));
+    return oldWrite.call(res, chunk, encoding, callback);
+  };
+
+  res.end = function (chunk?: any, encoding?: BufferEncoding, callback?: () => void): void {
+    if (chunk) {
+      chunks.push(Buffer.from(chunk));
+    }
+    
+    const responseTime = Date.now() - requestStart;
+    const responseBody = Buffer.concat(chunks).toString('utf8');
+
+    console.log(`[RESPONSE-END][${new Date().toISOString()}] ${req.method} ${req.url}`, {
+      statusCode: res.statusCode,
+      responseTime: `${responseTime}ms`,
+      responseSize: `${responseBody.length} bytes`,
+      headers: res.getHeaders()
+    });
+
+    if (responseBody) {
+      try {
+        const parsedBody = JSON.parse(responseBody);
+        console.log('[RESPONSE-BODY]', JSON.stringify(parsedBody, null, 2));
+      } catch (e) {
+        console.log('[RESPONSE-BODY]', responseBody);
+      }
+    }
+
+    oldEnd.call(res, chunk, encoding, callback);
+  };
+
+  next();
+});
+
 // Configure CORS with environment-aware origins
 const FRONTEND_URLS = [
   'https://ai-trip-advisor-web.vercel.app',
@@ -90,14 +149,20 @@ app.use(cors({
 // Add timeout middleware with longer timeout for budget calculation
 app.use((req, res, next) => {
   // Set a longer timeout (300 seconds) for budget calculation
-  const timeout = req.path.includes('/api/budget/calculate-budget') ? 300000 : 30000;
+  const timeoutDuration = req.path.includes('/api/budget/calculate-budget') ? 300000 : 30000;
   
   // Set both the request and response timeouts
-  req.setTimeout(timeout);
-  res.setTimeout(timeout);
+  req.setTimeout(timeoutDuration);
+  res.setTimeout(timeoutDuration);
   
   const timeoutHandler = () => {
-    console.error(`[Timeout] Request timed out after ${timeout}ms: ${req.method} ${req.url}`);
+    console.error(`[TIMEOUT] Request timed out after ${timeoutDuration}ms: ${req.method} ${req.url}`, {
+      origin: req.headers.origin,
+      path: req.path,
+      query: req.query,
+      body: req.body
+    });
+    
     if (!res.headersSent) {
       res.status(504).json({
         error: 'Gateway Timeout',
@@ -111,19 +176,6 @@ app.use((req, res, next) => {
   req.on('timeout', timeoutHandler);
   res.on('timeout', timeoutHandler);
 
-  next();
-});
-
-// Request logging middleware
-app.use((req, res, next) => {
-  console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`, {
-    origin: req.headers.origin,
-    referer: req.headers.referer,
-    userAgent: req.headers['user-agent']
-  });
-  if (req.body && Object.keys(req.body).length > 0) {
-    console.log('Body:', req.body);
-  }
   next();
 });
 
