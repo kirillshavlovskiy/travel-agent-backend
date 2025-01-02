@@ -1,5 +1,6 @@
 import axios from 'axios';
-import { AmadeusFlightOffer, FlightReference, AirlineInfo } from '../types.js';
+import { AmadeusFlightOffer, FlightReference } from '../types.js';
+import { HotelSearchParams, AmadeusHotelOffer, TransformedHotelOffer } from '../types/amadeus.js';
 import { logToFile } from '../utils/logger.js';
 
 const AIRCRAFT_CODES: { [key: string]: string } = {
@@ -102,12 +103,12 @@ interface FlightDetails {
       segments: FlightSegment[];
     };
     inbound: {
-          departure: {
+      departure: {
         airport: string;
         terminal?: string;
         time: string;
       };
-          arrival: {
+      arrival: {
         airport: string;
         terminal?: string;
         time: string;
@@ -157,10 +158,6 @@ interface AmadeusFlightSearchParams {
 
 interface AmadeusHotelSearchParams {
   // ... keep existing AmadeusHotelSearchParams interface ...
-}
-
-interface AmadeusHotelOffer {
-  // ... keep existing AmadeusHotelOffer interface ...
 }
 
 export class AmadeusService {
@@ -318,7 +315,7 @@ export class AmadeusService {
         currencyCode: 'USD',
         nonStop: false
       };
-      
+
       logToFile(`Final request params: ${JSON.stringify(requestParams, null, 2)}`);
       logToFile(`Request URL: ${this.baseURL}/v2/shopping/flight-offers`);
       logToFile(`Authorization: Bearer ${token.substring(0, 10)}...`);
@@ -333,7 +330,7 @@ export class AmadeusService {
       logToFile('\n=== Amadeus Flight Search Response ===');
       logToFile(`Status: ${response.status}`);
       logToFile(`Headers: ${JSON.stringify(response.headers, null, 2)}`);
-
+      
       if (!response.data?.data) {
         const error = {
           status: response.status,
@@ -388,5 +385,116 @@ export class AmadeusService {
       }
       throw error;
     }
+  }
+
+  determineTier(price: number, cabinClass?: string): string {
+    // These thresholds can be adjusted based on your requirements
+    if (price <= 500) {
+      return 'budget';
+    } else if (price <= 1000) {
+      return 'medium';
+    } else {
+      return 'premium';
+    }
+  }
+
+  generateBookingUrl(flightOffer: any): string {
+    try {
+      const firstSegment = flightOffer.itineraries[0].segments[0];
+      const lastSegment = flightOffer.itineraries[0].segments[flightOffer.itineraries[0].segments.length - 1];
+      
+    const origin = firstSegment.departure.iataCode;
+    const destination = lastSegment.arrival.iataCode;
+    const departureDate = firstSegment.departure.at.split('T')[0];
+      const returnDate = flightOffer.itineraries[1]?.segments[0]?.departure.at.split('T')[0];
+      const adults = flightOffer.travelerPricings.length;
+      const cabinClass = flightOffer.travelerPricings[0].fareDetailsBySegment[0].cabin;
+      
+      // Base URL for flight booking
+      const baseUrl = 'https://www.amadeus.com/flights';
+      
+      // Construct query parameters
+      const params = new URLSearchParams({
+        origin,
+        destination,
+        departureDate,
+        adults: adults.toString(),
+        cabinClass: cabinClass.toLowerCase()
+      });
+      
+      if (returnDate) {
+        params.append('returnDate', returnDate);
+      }
+      
+      // Add flight numbers if available
+      const flightNumbers = flightOffer.itineraries.flatMap((itinerary: any) =>
+        itinerary.segments.map((segment: any) =>
+          `${segment.carrierCode}${segment.number}`
+        )
+      );
+      
+      if (flightNumbers.length > 0) {
+        params.append('flights', flightNumbers.join(','));
+      }
+      
+      return `${baseUrl}?${params.toString()}`;
+    } catch (error) {
+      logToFile(`Error generating booking URL: ${error}`);
+      // Fallback to a basic URL if there's an error
+      return 'https://www.amadeus.com/flights';
+    }
+  }
+
+  async searchHotels(params: HotelSearchParams): Promise<AmadeusHotelOffer[]> {
+    // Temporary implementation
+    return [];
+  }
+
+  transformHotelOffer(offer: AmadeusHotelOffer): TransformedHotelOffer {
+    // Get the first offer from the offers array
+    const firstOffer = offer.offers[0];
+    const totalPrice = parseFloat(firstOffer.price.total);
+    
+    // Determine tier based on price
+    let tier: string;
+    if (totalPrice <= 200) {
+      tier = 'budget';
+    } else if (totalPrice <= 500) {
+      tier = 'medium';
+    } else {
+      tier = 'premium';
+    }
+    
+    return {
+      id: offer.self, // Using self as id since it's unique
+      hotelId: offer.self.split('/').pop() || '', // Extract hotel ID from self URL
+      name: offer.name,
+      description: offer.description?.text || '',
+      available: offer.available,
+      checkInDate: firstOffer.checkInDate,
+      checkOutDate: firstOffer.checkOutDate,
+      roomType: firstOffer.room.type,
+      bedType: firstOffer.room.typeEstimated.bedType,
+      numBeds: firstOffer.room.typeEstimated.beds,
+      tier,
+      price: {
+        currency: firstOffer.price.currency,
+        total: totalPrice,
+        perNight: parseFloat(firstOffer.price.base),
+        amount: totalPrice // Adding amount for compatibility
+      },
+      cancellationPolicy: firstOffer.policies.cancellation ? {
+        deadline: firstOffer.policies.cancellation.deadline,
+        description: firstOffer.policies.cancellation.description?.text || ''
+      } : undefined,
+      amenities: [], // Would need to be populated from hotel details API
+      rating: undefined, // Would need to be populated from hotel details API
+      location: {
+        latitude: 0, // Would need to be populated from hotel details API
+        longitude: 0, // Would need to be populated from hotel details API
+        address: '' // Would need to be populated from hotel details API
+      },
+      images: [] // Would need to be populated from hotel details API
+    };
   }
 } 

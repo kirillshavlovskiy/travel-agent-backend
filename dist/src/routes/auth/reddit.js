@@ -37,6 +37,10 @@ function getPrismaWithLogging() {
     }
     return prisma;
 }
+// Create a function to generate a session token
+function generateSessionToken() {
+    return Math.random().toString(36).substring(2) + Date.now().toString(36);
+}
 // Create a new Prisma instance for each request
 router.post('/reddit/callback', async (req, res) => {
     const prisma = getPrismaWithLogging();
@@ -210,7 +214,7 @@ router.post('/reddit/callback', async (req, res) => {
             const session = await tx.session.create({
                 data: {
                     userId: user.id,
-                    sessionToken: tokenData.access_token,
+                    sessionToken: generateSessionToken(),
                     expires: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)
                 }
             });
@@ -222,9 +226,16 @@ router.post('/reddit/callback', async (req, res) => {
             userId: result.user.id,
             sessionId: result.session.id
         });
+        // Set session cookie
+        res.cookie('session_token', result.session.sessionToken, {
+            httpOnly: true,
+            secure: process.env.NODE_ENV === 'production',
+            sameSite: 'lax',
+            path: '/',
+            expires: result.session.expires
+        });
         return res.json({
-            sessionToken: result.session.sessionToken,
-            expires: result.session.expires.toISOString(),
+            success: true,
             user: {
                 id: result.user.id,
                 username: result.user.username,

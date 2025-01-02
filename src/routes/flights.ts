@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { AmadeusService } from '../services/amadeus.js';
 import { AmadeusFlightOffer, FlightReference } from '../types.js';
+import { AmadeusItinerary, AmadeusSegment } from '../types/amadeus.js';
 
 const router = Router();
 const amadeusService = new AmadeusService();
@@ -93,8 +94,8 @@ router.post('/', async (req: Request, res: Response) => {
           // Get unique airline codes from all results
           const uniqueAirlineCodes = [...new Set(
             amadeusResults.flatMap(offer => 
-              offer.itineraries.flatMap(itinerary => 
-                itinerary.segments.map(segment => segment.carrierCode)
+              offer.itineraries.flatMap((itinerary: AmadeusItinerary) => 
+                itinerary.segments.map((segment: AmadeusSegment) => segment.carrierCode)
               )
             )
           )];

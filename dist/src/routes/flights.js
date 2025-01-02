@@ -64,7 +64,7 @@ router.post('/', async (req, res) => {
                 if (amadeusResults && amadeusResults.length > 0) {
                     console.log(`Found ${amadeusResults.length} Amadeus results`);
                     // Get unique airline codes from all results
-                    const uniqueAirlineCodes = [...new Set(amadeusResults.flatMap(offer => offer.itineraries.flatMap(itinerary => itinerary.segments.map(segment => segment.carrierCode))))];
+                    const uniqueAirlineCodes = [...new Set(amadeusResults.flatMap(offer => offer.itineraries.flatMap((itinerary) => itinerary.segments.map((segment) => segment.carrierCode))))];
                     console.log('Unique airline codes:', uniqueAirlineCodes);
                     // Fetch airline information for all carriers at once
                     let airlineInfoArray;

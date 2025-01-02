@@ -284,7 +284,7 @@ router.post('/calculate-budget', async (req, res) => {
                                         time: lastOutboundSegment.arrival.at
                                     },
                                     duration: amadeusService.calculateTotalDuration(offer.itineraries[0].segments),
-                                    segments: offer.itineraries[0].segments.map(segment => ({
+                                    segments: offer.itineraries[0].segments.map((segment) => ({
                                         airline: segment.carrierCode,
                                         flightNumber: `${segment.carrierCode}${segment.number}`,
                                         aircraft: {
@@ -302,7 +302,7 @@ router.post('/calculate-budget', async (req, res) => {
                                             time: segment.arrival.at
                                         },
                                         duration: segment.duration,
-                                        cabinClass: offer.travelerPricings[0].fareDetailsBySegment.find(fare => fare.segmentId === segment.id)?.cabin || cabinClass
+                                        cabinClass: offer.travelerPricings[0].fareDetailsBySegment.find((fare) => fare.segmentId === segment.id)?.cabin || cabinClass
                                     }))
                                 }
                             }

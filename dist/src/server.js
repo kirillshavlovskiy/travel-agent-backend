@@ -1,8 +1,9 @@
 import express from 'express';
 import cors from 'cors';
 import cookieParser from 'cookie-parser';
+import session from 'express-session';
 import { config } from 'dotenv';
-import redditAuthRoutes from './routes/auth/reddit.js';
+import authRoutes from './routes/auth.js';
 import budgetRoutes from './routes/budget.js';
 import flightRoutes from './routes/flights.js';
 import hotelRoutes from './routes/hotels.js';
@@ -13,6 +14,18 @@ const app = express();
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
+// Configure session middleware
+const sessionMiddleware = session({
+    secret: process.env.SESSION_SECRET || 'your-secret-key',
+    resave: false,
+    saveUninitialized: false,
+    cookie: {
+        secure: process.env.NODE_ENV === 'production',
+        httpOnly: true,
+        maxAge: 24 * 60 * 60 * 1000 // 24 hours
+    }
+});
+app.use(sessionMiddleware);
 // Configure CORS with environment-aware origins
 const FRONTEND_URLS = [
     'https://ai-trip-advisor-web.vercel.app',
@@ -21,15 +34,17 @@ const FRONTEND_URLS = [
     'http://localhost:3000'
 ].filter(Boolean);
 console.log('Allowed origins:', FRONTEND_URLS);
+// Configure CORS middleware
 app.use(cors({
     origin: function (origin, callback) {
+        // Allow requests with no origin (like mobile apps or curl requests)
         if (!origin)
             return callback(null, true);
-        if (FRONTEND_URLS.some(url => origin.startsWith(url))) {
+        if (FRONTEND_URLS.indexOf(origin) !== -1) {
             callback(null, true);
         }
         else {
-            console.log(`Blocked request from unauthorized origin: ${origin}`);
+            console.warn('[CORS] Blocked request from:', origin);
             callback(new Error('Not allowed by CORS'));
         }
     },
@@ -54,7 +69,7 @@ app.use((req, res, next) => {
 console.log('Mounting routes...');
 // Mount routes with logging
 console.log('Mounting /api/auth route...');
-app.use('/api/auth', redditAuthRoutes);
+app.use('/api/auth', authRoutes);
 console.log('Auth route mounted');
 console.log('Mounting /api/budget route...');
 app.use('/api/budget', budgetRoutes);
@@ -81,7 +96,7 @@ app.get('/api/health', (req, res) => {
         timestamp: new Date().toISOString(),
         environment: process.env.NODE_ENV || 'development',
         routes: {
-            auth: !!redditAuthRoutes,
+            auth: !!authRoutes,
             budget: !!budgetRoutes,
             flights: !!flightRoutes
         }
@@ -108,7 +123,7 @@ app.use((req, res) => {
     console.log(`404 Not Found: ${req.method} ${req.url}`, {
         origin: req.headers.origin,
         availableRoutes: {
-            auth: !!redditAuthRoutes,
+            auth: !!authRoutes,
             budget: !!budgetRoutes,
             flights: !!flightRoutes
         }
@@ -133,7 +148,7 @@ app.listen(PORT, () => {
         amadeusClientSecret: !!process.env.AMADEUS_CLIENT_SECRET
     });
     console.log('Routes mounted:', {
-        auth: !!redditAuthRoutes,
+        auth: !!authRoutes,
         budget: !!budgetRoutes,
         flights: !!flightRoutes
     });

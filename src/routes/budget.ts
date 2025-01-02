@@ -5,6 +5,7 @@ import { cities } from '../data/cities.js';
 import { airports } from '../data/airports.js';
 import { AmadeusService } from '../services/amadeus.js';
 import { AirlineInfo } from '../types.js';
+import { AmadeusSegment, AmadeusFare, AmadeusFareDetail, AmadeusFlightOffer } from '../types/amadeus.js';
 
 const router = Router();
 const agent = new VacationBudgetAgent();
@@ -323,7 +324,7 @@ router.post('/calculate-budget', async (req: Request, res: Response) => {
                       time: lastOutboundSegment.arrival.at
                     },
                     duration: amadeusService.calculateTotalDuration(offer.itineraries[0].segments),
-                    segments: offer.itineraries[0].segments.map(segment => ({
+                    segments: offer.itineraries[0].segments.map((segment: AmadeusSegment) => ({
                       airline: segment.carrierCode,
                       flightNumber: `${segment.carrierCode}${segment.number}`,
                       aircraft: {
@@ -342,7 +343,7 @@ router.post('/calculate-budget', async (req: Request, res: Response) => {
                       },
                       duration: segment.duration,
                       cabinClass: offer.travelerPricings[0].fareDetailsBySegment.find(
-                        fare => fare.segmentId === segment.id
+                        (fare: AmadeusFare) => fare.segmentId === segment.id
                       )?.cabin || cabinClass
                     }))
                   }
