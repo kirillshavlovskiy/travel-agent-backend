@@ -58,10 +58,16 @@ console.log('Allowed origins:', FRONTEND_URLS);
 // Configure CORS middleware
 app.use(cors({
   origin: function(origin, callback) {
-    // Allow requests with no origin (like mobile apps or curl requests)
-    if (!origin) return callback(null, true);
+    console.log('[CORS] Request from origin:', origin);
     
-    if (FRONTEND_URLS.indexOf(origin) !== -1) {
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) {
+      console.log('[CORS] Allowing request with no origin');
+      return callback(null, true);
+    }
+    
+    if (FRONTEND_URLS.includes(origin)) {
+      console.log('[CORS] Allowing request from:', origin);
       callback(null, true);
     } else {
       console.warn('[CORS] Blocked request from:', origin);
@@ -71,7 +77,8 @@ app.use(cors({
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'Cookie'],
-  exposedHeaders: ['Set-Cookie']
+  exposedHeaders: ['Set-Cookie'],
+  maxAge: 86400 // 24 hours
 }));
 
 // Request logging middleware
