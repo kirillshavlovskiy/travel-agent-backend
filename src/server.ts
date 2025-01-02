@@ -55,7 +55,7 @@ const FRONTEND_URLS = [
 
 console.log('Allowed origins:', FRONTEND_URLS);
 
-// Configure CORS middleware
+// Configure CORS middleware with better error handling
 app.use(cors({
   origin: function(origin, callback) {
     console.log('[CORS] Request from origin:', origin);
@@ -66,7 +66,9 @@ app.use(cors({
       return callback(null, true);
     }
     
-    if (FRONTEND_URLS.includes(origin)) {
+    // Check if the origin is in our allowed list
+    const isAllowed = FRONTEND_URLS.some(url => origin.startsWith(url));
+    if (isAllowed) {
       console.log('[CORS] Allowing request from:', origin);
       callback(null, true);
     } else {
@@ -76,10 +78,26 @@ app.use(cors({
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'Cookie'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'Cookie', 'X-Requested-With'],
   exposedHeaders: ['Set-Cookie'],
-  maxAge: 86400 // 24 hours
+  maxAge: 86400, // 24 hours
+  preflightContinue: false,
+  optionsSuccessStatus: 204
 }));
+
+// Add timeout middleware
+app.use((req, res, next) => {
+  // Set timeout to 30 seconds
+  req.setTimeout(30000, () => {
+    console.error(`[Timeout] Request timed out: ${req.method} ${req.url}`);
+    res.status(504).json({
+      error: 'Gateway Timeout',
+      message: 'Request took too long to process',
+      timestamp: new Date().toISOString()
+    });
+  });
+  next();
+});
 
 // Request logging middleware
 app.use((req, res, next) => {
@@ -149,9 +167,28 @@ app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
     origin: req.headers.origin
   });
   
+  // Handle CORS errors
+  if (err.message === 'Not allowed by CORS') {
+    return res.status(403).json({
+      error: 'Forbidden',
+      message: 'CORS policy violation',
+      timestamp: new Date().toISOString(),
+      origin: req.headers.origin
+    });
+  }
+
+  // Handle timeout errors
+  if (err.name === 'TimeoutError' || err.message.includes('timeout')) {
+    return res.status(504).json({
+      error: 'Gateway Timeout',
+      message: 'Request took too long to process',
+      timestamp: new Date().toISOString()
+    });
+  }
+  
   res.status(500).json({
     error: 'Internal server error',
-    message: err.message,
+    message: process.env.NODE_ENV === 'production' ? 'An unexpected error occurred' : err.message,
     timestamp: new Date().toISOString()
   });
 });
