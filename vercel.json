@@ -2,21 +2,18 @@
   "version": 2,
   "builds": [
     {
-      "src": "server.ts",
-      "use": "@vercel/node",
-      "config": {
-        "installCommand": "npm install && npx prisma generate"
-      }
+      "src": "dist/index.js",
+      "use": "@vercel/node"
     }
   ],
   "routes": [
     {
+      "src": "/api/budget/(.*)",
+      "dest": "dist/index.js"
+    },
+    {
       "src": "/(.*)",
-      "dest": "server.ts",
-      "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH", "HEAD"]
+      "dest": "dist/index.js"
     }
-  ],
-  "env": {
-    "NODE_ENV": "production"
-  }
+  ]
 } 
