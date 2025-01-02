@@ -66,9 +66,8 @@ app.use(cors({
       return callback(null, true);
     }
     
-    // Check if the origin is in our allowed list
-    const isAllowed = FRONTEND_URLS.some(url => origin.startsWith(url));
-    if (isAllowed) {
+    // Check if the origin matches exactly or is a Vercel preview URL
+    if (FRONTEND_URLS.includes(origin) || origin.includes('vercel.app')) {
       console.log('[CORS] Allowing request from:', origin);
       callback(null, true);
     } else {
@@ -85,10 +84,11 @@ app.use(cors({
   optionsSuccessStatus: 204
 }));
 
-// Add timeout middleware
+// Add timeout middleware with longer timeout for budget calculation
 app.use((req, res, next) => {
-  // Set timeout to 30 seconds
-  req.setTimeout(30000, () => {
+  // Set a longer timeout (120 seconds) for budget calculation
+  const timeout = req.path.includes('/api/budget/calculate-budget') ? 120000 : 30000;
+  req.setTimeout(timeout, () => {
     console.error(`[Timeout] Request timed out: ${req.method} ${req.url}`);
     res.status(504).json({
       error: 'Gateway Timeout',
