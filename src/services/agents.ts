@@ -160,13 +160,26 @@ const SYSTEM_MESSAGE = `You are an AI travel budget expert. Your role is to:
 export class VacationBudgetAgent {
   private async fetchWithRetry(url: string, options: any, retries = 3): Promise<FetchResponse> {
     let lastError: Error | unknown;
+    const timeout = 20000; // 20 second timeout
 
     for (let i = 0; i < retries; i++) {
       try {
-        const response = await fetch(url, options);
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), timeout);
+
+        const response = await fetch(url, {
+          ...options,
+          signal: controller.signal
+        });
+
+        clearTimeout(timeoutId);
         return response;
       } catch (error) {
         lastError = error;
+        if (error instanceof Error && error.name === 'AbortError') {
+          console.warn(`[Perplexity] Request timeout on attempt ${i + 1}`);
+        }
+        // Exponential backoff
         await new Promise(resolve => setTimeout(resolve, 1000 * Math.pow(2, i)));
       }
     }
@@ -203,93 +216,20 @@ export class VacationBudgetAgent {
   }
 
   async queryPerplexity(prompt: string, category: string): Promise<CategoryData> {
-    try {
-      console.log(`[${category.toUpperCase()}] Making Perplexity API request`);
-      
-      const response = await this.fetchWithRetry(
-        'https://api.perplexity.ai/chat/completions',
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${process.env.PERPLEXITY_API_KEY}`
-          },
-          body: JSON.stringify({
-            model: 'llama-3.1-sonar-small-128k-online',
-            messages: [
-              {
-                role: 'system',
-                content: `${SYSTEM_MESSAGE}
+    console.log(`[${category.toUpperCase()}] Perplexity API is disabled for testing`);
+    return this.getDefaultCategoryData(category);
+  }
 
-CRITICAL JSON FORMATTING RULES:
-1. Return ONLY a valid JSON object
-2. Do NOT include any text before or after the JSON
-3. Do NOT use markdown formatting or code blocks
-4. Use ONLY double quotes for strings and property names
-5. Do NOT use single quotes anywhere
-6. Do NOT include any comments
-7. Do NOT include any trailing commas
-8. Ensure all strings are properly escaped
-9. Ensure all arrays and objects are properly closed
-10. All numbers must be valid JSON numbers (no ranges like "35-40", use average value instead)
-11. All dates must be valid ISO strings
-12. All URLs must be valid and properly escaped
-13. All property names must be double-quoted
-14. Do NOT escape quotes in the response
-15. For price ranges, use the average value (e.g., for "35-40", use 37.5)`
-              },
-              {
-                role: 'user',
-                content: prompt
-              }
-            ]
-          })
-        }
-      );
-
-      if (!response.ok) {
-        throw new Error(`Perplexity API error: ${response.statusText || 'Unknown error'}`);
-      }
-
-      const data = await response.json() as PerplexityResponse;
-      const content = data.choices[0]?.message?.content;
-
-      if (!content) {
-        throw new Error('Empty response from Perplexity API');
-      }
-
-      console.log(`[${category}] Raw response:`, content);
-
-      // Clean up the response before parsing
-      const cleanedContent = content
-        // Remove markdown code blocks
-        .replace(/^```json\s*/, '')
-        .replace(/\s*```$/, '')
-        // Replace price ranges with their average
-        .replace(/(\d+)-(\d+)/g, (_, min, max) => {
-          const average = (parseInt(min) + parseInt(max)) / 2;
-          return average.toString();
-        })
-        // Remove any trailing commas in arrays and objects
-        .replace(/,(\s*[}\]])/g, '$1')
-        // Ensure all property names are double-quoted
-        .replace(/([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:/g, '$1"$2":');
-
-      console.log(`[${category}] Cleaned response:`, cleanedContent);
-
-      try {
-        return JSON.parse(cleanedContent);
-      } catch (parseError) {
-        console.error(`[${category}] Failed to parse response:`, parseError);
-        console.error(`[${category}] Problematic content:`, content);
-        // Return a default structure for the category
-        return this.getDefaultCategoryData(category);
-      }
-    } catch (error) {
-      console.error(`[${category}] Error querying Perplexity:`, error);
-      // Return a default structure for the category
-      return this.getDefaultCategoryData(category);
-    }
+  private cleanResponse(content: string): string {
+    return content
+      .replace(/^```json\s*/, '')
+      .replace(/\s*```$/, '')
+      .replace(/(\d+)-(\d+)/g, (_, min, max) => {
+        const average = (parseInt(min) + parseInt(max)) / 2;
+        return average.toString();
+      })
+      .replace(/,(\s*[}\]])/g, '$1')
+      .replace(/([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:/g, '$1"$2":');
   }
 
   private getDefaultCategoryData(category: string): CategoryData {
@@ -364,6 +304,9 @@ CRITICAL JSON FORMATTING RULES:
 
   async handleTravelRequest(request: TravelRequest): Promise<Record<string, any>> {
     try {
+      const startTime = Date.now();
+      console.log('[TIMING] Starting budget calculation');
+
       const formattedRequest = {
         ...request,
         departureLocation: {
@@ -372,12 +315,24 @@ CRITICAL JSON FORMATTING RULES:
         }
       };
 
-      const categories = ['flights', 'hotels', 'localTransportation', 'food', 'activities'];
-      const results = await Promise.all(
-        categories.map(async (category) => {
-          const prompt = this.constructPrompt(category, formattedRequest);
-          const data = await this.queryPerplexity(prompt, category);
-          return { category, data };
+      // Process only essential categories
+      const essentialCategories = ['flights', 'hotels'];
+      console.log(`[TIMING] Processing essential categories only`);
+      
+      const essentialResults = await Promise.all(
+        essentialCategories.map(async (category) => {
+          const categoryStart = Date.now();
+          console.log(`[TIMING][${category}] Starting essential category processing`);
+
+          try {
+            const prompt = this.constructPrompt(category, formattedRequest);
+            const data = await this.queryPerplexity(prompt, category);
+            console.log(`[TIMING][${category}] Essential category completed in ${Date.now() - categoryStart}ms`);
+            return { category, data };
+          } catch (error) {
+            console.error(`[${category}] Error processing essential category:`, error);
+            return { category, data: this.getDefaultCategoryData(category) };
+          }
         })
       );
 
@@ -393,10 +348,18 @@ CRITICAL JSON FORMATTING RULES:
         }
       };
 
-      // Add category data to the response
-      results.forEach(({ category, data }) => {
+      // Add essential category data
+      essentialResults.forEach(({ category, data }) => {
         response[category] = data[category as keyof CategoryData];
       });
+
+      // Add empty data for secondary categories
+      ['localTransportation', 'food', 'activities'].forEach(category => {
+        response[category] = this.getDefaultCategoryData(category)[category as keyof CategoryData];
+      });
+
+      const totalTime = Date.now() - startTime;
+      console.log(`[TIMING] Total budget calculation completed in ${totalTime}ms`);
 
       return response;
     } catch (error) {

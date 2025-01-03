@@ -202,4 +202,85 @@ export interface AmadeusFlightOffer {
       countryCode: string;
     }>;
   };
+}
+
+export interface AmadeusHotelOffer {
+  id: string;
+  hotelId: string;
+  hotel: {
+    name: string;
+    rating?: string;
+    amenities?: string[];
+    address?: {
+      cityName?: string;
+    };
+    latitude?: string;
+    longitude?: string;
+    media?: Array<{
+      uri: string;
+    }>;
+  };
+  offers: Array<{
+    price: {
+      total: string;
+    };
+    policies?: {
+      guarantee?: {
+        acceptedPayments: {
+          methods: string[];
+          cards: string[];
+        };
+      };
+      paymentType: string;
+      cancellation?: {
+        deadline: string;
+        description?: {
+          text: string;
+          lang: string;
+        };
+      };
+    };
+  }>;
+}
+
+export interface TransformedHotelOffer {
+  name: string;
+  location: string;
+  price: {
+    amount: number;
+    currency: string;
+  };
+  tier: string;
+  type: string;
+  amenities: string;
+  rating: number;
+  reviewScore: number;
+  reviewCount: number;
+  images: string[];
+  referenceUrl: string;
+  coordinates: {
+    latitude: number;
+    longitude: number;
+  };
+  features: string[];
+  policies: {
+    checkIn: string;
+    checkOut: string;
+    cancellation: string;
+  };
+}
+
+export interface HotelSearchParams {
+  cityCode: string;
+  checkInDate: string;
+  checkOutDate: string;
+  adults: number;
+  roomQuantity?: number;
+  radius?: number;
+  currency?: string;
+  priceRange?: {
+    min: number;
+    max: number;
+  };
+  ratings?: string[];
 } 

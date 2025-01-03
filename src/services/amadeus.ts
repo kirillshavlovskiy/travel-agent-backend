@@ -1,6 +1,11 @@
 import axios from 'axios';
-import { AmadeusFlightOffer, FlightReference } from '../types.js';
-import { HotelSearchParams, AmadeusHotelOffer, TransformedHotelOffer } from '../types/amadeus.js';
+import { 
+  AmadeusFlightOffer, 
+  FlightReference, 
+  AmadeusHotelOffer, 
+  TransformedHotelOffer,
+  HotelSearchParams 
+} from '../types.js';
 import { logToFile } from '../utils/logger.js';
 
 const AIRCRAFT_CODES: { [key: string]: string } = {
@@ -160,55 +165,67 @@ interface AmadeusHotelSearchParams {
   // ... keep existing AmadeusHotelSearchParams interface ...
 }
 
+interface FlightOffersResponse {
+  data: any[];
+  meta?: any;
+  dictionaries?: any;
+}
+
+interface AuthResponse {
+  access_token: string;
+  expires_in: number;
+}
+
+interface FlightSearchParams {
+  originLocationCode: string;
+  destinationLocationCode: string;
+  departureDate: string;
+  returnDate?: string;
+  adults: number;
+  travelClass?: 'ECONOMY' | 'PREMIUM_ECONOMY' | 'BUSINESS' | 'FIRST';
+  max?: number;
+  currencyCode?: string;
+  nonStop?: boolean;
+}
+
 export class AmadeusService {
-  private token = '';
-  private tokenExpiry = 0;
+  private baseURL: string;
   private clientId: string;
   private clientSecret: string;
-  private baseURL = 'https://test.api.amadeus.com';
-  private commonAirlines: { [key: string]: string } = {
-    'AA': 'American Airlines',
-    'UA': 'United Airlines',
-    'DL': 'Delta Air Lines',
-    'LH': 'Lufthansa',
-    'BA': 'British Airways',
-    'AF': 'Air France',
-    'KL': 'KLM Royal Dutch Airlines',
-    'IB': 'Iberia',
-    'B6': 'JetBlue Airways',
-    'WN': 'Southwest Airlines',
-    'AS': 'Alaska Airlines',
-    'VS': 'Virgin Atlantic',
-    'EK': 'Emirates',
-    'QR': 'Qatar Airways',
-    'EY': 'Etihad Airways',
-    'TK': 'Turkish Airlines',
-    'LX': 'SWISS',
-    'AC': 'Air Canada',
-    'FI': 'Icelandair',
-    'SK': 'SAS Scandinavian Airlines',
-    'AZ': 'ITA Airways',
-    'TP': 'TAP Air Portugal'
-  };
+  private accessToken: string | null = null;
+  private tokenExpiresAt: number | null = null;
+  private commonAirlines: Record<string, string> = {};
 
   constructor() {
+    this.baseURL = process.env.AMADEUS_API_URL || 'https://test.api.amadeus.com';
     this.clientId = process.env.AMADEUS_CLIENT_ID || '';
     this.clientSecret = process.env.AMADEUS_CLIENT_SECRET || '';
-    if (!this.clientId || !this.clientSecret) {
-      const error = 'Amadeus API credentials are not configured';
-      logToFile(`ERROR: ${error}`);
-      console.error(error);
-    }
+    this.initializeCommonAirlines();
+  }
+
+  private initializeCommonAirlines() {
+    this.commonAirlines = {
+      'AA': 'American Airlines',
+      'UA': 'United Airlines',
+      'DL': 'Delta Air Lines',
+      'LH': 'Lufthansa',
+      'BA': 'British Airways',
+      'AF': 'Air France',
+      'KL': 'KLM Royal Dutch Airlines',
+      'IB': 'Iberia',
+      'EK': 'Emirates',
+      'QR': 'Qatar Airways'
+    };
   }
 
   private async getToken(): Promise<string> {
-    if (this.token && Date.now() < this.tokenExpiry) {
-      return this.token;
+    if (this.accessToken && this.tokenExpiresAt && Date.now() < this.tokenExpiresAt) {
+      return this.accessToken;
     }
 
     try {
-      logToFile('Requesting new Amadeus access token');
-      const response = await axios.post(
+      console.log('[Amadeus] Requesting new access token');
+      const response = await axios.post<{ access_token: string; expires_in: number }>(
         `${this.baseURL}/v1/security/oauth2/token`,
         new URLSearchParams({
           grant_type: 'client_credentials',
@@ -223,19 +240,15 @@ export class AmadeusService {
       );
 
       if (!response.data?.access_token) {
-        const error = 'No access token received from Amadeus';
-        logToFile(`ERROR: ${error}`);
-        throw new Error(error);
+        throw new Error('No access token received from Amadeus');
       }
 
-      this.token = response.data.access_token;
-      this.tokenExpiry = Date.now() + (response.data.expires_in * 1000);
-      logToFile('Successfully obtained new access token');
-      return this.token;
+      this.accessToken = response.data.access_token;
+      this.tokenExpiresAt = Date.now() + (response.data.expires_in * 1000);
+      console.log('[Amadeus] Successfully obtained new access token');
+      return this.accessToken;
     } catch (error) {
-      const errorMsg = 'Failed to get Amadeus access token:';
-      logToFile(`ERROR: ${errorMsg} ${error}`);
-      console.error(errorMsg, error);
+      console.error('[Amadeus] Failed to get access token:', error);
       throw error;
     }
   }
@@ -293,97 +306,71 @@ export class AmadeusService {
     return `PT${hours}H${minutes}M`;
   }
 
-  async searchFlights(params: {
-    originLocationCode: string;
-    destinationLocationCode: string;
-    departureDate: string;
-    returnDate?: string;
-    adults: number;
-    travelClass?: 'ECONOMY' | 'PREMIUM_ECONOMY' | 'BUSINESS' | 'FIRST';
-  }): Promise<any[]> {
+  async searchFlights(params: FlightSearchParams): Promise<any[]> {
     try {
-      logToFile('\n=== Amadeus Flight Search Request ===');
-      logToFile(`Raw params: ${JSON.stringify(params, null, 2)}`);
-      const token = await this.getToken();
-      
-      // Add delay between requests to avoid rate limiting
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      
-      const requestParams = {
+      console.log('[Amadeus] Starting flight search with params:', {
         ...params,
-        max: 50,
-        currencyCode: 'USD',
-        nonStop: false
-      };
-
-      logToFile(`Final request params: ${JSON.stringify(requestParams, null, 2)}`);
-      logToFile(`Request URL: ${this.baseURL}/v2/shopping/flight-offers`);
-      logToFile(`Authorization: Bearer ${token.substring(0, 10)}...`);
-      
-      const response = await axios.get(`${this.baseURL}/v2/shopping/flight-offers`, {
-        headers: {
-          Authorization: `Bearer ${token}`
-        },
-        params: requestParams
+        accessToken: '***' // Hide the token in logs
       });
 
-      logToFile('\n=== Amadeus Flight Search Response ===');
-      logToFile(`Status: ${response.status}`);
-      logToFile(`Headers: ${JSON.stringify(response.headers, null, 2)}`);
+      const token = await this.getToken();
+      if (!token) {
+        throw new Error('Failed to obtain valid token');
+      }
       
-      if (!response.data?.data) {
-        const error = {
-          status: response.status,
-          statusText: response.statusText,
-          data: JSON.stringify(response.data, null, 2),
-          headers: response.headers
-        };
-        logToFile(`ERROR: Invalid response structure: ${JSON.stringify(error, null, 2)}`);
-        throw new Error('Invalid response from Amadeus API');
+      const response = await axios.get<FlightOffersResponse>(
+        `${this.baseURL}/v2/shopping/flight-offers`,
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json'
+          },
+          params: {
+            originLocationCode: params.originLocationCode,
+            destinationLocationCode: params.destinationLocationCode,
+            departureDate: params.departureDate,
+            returnDate: params.returnDate,
+            adults: params.adults.toString(),
+            travelClass: params.travelClass || 'ECONOMY',
+            max: (params.max || 25).toString(),
+            currencyCode: params.currencyCode || 'USD',
+            nonStop: params.nonStop || false
+          },
+          timeout: 15000
+        }
+      );
+
+      console.log('[Amadeus] Flight search successful:', {
+        status: response.status,
+        flightCount: response.data?.data?.length || 0
+      });
+
+      return response.data?.data || [];
+    } catch (error: any) {
+      console.error('[Amadeus] Flight search error:', {
+        status: error.response?.status,
+        statusText: error.response?.statusText,
+        data: error.response?.data,
+        message: error.message,
+        errors: error.response?.data?.errors,
+        isTimeout: axios.isAxiosError(error) && error.code === 'ECONNABORTED'
+      });
+
+      // If timeout or network error, return empty array to allow fallback
+      if (axios.isAxiosError(error) && (error.code === 'ECONNABORTED' || !error.response)) {
+        console.log('[Amadeus] Request timeout or network error, falling back to Perplexity');
+        return [];
       }
 
-      const results = response.data.data;
-      logToFile('\n=== Amadeus Search Results ===');
-      logToFile(`Total results: ${results.length}`);
-      if (results.length > 0) {
-        logToFile(`First result: ${JSON.stringify(results[0], null, 2)}`);
+      // For auth errors, try to refresh token once
+      if (error.response?.status === 401) {
+        console.log('[Amadeus] Token expired, refreshing...');
+        await this.getToken();
+        // Retry the request once with the new token
+        return this.searchFlights(params);
       }
-      logToFile(`Meta: ${JSON.stringify(response.data.meta, null, 2)}`);
-      logToFile(`Dictionaries: ${JSON.stringify(response.data.dictionaries, null, 2)}`);
 
-      return results;
-    } catch (error) {
-      logToFile('\n=== Amadeus API Error ===');
-      if (axios.isAxiosError(error)) {
-        if (error.response?.status === 429) {
-          logToFile('Rate limit exceeded, retrying after delay...');
-          await new Promise(resolve => setTimeout(resolve, 2000));
-          return this.searchFlights(params);
-        }
-        logToFile(`Request config: ${JSON.stringify({
-          url: error.config?.url,
-          method: error.config?.method,
-          params: error.config?.params,
-          headers: error.config?.headers
-        }, null, 2)}`);
-        logToFile(`Response error details: ${JSON.stringify({
-          status: error.response?.status,
-          statusText: error.response?.statusText,
-          data: error.response?.data,
-          errors: error.response?.data?.errors,
-          headers: error.response?.headers
-        }, null, 2)}`);
-        // Log the specific error message from Amadeus
-        if (error.response?.data?.errors) {
-          logToFile('Amadeus Error Messages:');
-          error.response.data.errors.forEach((err: any) => {
-            logToFile(`- ${err.title}: ${err.detail} (${err.code})`);
-          });
-        }
-      } else {
-        logToFile(`Non-Axios error: ${error}`);
-      }
-      throw error;
+      return [];
     }
   }
 
@@ -446,55 +433,98 @@ export class AmadeusService {
   }
 
   async searchHotels(params: HotelSearchParams): Promise<AmadeusHotelOffer[]> {
-    // Temporary implementation
-    return [];
+    try {
+      console.log('[Amadeus] Starting hotel search with params:', {
+        ...params,
+        accessToken: '***' // Hide the token in logs
+      });
+
+      const token = await this.getToken();
+      if (!token) {
+        throw new Error('Failed to obtain valid token');
+      }
+
+      const response = await axios.get<{ data: AmadeusHotelOffer[] }>(
+        `${this.baseURL}/v2/shopping/hotel-offers`,
+        {
+          headers: {
+            Authorization: `Bearer ${token}`
+          },
+          params: {
+            cityCode: params.cityCode,
+            checkInDate: params.checkInDate,
+            checkOutDate: params.checkOutDate,
+            adults: params.adults,
+            radius: params.radius || 50,
+            radiusUnit: 'KM',
+            ratings: '1,2,3,4,5',
+            currency: params.currency || 'USD',
+            bestRateOnly: true,
+            view: 'FULL'
+          }
+        }
+      );
+
+      console.log('[Amadeus] Hotel search successful:', {
+        status: response.status,
+        hotelCount: response.data?.data?.length || 0
+      });
+
+      return response.data?.data || [];
+    } catch (error: any) {
+      console.error('[Amadeus] Hotel search error:', {
+        status: error.response?.status,
+        statusText: error.response?.statusText,
+        data: error.response?.data,
+        message: error.message
+      });
+
+      // Check if we need to refresh the token
+      if (error.response?.status === 401) {
+        console.log('[Amadeus] Token expired, refreshing...');
+        await this.getToken();
+        // Retry the request once with the new token
+        return this.searchHotels(params);
+      }
+
+      // For other errors, return empty array to allow fallback to Perplexity
+      return [];
+    }
   }
 
   transformHotelOffer(offer: AmadeusHotelOffer): TransformedHotelOffer {
-    // Get the first offer from the offers array
     const firstOffer = offer.offers[0];
-    const totalPrice = parseFloat(firstOffer.price.total);
-    
-    // Determine tier based on price
-    let tier: string;
-    if (totalPrice <= 200) {
-      tier = 'budget';
-    } else if (totalPrice <= 500) {
-      tier = 'medium';
-    } else {
-      tier = 'premium';
-    }
-    
+    const hotelInfo = offer.hotel;
+
     return {
-      id: offer.self, // Using self as id since it's unique
-      hotelId: offer.self.split('/').pop() || '', // Extract hotel ID from self URL
-      name: offer.name,
-      description: offer.description?.text || '',
-      available: offer.available,
-      checkInDate: firstOffer.checkInDate,
-      checkOutDate: firstOffer.checkOutDate,
-      roomType: firstOffer.room.type,
-      bedType: firstOffer.room.typeEstimated.bedType,
-      numBeds: firstOffer.room.typeEstimated.beds,
-      tier,
-      price: {
-        currency: firstOffer.price.currency,
-        total: totalPrice,
-        perNight: parseFloat(firstOffer.price.base),
-        amount: totalPrice // Adding amount for compatibility
+      name: hotelInfo.name,
+      location: hotelInfo.address?.cityName || '',
+      price: parseFloat(firstOffer.price.total),
+      type: this.determineHotelType(hotelInfo.rating),
+      amenities: hotelInfo.amenities?.join(', ') || '',
+      rating: parseInt(hotelInfo.rating || '0'),
+      reviewScore: hotelInfo.rating ? parseFloat(hotelInfo.rating) / 2 : 0,
+      reviewCount: 0, // Not available in Amadeus API
+      images: hotelInfo.media?.map(m => m.uri).filter((uri): uri is string => !!uri) || [],
+      referenceUrl: '',
+      coordinates: {
+        latitude: parseFloat(hotelInfo.latitude || '0'),
+        longitude: parseFloat(hotelInfo.longitude || '0')
       },
-      cancellationPolicy: firstOffer.policies.cancellation ? {
-        deadline: firstOffer.policies.cancellation.deadline,
-        description: firstOffer.policies.cancellation.description?.text || ''
-      } : undefined,
-      amenities: [], // Would need to be populated from hotel details API
-      rating: undefined, // Would need to be populated from hotel details API
-      location: {
-        latitude: 0, // Would need to be populated from hotel details API
-        longitude: 0, // Would need to be populated from hotel details API
-        address: '' // Would need to be populated from hotel details API
-      },
-      images: [] // Would need to be populated from hotel details API
+      features: hotelInfo.amenities?.filter((amenity): amenity is string => !!amenity) || [],
+      policies: {
+        checkIn: '',
+        checkOut: '',
+        cancellation: firstOffer.policies?.cancellation?.description?.text || ''
+      }
     };
+  }
+
+  private determineHotelType(rating?: string): string {
+    if (!rating) return 'Hotel';
+    const numericRating = parseInt(rating);
+    if (numericRating >= 4) return 'Luxury Hotel';
+    if (numericRating >= 3) return 'Business Hotel';
+    return 'Budget Hotel';
   }
 } 
