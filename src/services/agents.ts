@@ -262,6 +262,9 @@ CRITICAL JSON FORMATTING RULES:
 
       // Clean up the response before parsing
       const cleanedContent = content
+        // Remove markdown code blocks
+        .replace(/^```json\s*/, '')
+        .replace(/\s*```$/, '')
         // Replace price ranges with their average
         .replace(/(\d+)-(\d+)/g, (_, min, max) => {
           const average = (parseInt(min) + parseInt(max)) / 2;
