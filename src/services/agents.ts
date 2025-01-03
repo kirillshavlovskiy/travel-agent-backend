@@ -231,11 +231,12 @@ CRITICAL JSON FORMATTING RULES:
 7. Do NOT include any trailing commas
 8. Ensure all strings are properly escaped
 9. Ensure all arrays and objects are properly closed
-10. All numbers must be valid JSON numbers (no commas, currency symbols, or units)
+10. All numbers must be valid JSON numbers (no ranges like "35-40", use average value instead)
 11. All dates must be valid ISO strings
 12. All URLs must be valid and properly escaped
 13. All property names must be double-quoted
-14. Do NOT escape quotes in the response`
+14. Do NOT escape quotes in the response
+15. For price ranges, use the average value (e.g., for "35-40", use 37.5)`
               },
               {
                 role: 'user',
@@ -251,185 +252,110 @@ CRITICAL JSON FORMATTING RULES:
       }
 
       const data = await response.json() as PerplexityResponse;
-      let content = data.choices[0].message.content;
-      
-      // Log raw content for debugging
-      console.log(`[${category.toUpperCase()}] Raw content:`, content);
+      const content = data.choices[0]?.message?.content;
 
-      // Step 1: Remove markdown and code blocks
-      content = content.replace(/```json\n|\n```|```/g, '').trim();
-      console.log(`[${category.toUpperCase()}] After markdown removal:`, content);
-
-      // Step 2: Extract JSON object
-      const jsonMatch = content.match(/({[\s\S]*})/);
-      if (!jsonMatch) {
-        throw new Error('No valid JSON object found in response');
+      if (!content) {
+        throw new Error('Empty response from Perplexity API');
       }
-      content = jsonMatch[1];
-      console.log(`[${category.toUpperCase()}] Extracted JSON:`, content);
 
-      // Step 3: Fix common JSON issues
-      content = content
-        // Remove escaped quotes
-        .replace(/\\"/g, '"')
-        // Fix property names - ensure they're double-quoted
-        .replace(/([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:/g, '$1"$2":')
-        // Fix single quotes to double quotes (but not within words)
-        .replace(/([{,]\s*"[^"]*":\s*)'([^']*)'(?=\s*[,}])/g, '$1"$2"')
-        // Remove any trailing commas
-        .replace(/,(\s*[}\]])/g, '$1')
-        // Fix numbers with commas
-        .replace(/"price"\s*:\s*"?\d{1,3}(?:,\d{3})+(?:\.\d+)?"?/g, match => {
-          const num = parseFloat(match.replace(/[^0-9.]/g, ''));
-          return `"price": ${num}`;
+      console.log(`[${category}] Raw response:`, content);
+
+      // Clean up the response before parsing
+      const cleanedContent = content
+        // Replace price ranges with their average
+        .replace(/(\d+)-(\d+)/g, (_, min, max) => {
+          const average = (parseInt(min) + parseInt(max)) / 2;
+          return average.toString();
         })
-        // Ensure proper spacing
-        .replace(/\s+/g, ' ')
-        .trim();
+        // Remove any trailing commas in arrays and objects
+        .replace(/,(\s*[}\]])/g, '$1')
+        // Ensure all property names are double-quoted
+        .replace(/([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:/g, '$1"$2":');
 
-      console.log(`[${category.toUpperCase()}] Cleaned content:`, content);
+      console.log(`[${category}] Cleaned response:`, cleanedContent);
 
       try {
-        // Parse the JSON
-        const parsed = JSON.parse(content);
-        console.log(`[${category.toUpperCase()}] Successfully parsed JSON:`, parsed);
-
-        // Special handling for hotels category
-        if (category === 'hotels') {
-          // Ensure the hotels object exists and has the correct structure
-          if (!parsed.hotels || !parsed.hotels.searchDetails || !parsed.hotels.budget) {
-            console.error(`[${category.toUpperCase()}] Invalid hotel data structure:`, parsed);
-            return this.getDefaultData(category);
-          }
-
-          // Validate and clean hotel references
-          ['budget', 'medium', 'premium'].forEach(tier => {
-            if (parsed.hotels[tier]?.references) {
-              parsed.hotels[tier].references = parsed.hotels[tier].references
-                .filter((ref: unknown): ref is HotelReference => {
-                  if (!ref || typeof ref !== 'object') return false;
-                  const r = ref as Partial<HotelReference>;
-                  return typeof r.name === 'string' && typeof r.location === 'string';
-                })
-                .map((ref: HotelReference) => ({
-                  name: ref.name || '',
-                  location: ref.location || '',
-                  price: typeof ref.price === 'number' ? ref.price : parseFloat(ref.price) || 0,
-                  type: ref.type || 'Hotel',
-                  amenities: ref.amenities || '',
-                  rating: ref.rating || 0,
-                  reviewScore: ref.reviewScore || 0,
-                  reviewCount: ref.reviewCount || 0,
-                  images: Array.isArray(ref.images) ? ref.images : [],
-                  referenceUrl: ref.referenceUrl || '',
-                  coordinates: ref.coordinates || { latitude: 0, longitude: 0 },
-                  features: Array.isArray(ref.features) ? ref.features : [],
-                  policies: ref.policies || {
-                    checkIn: '',
-                    checkOut: '',
-                    cancellation: ''
-                  }
-                }));
-            }
-          });
-        }
-
-        // Validate the structure matches our expected type
-        if (!this.validateCategoryData(parsed, category)) {
-          throw new Error('Invalid data structure');
-        }
-
-        return parsed as CategoryData;
+        return JSON.parse(cleanedContent);
       } catch (parseError) {
         console.error(`[${category}] Failed to parse response:`, parseError);
         console.error(`[${category}] Problematic content:`, content);
-        return this.getDefaultData(category);
+        // Return a default structure for the category
+        return this.getDefaultCategoryData(category);
       }
     } catch (error) {
-      console.error(`[${category}] Error:`, error);
-      return this.getDefaultData(category);
+      console.error(`[${category}] Error querying Perplexity:`, error);
+      // Return a default structure for the category
+      return this.getDefaultCategoryData(category);
     }
   }
 
-  private validateCategoryData(data: any, category: string): boolean {
-    // Basic structure validation
-    if (!data || typeof data !== 'object') return false;
-
-    const categoryKey = category === 'localTransportation' ? 'localTransportation' : 
-                       category.endsWith('s') ? category : `${category}s`;
-
-    // Special handling for food category which doesn't follow the plural pattern
-    const key = category === 'food' ? 'food' : categoryKey;
-
-    if (!data[key]) return false;
-
-    const categoryData = data[key];
-    
-    // Validate tiers
-    for (const tier of ['budget', 'medium', 'premium']) {
-      if (!categoryData[tier]) return false;
-      
-      const tierData = categoryData[tier];
-      if (
-        typeof tierData.min !== 'number' ||
-        typeof tierData.max !== 'number' ||
-        typeof tierData.average !== 'number' ||
-        typeof tierData.confidence !== 'number' ||
-        typeof tierData.source !== 'string' ||
-        !Array.isArray(tierData.references)
-      ) {
-        return false;
-      }
-
-      // Special validation for food references
-      if (category === 'food') {
-        for (const ref of tierData.references) {
-          if (
-            typeof ref !== 'object' ||
-            typeof ref.type !== 'string' ||
-            typeof ref.description !== 'string' ||
-            typeof ref.price !== 'number' ||
-            typeof ref.mealType !== 'string'
-          ) {
-            return false;
-          }
-        }
-      }
-    }
-
-    return true;
-  }
-
-  private getDefaultData(category: string): CategoryData {
+  private getDefaultCategoryData(category: string): CategoryData {
     const defaultTier = {
       min: 0,
       max: 0,
       average: 0,
       confidence: 0,
-      source: 'error',
+      source: 'Default due to API error',
       references: []
     };
 
     switch (category) {
       case 'flights':
-        return { flights: { budget: defaultTier, medium: defaultTier, premium: defaultTier } } as FlightData;
+        return {
+          flights: {
+            budget: defaultTier,
+            medium: defaultTier,
+            premium: defaultTier
+          }
+        };
       case 'hotels':
-        return { 
-          hotels: { 
-            searchDetails: { location: '', dates: { checkIn: '', checkOut: '' }, guests: 0 },
-            budget: defaultTier, 
-            medium: defaultTier, 
-            premium: defaultTier 
-          } 
-        } as HotelData;
+        return {
+          hotels: {
+            searchDetails: {
+              location: '',
+              dates: {
+                checkIn: '',
+                checkOut: ''
+              },
+              guests: 0
+            },
+            budget: defaultTier,
+            medium: defaultTier,
+            premium: defaultTier
+          }
+        };
       case 'activities':
-        return { activities: { budget: defaultTier, medium: defaultTier, premium: defaultTier } } as ActivityData;
+        return {
+          activities: {
+            budget: defaultTier,
+            medium: defaultTier,
+            premium: defaultTier
+          }
+        };
       case 'localTransportation':
-        return { localTransportation: { budget: defaultTier, medium: defaultTier, premium: defaultTier } } as TransportData;
+        return {
+          localTransportation: {
+            budget: defaultTier,
+            medium: defaultTier,
+            premium: defaultTier
+          }
+        };
       case 'food':
-        return { food: { budget: defaultTier, medium: defaultTier, premium: defaultTier } } as FoodData;
+        return {
+          food: {
+            budget: defaultTier,
+            medium: defaultTier,
+            premium: defaultTier
+          }
+        };
       default:
-        throw new Error(`Invalid category: ${category}`);
+        return {
+          food: {
+            budget: defaultTier,
+            medium: defaultTier,
+            premium: defaultTier
+          }
+        };
     }
   }
 
