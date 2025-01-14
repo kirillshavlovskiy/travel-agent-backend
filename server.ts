@@ -9,6 +9,7 @@ import flightRoutes from './src/routes/flights';
 import hotelRoutes from './src/routes/hotels';
 import perplexityRoutes from './src/routes/perplexity';
 import activitiesRoutes from './src/routes/activities';
+import enrichmentRouter from './src/routes/enrichment';
 
 // Load environment variables
 config();
@@ -112,6 +113,9 @@ authenticatedRouter.use('/api/activities', activitiesRoutes);
 
 // Mount the authenticated router
 app.use(authenticatedRouter);
+
+// Mount enrichment routes
+app.use('/api/enrichment', enrichmentRouter);
 
 // Root endpoint (public)
 app.get('/', (_req: Request, res: Response) => {

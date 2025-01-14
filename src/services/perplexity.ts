@@ -1,103 +1,140 @@
-interface PerplexityMessage {
-  role: 'system' | 'user' | 'assistant';
-  content: string;
-}
+import axios from 'axios';
 
 interface PerplexityResponse {
-  choices: {
-    message: {
-      content: string;
-    };
-  }[];
+  text: string;
+  images?: string[];
+  address?: string;
+  description?: string;
+  highlights?: string[];
+  openingHours?: string;
+  rating?: number;
+  reviews?: number;
 }
 
-class PerplexityClient {
+export class PerplexityService {
   private apiKey: string;
-  private baseUrl = 'https://api.perplexity.ai';
+  private baseUrl: string;
 
   constructor() {
-    const apiKey = process.env.PERPLEXITY_API_KEY;
-    if (!apiKey) {
-      throw new Error('PERPLEXITY_API_KEY environment variable is not set');
-    }
-    this.apiKey = apiKey;
+    this.apiKey = process.env.PERPLEXITY_API_KEY || '';
+    this.baseUrl = 'https://api.perplexity.ai';
   }
 
-  async chat(query: string): Promise<PerplexityResponse> {
+  async chat(query: string) {
     try {
-      const response = await fetch(`${this.baseUrl}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${this.apiKey}`
-        },
-        body: JSON.stringify({
+      if (!this.apiKey) {
+        throw new Error('Perplexity API key is not configured');
+      }
+
+      const response = await axios.post(
+        `${this.baseUrl}/chat/completions`,
+        {
           model: 'llama-3.1-sonar-small-128k-online',
           messages: [
             {
               role: 'system',
-              content: `You are a helpful assistant that provides detailed travel itineraries and activity suggestions.
-
-CRITICAL FORMATTING RULES:
-1. You MUST return ONLY a valid JSON object, nothing else
-2. The response MUST start with { and end with }
-3. The JSON MUST have an "activities" array as its root property
-4. Each activity MUST have these EXACT fields:
-   - "name": string (activity name)
-   - "description": string (brief description)
-   - "duration": number (length in hours)
-   - "price": number (exact price, no ranges)
-   - "category": string (one of: "Sightseeing", "Cultural", "Entertainment", "Local Experience")
-   - "location": string (specific area within the city)
-   - "rating": number (between 1-5)
-   - "timeOfDay": string (one of: "Morning", "Afternoon", "Evening", "Any")
-   - "referenceUrl": string (direct booking link or official website URL)
-
-5. DO NOT include any explanatory text, markdown, or other content outside the JSON object
-6. Ensure all JSON values are properly escaped
-7. Use double quotes for all strings
-8. Use numbers without quotes for numeric values
-9. DO NOT use trailing commas
-10. DO NOT include any comments or explanations
-11. Ensure all URLs are properly formatted and escaped
-12. DO NOT use any special characters that would need escaping in strings
-
-Example of correct format:
-{
-  "activities": [
-    {
-      "name": "Sagrada Familia Tour",
-      "description": "Guided tour of Gaudi's masterpiece",
-      "duration": 2,
-      "price": 35.50,
-      "category": "Cultural",
-      "location": "Carrer de Mallorca, 401",
-      "rating": 4.8,
-      "timeOfDay": "Morning",
-      "referenceUrl": "https://sagradafamilia.org/en/tickets"
-    }
-  ]
-}`
+              content: 'You are a helpful assistant that provides detailed information about places and activities in JSON format.'
             },
             {
               role: 'user',
               content: query
             }
           ]
-        })
-      });
+        },
+        {
+          headers: {
+            'Authorization': `Bearer ${this.apiKey}`,
+            'Content-Type': 'application/json'
+          }
+        }
+      );
 
-      if (!response.ok) {
-        throw new Error(`Perplexity API error: ${response.statusText}`);
+      return response.data;
+    } catch (error) {
+      console.error('Error in Perplexity chat:', error);
+      if (axios.isAxiosError(error)) {
+        if (error.response?.status === 404) {
+          throw new Error('Perplexity API endpoint not found. Please check the API configuration.');
+        }
+        if (error.response?.status === 401) {
+          throw new Error('Invalid Perplexity API key. Please check your API key configuration.');
+        }
+        if (error.response?.status === 400) {
+          const errorMessage = error.response.data?.error?.message || 'Bad request to Perplexity API';
+          throw new Error(`Perplexity API error: ${errorMessage}`);
+        }
+        throw new Error(`Perplexity API error: ${error.response?.data?.error?.message || error.message}`);
+      }
+      throw error;
+    }
+  }
+
+  async getEnrichedDetails(query: string): Promise<PerplexityResponse> {
+    try {
+      if (!this.apiKey) {
+        throw new Error('Perplexity API key is not configured');
       }
 
-      const data = await response.json();
-      return data as PerplexityResponse;
+      const response = await axios.post(
+        `${this.baseUrl}/chat/completions`,
+        {
+          model: 'llama-3.1-sonar-small-128k-online',
+          messages: [
+            {
+              role: 'system',
+              content: 'You are a helpful assistant that provides detailed information about places and activities. Please include relevant images, addresses, descriptions, and other useful details in your responses.'
+            },
+            {
+              role: 'user',
+              content: `Please provide detailed information about ${query} including:
+              1. A brief description
+              2. The exact address
+              3. Key highlights or features
+              4. Opening hours if applicable
+              5. Relevant high-quality images (provide URLs)
+              6. Ratings and reviews if available
+              
+              Format the response as a JSON object with these fields: description, address, highlights (array), openingHours, images (array of URLs), rating, reviews`
+            }
+          ]
+        },
+        {
+          headers: {
+            'Authorization': `Bearer ${this.apiKey}`,
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+
+      // Parse the response text as JSON
+      const content = response.data.choices[0].message.content;
+      try {
+        return JSON.parse(content);
+      } catch (e) {
+        // If parsing fails, return a structured response with just the text
+        return {
+          text: content
+        };
+      }
     } catch (error) {
-      console.error('[Perplexity Service] Error:', error);
+      console.error('Error fetching details from Perplexity:', error);
+      if (axios.isAxiosError(error)) {
+        if (error.response?.status === 404) {
+          throw new Error('Perplexity API endpoint not found. Please check the API configuration.');
+        }
+        if (error.response?.status === 401) {
+          throw new Error('Invalid Perplexity API key. Please check your API key configuration.');
+        }
+        if (error.response?.status === 400) {
+          const errorMessage = error.response.data?.error?.message || 'Bad request to Perplexity API';
+          throw new Error(`Perplexity API error: ${errorMessage}`);
+        }
+        throw new Error(`Perplexity API error: ${error.response?.data?.error?.message || error.message}`);
+      }
       throw error;
     }
   }
 }
 
-export const perplexityClient = new PerplexityClient(); 
+// Create and export a singleton instance
+export const perplexityClient = new PerplexityService(); 

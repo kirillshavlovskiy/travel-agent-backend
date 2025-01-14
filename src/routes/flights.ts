@@ -49,166 +49,297 @@ router.get('/test', (req: Request, res: Response) => {
 });
 
 // Flight search endpoint
-router.post('/', async (req: Request, res: Response) => {
-  try {
-    const {
-      departureLocation,
-      destinations,
-      travelers = 1,
-      cabinClass
-    } = req.body;
+router.post('/search', async (req: Request, res: Response) => {
+  const errors: string[] = [];
+  let flightOffers: AmadeusFlightOffer[] = [];
 
-    if (!departureLocation || !destinations || !destinations.length) {
+  try {
+    // Validate required fields
+    const { origin, destination, outboundDate, inboundDate, travelers, cabinClass } = req.body;
+
+    if (!origin || !destination || !outboundDate || !travelers) {
       return res.status(400).json({
         success: false,
-        error: 'Missing required parameters'
+        error: 'Missing required fields',
+        requiredFields: ['origin', 'destination', 'outboundDate', 'travelers']
       });
     }
 
-    let flightOffers: AmadeusFlightOffer[] = [];
-    let source = 'amadeus';
-    let errors = [];
+    // Validate dates
+    const currentDate = new Date();
+    const outDate = new Date(outboundDate);
+    const inDate = inboundDate ? new Date(inboundDate) : null;
 
-    if (process.env.AMADEUS_CLIENT_ID && process.env.AMADEUS_CLIENT_SECRET) {
-      try {
-        // Validate and format IATA codes
-        const originCode = departureLocation.code.trim().toUpperCase();
-        const destinationCode = destinations[0].code.trim().toUpperCase();
-        
-        // Validate and format dates
-        const outboundDate = new Date(departureLocation.outboundDate);
-        const inboundDate = departureLocation.inboundDate ? new Date(departureLocation.inboundDate) : null;
-        
-        if (isNaN(outboundDate.getTime()) || (inboundDate && isNaN(inboundDate.getTime()))) {
-          throw new Error('Invalid date format. Please use YYYY-MM-DD format.');
-        }
-        
-        // Format dates to YYYY-MM-DD
-        const formattedOutboundDate = outboundDate.toISOString().split('T')[0];
-        const formattedInboundDate = inboundDate ? inboundDate.toISOString().split('T')[0] : undefined;
-        
-        // Validate cabin class
-        const validCabinClasses = ['ECONOMY', 'PREMIUM_ECONOMY', 'BUSINESS', 'FIRST'];
-        const formattedCabinClass = cabinClass ? cabinClass.toUpperCase() : undefined;
-        
-        if (formattedCabinClass && !validCabinClasses.includes(formattedCabinClass)) {
-          throw new Error(`Invalid cabin class. Must be one of: ${validCabinClasses.join(', ')}`);
-        }
+    if (outDate < currentDate) {
+      return res.status(400).json({
+        success: false,
+        error: 'Outbound date cannot be in the past'
+      });
+    }
 
-        console.log('Searching flights with Amadeus:', {
-          origin: originCode,
-          destination: destinationCode,
-          dates: {
-            outbound: formattedOutboundDate,
-            inbound: formattedInboundDate
-          },
-          cabinClass: formattedCabinClass,
-          travelers
+    if (inDate && inDate < outDate) {
+      return res.status(400).json({
+        success: false,
+        error: 'Inbound date must be after outbound date'
+      });
+    }
+
+    // Validate travelers
+    const numTravelers = parseInt(travelers);
+    if (isNaN(numTravelers) || numTravelers < 1 || numTravelers > 9) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid number of travelers. Must be between 1 and 9'
+      });
+    }
+
+    // Extract location codes
+    const originCode = origin.code || origin;
+    const destinationCode = destination.code || destination;
+
+    // Format dates
+    const formattedOutboundDate = outboundDate.split('T')[0];
+    const formattedInboundDate = inboundDate ? inboundDate.split('T')[0] : undefined;
+
+    // Optimize cabin class search strategy
+    let searchCabinClasses: string[] = [];
+    if (cabinClass) {
+      const formattedCabinClass = cabinClass.toUpperCase();
+      const validCabinClasses = ['ECONOMY', 'PREMIUM_ECONOMY', 'BUSINESS', 'FIRST'];
+      
+      if (!validCabinClasses.includes(formattedCabinClass)) {
+        return res.status(400).json({
+          success: false,
+          error: `Invalid cabin class. Must be one of: ${validCabinClasses.join(', ')}`
         });
+      }
+      searchCabinClasses = [formattedCabinClass];
+    } else {
+      // If no cabin class specified, prioritize economy and premium economy
+      searchCabinClasses = ['ECONOMY', 'PREMIUM_ECONOMY'];
+    }
 
-        const amadeusResults = await amadeusService.searchFlights({
+    console.log('Searching flights with Amadeus:', {
+      origin: originCode,
+      destination: destinationCode,
+      dates: {
+        outbound: formattedOutboundDate,
+        inbound: formattedInboundDate
+      },
+      cabinClasses: searchCabinClasses,
+      travelers: numTravelers
+    });
+
+    // Sequential search with rate limiting
+    let lastError: any;
+    for (const travelClass of searchCabinClasses) {
+      try {
+        const results = await amadeusService.searchFlights({
           originLocationCode: originCode,
           destinationLocationCode: destinationCode,
           departureDate: formattedOutboundDate,
           returnDate: formattedInboundDate,
-          adults: travelers,
-          travelClass: formattedCabinClass as 'ECONOMY' | 'PREMIUM_ECONOMY' | 'BUSINESS' | 'FIRST'
+          adults: numTravelers,
+          travelClass: travelClass as 'ECONOMY' | 'PREMIUM_ECONOMY' | 'BUSINESS' | 'FIRST',
+          max: 25 // Limit results per cabin class
         });
 
-        if (amadeusResults && amadeusResults.length > 0) {
-          console.log(`Found ${amadeusResults.length} Amadeus results`);
+        if (results && results.length > 0) {
+          flightOffers.push(...results);
           
-          // Get unique airline codes from all results
+          // Get unique airline codes
           const uniqueAirlineCodes = [...new Set(
-            amadeusResults.flatMap(offer => 
+            results.flatMap(offer => 
               offer.itineraries.flatMap((itinerary: AmadeusItinerary) => 
                 itinerary.segments.map((segment: AmadeusSegment) => segment.carrierCode)
               )
             )
           )];
           
-          console.log('Unique airline codes:', uniqueAirlineCodes);
-          
-          // Fetch airline information for all carriers at once
-          let airlineInfoArray;
+          // Fetch airline information
           try {
-            airlineInfoArray = await amadeusService.getAirlineInfo(uniqueAirlineCodes);
+            const airlineInfoArray = await amadeusService.getAirlineInfo(uniqueAirlineCodes);
+            console.log(`Found ${results.length} results for ${travelClass}`);
           } catch (error) {
             console.error('Failed to fetch airline information:', error);
-            errors.push('Airline information unavailable');
-            airlineInfoArray = uniqueAirlineCodes.map(code => ({
-              type: 'airline',
-              iataCode: code,
-              icaoCode: code,
-              businessName: code,
-              commonName: code
-            }));
+            errors.push(`Airline information unavailable for ${travelClass}`);
           }
-
-          // Transform flight offers
-          flightOffers = amadeusResults;
-          console.log(`  IDs: ${flightOffers.map(f => f.id).join(', ')}`);
         }
-      } catch (error) {
-        console.error('Error searching Amadeus flights:', error);
-        errors.push('Flight search encountered an error');
+      } catch (error: any) {
+        lastError = error;
+        console.error(`Search failed for ${travelClass}:`, error);
+        
+        if (error.response?.status === 429) {
+          // Rate limit hit, wait before next attempt
+          await new Promise(resolve => setTimeout(resolve, 2000));
+        }
       }
     }
 
-    // Transform Amadeus response to match frontend expectations
-    const transformedFlights: TransformedFlight[] = flightOffers.map(offer => ({
-      id: offer.id,
-      airline: offer.validatingAirlineCodes[0],
-      cabinClass: offer.travelerPricings[0]?.fareDetailsBySegment[0]?.cabin,
-      price: {
-        amount: parseFloat(offer.price.total),
-        currency: offer.price.currency,
-        numberOfTravelers: travelers
-      }
-    }));
+    if (flightOffers.length === 0) {
+      return res.status(lastError?.response?.status || 500).json({
+        success: false,
+        error: 'No flights found',
+        details: lastError?.message || 'Unknown error occurred',
+        errors
+      });
+    }
 
-    // Group flights by tier based on price and cabin class
-    const groupedFlights = transformedFlights.reduce<GroupedFlights>((acc, flight) => {
-      const tier = amadeusService.determineTier(flight.price.amount, flight.cabinClass);
-      if (!acc[tier]) {
-        acc[tier] = {
-          min: Infinity,
-          max: -Infinity,
-          average: 0,
-          confidence: 0.8,
-          source: source,
-          references: []
-        };
-      }
+    // Sort results by price
+    flightOffers.sort((a, b) => parseFloat(a.price.total) - parseFloat(b.price.total));
+
+    // Add detailed tier analysis logging
+    const tierAnalysis = {
+      budget: [] as any[],
+      medium: [] as any[],
+      premium: [] as any[]
+    };
+
+    flightOffers.forEach(offer => {
+      const price = parseFloat(offer.price.total);
+      const cabinClass = offer.travelerPricings[0]?.fareDetailsBySegment[0]?.cabin;
+      const tier = amadeusService.determineTier(price, cabinClass);
       
-      acc[tier].references.push(flight);
-      acc[tier].min = Math.min(acc[tier].min, flight.price.amount);
-      acc[tier].max = Math.max(acc[tier].max, flight.price.amount);
-      acc[tier].average = acc[tier].references.reduce((sum, f) => sum + f.price.amount, 0) / acc[tier].references.length;
-      
-      return acc;
-    }, {
-      budget: { min: Infinity, max: -Infinity, average: 0, confidence: 0.8, source: source, references: [] },
-      medium: { min: Infinity, max: -Infinity, average: 0, confidence: 0.8, source: source, references: [] },
-      premium: { min: Infinity, max: -Infinity, average: 0, confidence: 0.8, source: source, references: [] }
+      console.log('[Tier Analysis]', {
+        price,
+        cabinClass,
+        tier,
+        segments: offer.itineraries.map(it => ({
+          segments: it.segments.map(seg => ({
+            departure: seg.departure.iataCode,
+            arrival: seg.arrival.iataCode,
+            carrier: seg.carrierCode,
+            duration: seg.duration
+          }))
+        })),
+        validatingCarrier: offer.validatingAirlineCodes[0]
+      });
+
+      tierAnalysis[tier].push({
+        price,
+        cabinClass,
+        id: offer.id,
+        carrier: offer.validatingAirlineCodes[0]
+      });
     });
 
-    // Send transformed and grouped data
+    console.log('[Tier Summary]', {
+      total: flightOffers.length,
+      byTier: {
+        budget: {
+          count: tierAnalysis.budget.length,
+          priceRange: tierAnalysis.budget.length > 0 ? {
+            min: Math.min(...tierAnalysis.budget.map(f => f.price)),
+            max: Math.max(...tierAnalysis.budget.map(f => f.price))
+          } : null
+        },
+        medium: {
+          count: tierAnalysis.medium.length,
+          priceRange: tierAnalysis.medium.length > 0 ? {
+            min: Math.min(...tierAnalysis.medium.map(f => f.price)),
+            max: Math.max(...tierAnalysis.medium.map(f => f.price))
+          } : null
+        },
+        premium: {
+          count: tierAnalysis.premium.length,
+          priceRange: tierAnalysis.premium.length > 0 ? {
+            min: Math.min(...tierAnalysis.premium.map(f => f.price)),
+            max: Math.max(...tierAnalysis.premium.map(f => f.price))
+          } : null
+        }
+      },
+      byCabinClass: Object.fromEntries(
+        [...new Set(flightOffers.map(o => 
+          o.travelerPricings[0]?.fareDetailsBySegment[0]?.cabin
+        ))].map(cabin => [
+          cabin,
+          flightOffers.filter(o => 
+            o.travelerPricings[0]?.fareDetailsBySegment[0]?.cabin === cabin
+          ).length
+        ])
+      )
+    });
+
+    // Transform flight offers into grouped format
+    const groupedFlights: GroupedFlights = {
+      budget: {
+        min: tierAnalysis.budget.length > 0 ? Math.min(...tierAnalysis.budget.map(f => f.price)) : 0,
+        max: tierAnalysis.budget.length > 0 ? Math.max(...tierAnalysis.budget.map(f => f.price)) : 0,
+        average: tierAnalysis.budget.length > 0 ? 
+          tierAnalysis.budget.reduce((sum, f) => sum + f.price, 0) / tierAnalysis.budget.length : 0,
+        confidence: 0.8,
+        source: 'amadeus',
+        references: tierAnalysis.budget.map(f => ({
+          id: f.id,
+          airline: f.carrier,
+          cabinClass: f.cabinClass,
+          price: {
+            amount: f.price,
+            currency: 'USD',
+            numberOfTravelers: numTravelers
+          }
+        }))
+      },
+      medium: {
+        min: tierAnalysis.medium.length > 0 ? Math.min(...tierAnalysis.medium.map(f => f.price)) : 0,
+        max: tierAnalysis.medium.length > 0 ? Math.max(...tierAnalysis.medium.map(f => f.price)) : 0,
+        average: tierAnalysis.medium.length > 0 ? 
+          tierAnalysis.medium.reduce((sum, f) => sum + f.price, 0) / tierAnalysis.medium.length : 0,
+        confidence: 0.8,
+        source: 'amadeus',
+        references: tierAnalysis.medium.map(f => ({
+          id: f.id,
+          airline: f.carrier,
+          cabinClass: f.cabinClass,
+          price: {
+            amount: f.price,
+            currency: 'USD',
+            numberOfTravelers: numTravelers
+          }
+        }))
+      },
+      premium: {
+        min: tierAnalysis.premium.length > 0 ? Math.min(...tierAnalysis.premium.map(f => f.price)) : 0,
+        max: tierAnalysis.premium.length > 0 ? Math.max(...tierAnalysis.premium.map(f => f.price)) : 0,
+        average: tierAnalysis.premium.length > 0 ? 
+          tierAnalysis.premium.reduce((sum, f) => sum + f.price, 0) / tierAnalysis.premium.length : 0,
+        confidence: 0.8,
+        source: 'amadeus',
+        references: tierAnalysis.premium.map(f => ({
+          id: f.id,
+          airline: f.carrier,
+          cabinClass: f.cabinClass,
+          price: {
+            amount: f.price,
+            currency: 'USD',
+            numberOfTravelers: numTravelers
+          }
+        }))
+      }
+    };
+
     return res.json({
       success: true,
       data: {
         flights: groupedFlights,
-        dictionaries: flightOffers[0]?.dictionaries
+        summary: {
+          total: flightOffers.length,
+          byTier: {
+            budget: tierAnalysis.budget.length,
+            medium: tierAnalysis.medium.length,
+            premium: tierAnalysis.premium.length
+          }
+        }
       },
-      source,
       errors: errors.length > 0 ? errors : undefined
     });
-  } catch (error) {
-    console.error('Error processing flight search:', error);
+
+  } catch (error: any) {
+    console.error('Flight search error:', error);
     return res.status(500).json({
       success: false,
       error: 'Internal server error',
-      details: error instanceof Error ? error.message : 'Unknown error'
+      details: error.message
     });
   }
 });

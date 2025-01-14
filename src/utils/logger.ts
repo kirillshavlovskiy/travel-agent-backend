@@ -4,31 +4,43 @@ import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const logsDir = path.join(__dirname, '..', '..', 'logs');
 
-// Only create logs directory in development
-const isDevelopment = process.env.NODE_ENV === 'development';
+const logsDir = path.join(__dirname, '../../logs');
+const logFile = path.join(logsDir, 'server.log');
 
-if (isDevelopment && !fs.existsSync(logsDir)) {
-  try {
-    fs.mkdirSync(logsDir, { recursive: true });
-  } catch (error) {
-    console.error('Failed to create logs directory:', error);
-  }
+// Ensure logs directory exists
+if (!fs.existsSync(logsDir)) {
+  fs.mkdirSync(logsDir, { recursive: true });
 }
 
-export const logToFile = (message: string) => {
-  // Skip logging in production
-  if (!isDevelopment) {
-    return;
-  }
-
+function formatMessage(level: string, message: string, data?: any): string {
   const timestamp = new Date().toISOString();
-  const logMessage = `[${timestamp}] ${message}`;
+  const dataStr = data ? `\n${JSON.stringify(data, null, 2)}` : '';
+  return `[${timestamp}] [${level}] ${message}${dataStr}\n`;
+}
 
-  try {
-    fs.appendFileSync(path.join(logsDir, 'amadeus.log'), logMessage + '\n');
-  } catch (error) {
-    console.error('Failed to write to log file:', error);
+export const logger = {
+  info(message: string, data?: any) {
+    const logMessage = formatMessage('INFO', message, data);
+    console.log(logMessage);
+    fs.appendFileSync(logFile, logMessage);
+  },
+
+  warn(message: string, data?: any) {
+    const logMessage = formatMessage('WARN', message, data);
+    console.warn(logMessage);
+    fs.appendFileSync(logFile, logMessage);
+  },
+
+  error(message: string, data?: any) {
+    const logMessage = formatMessage('ERROR', message, data);
+    console.error(logMessage);
+    fs.appendFileSync(logFile, logMessage);
+  },
+
+  debug(message: string, data?: any) {
+    const logMessage = formatMessage('DEBUG', message, data);
+    console.debug(logMessage);
+    fs.appendFileSync(logFile, logMessage);
   }
 }; 

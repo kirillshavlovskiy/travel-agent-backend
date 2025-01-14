@@ -609,10 +609,14 @@ CRITICAL JSON FORMATTING RULES:
 
     if (cabinClass === 'FIRST' || cabinClass === 'BUSINESS') {
       return 'premium';
-    } else if (cabinClass === 'PREMIUM_ECONOMY' || price > 1000) {
+    } else if (cabinClass === 'PREMIUM_ECONOMY') {
+      return 'medium';
+    } else if (price <= 1000) {
+      return 'budget';
+    } else if (price <= 2000) {
       return 'medium';
     } else {
-      return 'budget';
+      return 'premium';
     }
   }
 
@@ -1023,7 +1027,7 @@ CRITICAL JSON FORMATTING RULES:
       }
 
       return result.choices[0].message.content;
-    } catch (error) {
+      } catch (error) {
       console.error('[Single Activity] Perplexity API error:', error);
       throw error;
     }
@@ -1060,4 +1064,4 @@ CRITICAL JSON FORMATTING RULES:
       throw new Error('Failed to generate activity recommendation');
     }
   }
-}
+} 
