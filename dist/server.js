@@ -149,4 +149,23 @@ app.use((_req, res) => {
 });
 // Export the Express app for serverless deployment
 export default app;
+// Start the server if not being imported
+const PORT = Number(process.env.PORT) || 3001;
+app.listen(PORT, '0.0.0.0', () => {
+    console.log(`Server running on port ${PORT}`);
+    console.log(`Health check available at http://localhost:${PORT}/health`);
+    console.log('Environment:', {
+        nodeEnv: process.env.NODE_ENV,
+        perplexityApiKey: !!process.env.PERPLEXITY_API_KEY,
+        redditClientId: !!process.env.REDDIT_CLIENT_ID,
+        redditClientSecret: !!process.env.REDDIT_CLIENT_SECRET,
+        amadeusClientId: !!process.env.AMADEUS_CLIENT_ID,
+        amadeusClientSecret: !!process.env.AMADEUS_CLIENT_SECRET
+    });
+    console.log('Routes mounted:', {
+        auth: !!authRoutes,
+        budget: !!budgetRoutes,
+        flights: !!flightRoutes
+    });
+});
 //# sourceMappingURL=server.js.map

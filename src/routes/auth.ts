@@ -221,7 +221,7 @@ router.get('/google/authorize', (_req: Request, res: Response) => {
   const clientId = process.env.GOOGLE_CLIENT_ID;
   const redirectUri = process.env.NODE_ENV === 'production'
     ? 'https://ai-trip-advisor-web.vercel.app/api/auth/callback/google'
-    : 'http://localhost:3001/api/auth/callback/google';
+    : 'http://localhost:3003/api/auth/callback/google';
 
   const scope = encodeURIComponent('openid email profile');
   
@@ -236,8 +236,7 @@ router.get('/google/authorize', (_req: Request, res: Response) => {
   res.json({ authUrl });
 });
 
-router.post('/google/verify', handleGoogleVerify);
-router.get('/callback/google', handleGoogleCallback);
+// Single callback endpoint for Google
 router.post('/google/callback', async (req: Request, res: Response) => {
   try {
     const { code, redirectUri } = req.body;
@@ -250,7 +249,6 @@ router.post('/google/callback', async (req: Request, res: Response) => {
     // Exchange code for tokens
     const clientId = process.env.GOOGLE_CLIENT_ID;
     const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
-
     const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
       method: 'POST',
       headers: {
@@ -271,7 +269,7 @@ router.post('/google/callback', async (req: Request, res: Response) => {
       return res.status(401).json({ error: 'Failed to exchange code for token' });
     }
 
-    const tokens = await tokenResponse.json() as GoogleTokens;
+    const tokens = await tokenResponse.json();
     console.log('[Google Callback] Got tokens:', { accessToken: tokens.access_token ? 'present' : 'missing' });
 
     // Get user info
@@ -287,77 +285,78 @@ router.post('/google/callback', async (req: Request, res: Response) => {
       return res.status(401).json({ error: 'Failed to get user info' });
     }
 
-    const userInfo = await userInfoResponse.json() as GoogleUserInfo;
+    const userInfo = await userInfoResponse.json();
     console.log('[Google Callback] Got user info:', { id: userInfo.id, name: userInfo.name });
 
     // Database transaction
     const prisma = new PrismaClient();
     console.log('[Google Callback] Starting database transaction');
-    
+
     const result = await prisma.$transaction(async (tx) => {
+      // Find or create user
       const user = await tx.user.upsert({
         where: { email: userInfo.email },
         update: {
-          username: userInfo.name,
-          email: userInfo.email,
+          name: userInfo.name,
           profileImage: userInfo.picture,
           lastLogin: new Date(),
-          verified: userInfo.verified_email,
         },
         create: {
-          username: userInfo.name,
           email: userInfo.email,
+          name: userInfo.name,
+          username: userInfo.name,
           profileImage: userInfo.picture,
-          lastLogin: new Date(),
           verified: userInfo.verified_email,
-          createdAt: new Date()
-        }
+        },
       });
 
+      // Create or update account
       const account = await tx.account.upsert({
         where: {
           provider_providerAccountId: {
-            provider: "google",
-            providerAccountId: userInfo.id
-          }
+            provider: 'google',
+            providerAccountId: userInfo.id,
+          },
         },
         update: {
           access_token: tokens.access_token,
           refresh_token: tokens.refresh_token,
-          expires_at: tokens.expiry_date,
+          expires_at: Math.floor(Date.now() / 1000 + tokens.expires_in),
           token_type: tokens.token_type,
+          scope: 'openid email profile',
           id_token: tokens.id_token,
         },
         create: {
           userId: user.id,
-          type: "oauth",
-          provider: "google",
+          type: 'oauth',
+          provider: 'google',
           providerAccountId: userInfo.id,
           access_token: tokens.access_token,
           refresh_token: tokens.refresh_token,
-          expires_at: tokens.expiry_date,
+          expires_at: Math.floor(Date.now() / 1000 + tokens.expires_in),
           token_type: tokens.token_type,
+          scope: 'openid email profile',
           id_token: tokens.id_token,
-        }
+        },
       });
 
+      // Create new session
       const session = await tx.session.create({
         data: {
           userId: user.id,
           sessionToken: generateSessionToken(),
-          expires: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) // 30 days
-        }
+          expires: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), // 30 days
+        },
       });
 
       return { user, account, session };
     });
 
     await prisma.$disconnect();
-
     console.log('[Google Callback] Database transaction completed', {
       userId: result.user.id,
       sessionId: result.session.id,
-      sessionToken: result.session.sessionToken
+      sessionToken: result.session.sessionToken,
     });
 
     // Set session cookie
@@ -366,7 +365,7 @@ router.post('/google/callback', async (req: Request, res: Response) => {
       secure: process.env.NODE_ENV === 'production',
       sameSite: 'lax',
       path: '/',
-      expires: result.session.expires
+      expires: result.session.expires,
     });
 
     // Return success with user data
@@ -377,8 +376,8 @@ router.post('/google/callback', async (req: Request, res: Response) => {
         username: result.user.username,
         email: result.user.email,
         profileImage: result.user.profileImage,
-        verified: result.user.verified
-      }
+        verified: result.user.verified,
+      },
     });
   } catch (error) {
     console.error('[Google Callback] Error:', error);

@@ -5,16 +5,29 @@ const router = express.Router();
 // Get locations endpoint
 router.get('/locations', async (req, res) => {
     try {
+        console.log('[Budget Route] Fetching available locations');
         res.json({
-            cities,
-            airports,
-            citiesCount: cities.length,
-            airportsCount: airports.length
+            success: true,
+            data: {
+                cities: cities.map(city => ({
+                    value: city.value,
+                    label: city.label
+                })),
+                airports: airports.map(airport => ({
+                    value: airport.value,
+                    label: airport.label
+                }))
+            },
+            timestamp: new Date().toISOString()
         });
     }
     catch (error) {
-        console.error('Error fetching locations:', error);
-        res.status(500).json({ error: 'Internal server error' });
+        console.error('[Budget Route] Error fetching locations:', error);
+        res.status(500).json({
+            success: false,
+            error: error instanceof Error ? error.message : 'An unexpected error occurred',
+            timestamp: new Date().toISOString()
+        });
     }
 });
 // Get budget endpoint

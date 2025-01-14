@@ -3,12 +3,12 @@ import cors from 'cors';
 import cookieParser from 'cookie-parser';
 import session from 'express-session';
 import { config } from 'dotenv';
-import authRoutes from './routes/auth.js';
-import budgetRoutes from './routes/budget.js';
-import flightRoutes from './routes/flights.js';
-import hotelRoutes from './routes/hotels.js';
-import perplexityRoutes from './routes/perplexity.js';
-import activitiesRoutes from './routes/activities.js';
+import authRoutes from './src/routes/auth';
+import budgetRoutes from './src/routes/budget';
+import flightRoutes from './src/routes/flights';
+import hotelRoutes from './src/routes/hotels';
+import perplexityRoutes from './src/routes/perplexity';
+import activitiesRoutes from './src/routes/activities';
 
 // Load environment variables
 config();
@@ -45,6 +45,9 @@ app.use(cors(corsOptions));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
+
+// Mount auth routes directly (no session required)
+app.use('/api/auth', authRoutes);
 
 // Public routes (no authentication required)
 app.get('/health', (_req: Request, res: Response) => {
@@ -101,7 +104,6 @@ const authenticatedRouter = express.Router();
 authenticatedRouter.use(sessionMiddleware);
 
 // Mount authenticated routes
-authenticatedRouter.use('/api/auth', authRoutes);
 authenticatedRouter.use('/api/budget', budgetRoutes);
 authenticatedRouter.use('/api/flights', flightRoutes);
 authenticatedRouter.use('/api/hotels', hotelRoutes);
@@ -165,4 +167,24 @@ app.use((_req: Request, res: Response) => {
 });
 
 // Export the Express app for serverless deployment
-export default app; 
+export default app;
+
+// Start the server if not being imported
+const PORT = Number(process.env.PORT) || 3001;
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Server running on port ${PORT}`);
+  console.log(`Health check available at http://localhost:${PORT}/health`);
+  console.log('Environment:', {
+    nodeEnv: process.env.NODE_ENV,
+    perplexityApiKey: !!process.env.PERPLEXITY_API_KEY,
+    redditClientId: !!process.env.REDDIT_CLIENT_ID,
+    redditClientSecret: !!process.env.REDDIT_CLIENT_SECRET,
+    amadeusClientId: !!process.env.AMADEUS_CLIENT_ID,
+    amadeusClientSecret: !!process.env.AMADEUS_CLIENT_SECRET
+  });
+  console.log('Routes mounted:', {
+    auth: !!authRoutes,
+    budget: !!budgetRoutes,
+    flights: !!flightRoutes
+  });
+}); 

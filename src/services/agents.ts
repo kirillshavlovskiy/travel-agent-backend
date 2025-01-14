@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import fetch, { Response as FetchResponse } from 'node-fetch';
+import { AmadeusFlightOffer } from '../types/amadeus.js';
 
 interface TravelRequest {
   type: string;
@@ -22,6 +23,7 @@ interface TravelRequest {
   budget?: number;
   startDate?: string;
   endDate?: string;
+  flightData?: AmadeusFlightOffer[];
 }
 
 interface PerplexityResponse {
@@ -146,9 +148,44 @@ interface FoodData {
   };
 }
 
-type CategoryData = FlightData | HotelData | ActivityData | TransportData | FoodData;
+interface CategoryData {
+  flights?: {
+    budget: CategoryTier<FlightReference>;
+    medium: CategoryTier<FlightReference>;
+    premium: CategoryTier<FlightReference>;
+  };
+  hotels?: {
+    searchDetails: {
+      location: string;
+      dates: {
+        checkIn: string;
+        checkOut: string;
+      };
+      guests: number;
+    };
+    budget: CategoryTier<HotelReference>;
+    medium: CategoryTier<HotelReference>;
+    premium: CategoryTier<HotelReference>;
+  };
+  activities?: {
+    budget: CategoryTier<ActivityReference>;
+    medium: CategoryTier<ActivityReference>;
+    premium: CategoryTier<ActivityReference>;
+  };
+  localTransportation?: {
+    budget: CategoryTier<TransportReference>;
+    medium: CategoryTier<TransportReference>;
+    premium: CategoryTier<TransportReference>;
+  };
+  food?: {
+    budget: CategoryTier<FoodReference>;
+    medium: CategoryTier<FoodReference>;
+    premium: CategoryTier<FoodReference>;
+  };
+}
 
 interface SingleActivityResponse {
+  id?: string;
   name: string;
   description: string;
   duration: number;
@@ -157,6 +194,9 @@ interface SingleActivityResponse {
   location: string;
   rating: number;
   timeOfDay: string;
+  timeSlot?: string;
+  dayNumber?: number;
+  tier?: string;
   referenceUrl?: string;
   provider: string;
   highlights: string[];
@@ -287,7 +327,8 @@ CRITICAL JSON FORMATTING RULES:
         let cleanContent = content;
         
         // Step 1: Remove markdown code blocks and any text before/after JSON
-        cleanContent = cleanContent.replace(/^[\s\S]*?(\{[\s\S]*\})[\s\S]*$/, '$1');
+        cleanContent = cleanContent.replace(/```(?:json)?\s*([\s\S]*?)```/g, '$1');
+        cleanContent = cleanContent.replace(/^[^{]*({[\s\S]*})[^}]*$/, '$1');
         console.log(`[${category.toUpperCase()}] After removing markdown:`, cleanContent);
 
         // Step 2: Handle price ranges by converting to average
@@ -305,7 +346,9 @@ CRITICAL JSON FORMATTING RULES:
           .replace(/:\s*'([^']*?)'/g, ':"$1"') // Convert single-quoted values to double-quoted
           .replace(/([{,]\s*)(\w+):/g, '$1"$2":') // Ensure property names are quoted
           .replace(/\\/g, '\\\\') // Properly escape backslashes
-          .replace(/\n/g, ' '); // Remove newlines
+          .replace(/\n/g, ' ') // Remove newlines
+          .replace(/€/g, '') // Remove euro symbol
+          .replace(/\s+/g, ' '); // Normalize whitespace
         console.log(`[${category.toUpperCase()}] After fixing quotes:`, cleanContent);
 
         // Step 4: Remove trailing commas and fix arrays/objects
@@ -371,6 +414,7 @@ CRITICAL JSON FORMATTING RULES:
             .replace(/\}\s*,\s*\}/g, '}}') // Fix object separators
             .replace(/\]\s*,\s*\]/g, ']]') // Fix array separators
             .replace(/\}\s*,\s*\]/g, '}]') // Fix mixed separators
+            .replace(/[^{}[\]"':,.\w\s-]/g, '') // Remove any other non-JSON characters
             .trim();
           
           console.log(`[${category.toUpperCase()}] Last attempt content:`, lastAttempt);
@@ -469,7 +513,11 @@ CRITICAL JSON FORMATTING RULES:
         }
       };
 
-      const categories = ['flights', 'localTransportation', 'food', 'activities'];
+      // Determine which categories to process with Perplexity
+      const categories = request.flightData ? 
+        ['localTransportation', 'food', 'activities'] : // Skip flights if we have Amadeus data
+        ['flights', 'localTransportation', 'food', 'activities'];
+      
       console.log(`[TIMING] Processing ${categories.length} categories in parallel`);
 
       const results = await Promise.all(
@@ -506,6 +554,42 @@ CRITICAL JSON FORMATTING RULES:
         response[category] = data[category as keyof CategoryData];
       });
 
+      // If we have Amadeus flight data, use it instead of Perplexity data
+      if (request.flightData && request.flightData.length > 0) {
+        // Group flights by tier
+        const groupedFlights = request.flightData.reduce((acc, flight) => {
+          const tier = this.determineFlightTier(flight);
+          if (!acc[tier]) {
+            acc[tier] = {
+              min: Infinity,
+              max: -Infinity,
+              average: 0,
+              confidence: 0.9, // Higher confidence for real data
+              source: 'Amadeus',
+              references: []
+            };
+          }
+          const price = parseFloat(flight.price.total);
+          acc[tier].min = Math.min(acc[tier].min, price);
+          acc[tier].max = Math.max(acc[tier].max, price);
+          acc[tier].references.push(this.transformAmadeusFlight(flight));
+          return acc;
+        }, {} as Record<'budget' | 'medium' | 'premium', CategoryTier<FlightReference>>);
+
+        // Calculate averages
+        Object.keys(groupedFlights).forEach(tier => {
+          const refs = groupedFlights[tier as keyof typeof groupedFlights].references;
+          groupedFlights[tier as keyof typeof groupedFlights].average = 
+            refs.reduce((sum: number, ref: any) => sum + ref.price, 0) / refs.length;
+        });
+
+        response.flights = {
+          budget: groupedFlights.budget || this.getDefaultCategoryData('flights').flights!.budget,
+          medium: groupedFlights.medium || this.getDefaultCategoryData('flights').flights!.medium,
+          premium: groupedFlights.premium || this.getDefaultCategoryData('flights').flights!.premium
+        };
+      }
+
       const totalTime = Date.now() - startTime;
       console.log(`[TIMING] Total budget calculation completed in ${totalTime}ms`);
       if (totalTime > 25000) {
@@ -517,6 +601,55 @@ CRITICAL JSON FORMATTING RULES:
       console.error('[VacationBudgetAgent] Error:', error);
       throw error;
     }
+  }
+
+  private determineFlightTier(flight: AmadeusFlightOffer): 'budget' | 'medium' | 'premium' {
+    const cabinClass = flight.travelerPricings[0].fareDetailsBySegment[0].cabin;
+    const price = parseFloat(flight.price.total);
+
+    if (cabinClass === 'FIRST' || cabinClass === 'BUSINESS') {
+      return 'premium';
+    } else if (cabinClass === 'PREMIUM_ECONOMY' || price > 1000) {
+      return 'medium';
+    } else {
+      return 'budget';
+    }
+  }
+
+  private transformAmadeusFlight(flight: AmadeusFlightOffer): FlightReference {
+    const firstSegment = flight.itineraries[0].segments[0];
+    const lastOutboundSegment = flight.itineraries[0].segments[flight.itineraries[0].segments.length - 1];
+    const inboundSegments = flight.itineraries[1]?.segments || [];
+    const lastInboundSegment = inboundSegments[inboundSegments.length - 1];
+
+    // Calculate total duration in minutes
+    const totalDurationMinutes = flight.itineraries[0].segments.reduce((total, segment) => {
+      const durationStr = segment.duration || '0';
+      const minutes = parseInt(durationStr.replace(/[^0-9]/g, ''), 10) || 0;
+      return total + minutes;
+    }, 0);
+
+    // Format duration as "X hours Y minutes"
+    const hours = Math.floor(totalDurationMinutes / 60);
+    const minutes = totalDurationMinutes % 60;
+    const formattedDuration = `${hours}h ${minutes}m`;
+
+    return {
+      airline: flight.validatingAirlineCodes[0],
+      route: `${firstSegment.departure.iataCode} to ${lastOutboundSegment.arrival.iataCode}`,
+      price: parseFloat(flight.price.total),
+      outbound: firstSegment.departure.at,
+      inbound: lastInboundSegment?.arrival.at || lastOutboundSegment.arrival.at,
+      duration: formattedDuration,
+      layovers: flight.itineraries[0].segments.length - 1,
+      flightNumber: `${firstSegment.carrierCode}${firstSegment.number}`,
+      tier: this.determineFlightTier(flight),
+      referenceUrl: this.generateFlightSearchUrl({
+        route: `${firstSegment.departure.iataCode} to ${lastOutboundSegment.arrival.iataCode}`,
+        outbound: firstSegment.departure.at,
+        inbound: lastInboundSegment?.arrival.at || lastOutboundSegment.arrival.at
+      } as FlightReference)
+    };
   }
 
   private constructPrompt(category: string, params: TravelRequest): string {
@@ -787,64 +920,13 @@ CRITICAL JSON FORMATTING RULES:
     const travelers = request.travelers;
     const budget = request.budget;
 
-    return `Provide detailed hotel recommendations in ${destination} for ${travelers} travelers, checking in on ${checkIn} and checking out on ${checkOut}.
-For each price category (budget, medium, premium), provide at least 5 real hotels with:
-1. Full hotel name (use real, well-known hotels)
-2. Exact location within ${destination}
-3. Price per night in USD (realistic market rates)
-4. Star rating (out of 5)
-5. At least 3-5 key amenities (e.g., "Free WiFi, Pool, Restaurant")
-6. Direct booking URL - IMPORTANT:
-   - Prefer direct hotel website booking URLs (e.g., hilton.com, marriott.com)
-   - Include the specific dates: ${checkIn} to ${checkOut}
-   - Include number of guests: ${travelers}
-   - Only use Booking.com as a last resort
-7. At least 2 high-quality images of the hotel:
-   - Exterior view
-   - Room or amenity view
-   - Must be real images from the hotel's website or official sources
+    let prompt = `Provide detailed hotel recommendations in ${destination} for ${travelers} travelers, checking in on ${checkIn} and checking out on ${checkOut}.`;
 
-Return in this exact JSON structure:
-{
-  "hotels": {
-    "searchDetails": {
-      "location": "${destination}",
-      "dates": {
-        "checkIn": "${checkIn}",
-        "checkOut": "${checkOut}"
-      },
-      "guests": ${travelers}
-    },
-    "budget": {
-      "min": [minimum price in category],
-      "max": [maximum price in category],
-      "average": [average price in category],
-      "confidence": 0.9,
-      "source": "Direct hotel websites and market research",
-      "references": [
-        {
-          "name": "Hotel Name",
-          "location": "Exact address",
-          "price": 100,
-          "rating": 4.5,
-          "amenities": ["amenity1", "amenity2", "amenity3"],
-          "link": "https://www.hilton.com/...",
-          "images": [
-            "https://www.hotel-website.com/image1.jpg",
-            "https://www.hotel-website.com/image2.jpg"
-          ],
-          "hotelChain": "Hilton/Marriott/etc or Independent",
-          "directBooking": true
-        }
-      ]
-    },
-    "medium": { [same structure as budget] },
-    "premium": { [same structure as budget] }
-  }
-}
+    if (budget) {
+      prompt += `\nConsider total budget of ${budget} USD when suggesting options.`;
+    }
 
-${budget ? `Consider total budget of ${budget} USD when suggesting options.` : ''}
-IMPORTANT RULES:
+    prompt += `\n\nIMPORTANT RULES:
 1. Prioritize hotels with direct booking websites
 2. All URLs must be complete and include check-in/out dates when possible
 3. All images must be from official hotel sources
@@ -852,250 +934,130 @@ IMPORTANT RULES:
 5. Only include hotels that can be booked online
 6. Verify that all links and images are accessible
 7. Include major hotel chains when available in each tier`;
+
+    return prompt;
+  }
+
+  private cleanJsonResponse(response: string): string {
+    try {
+      // Remove markdown code block markers
+      let cleaned = response.replace(/```json\n?|\n?```/g, '');
+      
+      // Find the first '{' and last '}'
+      const startIndex = cleaned.indexOf('{');
+      const endIndex = cleaned.lastIndexOf('}');
+      
+      if (startIndex === -1 || endIndex === -1) {
+        throw new Error('No valid JSON object found in response');
+      }
+      
+      // Extract just the JSON object
+      cleaned = cleaned.substring(startIndex, endIndex + 1);
+      
+      // Remove any additional text before or after the JSON
+      return cleaned.trim();
+    } catch (error) {
+      console.error('[Clean JSON] Error:', error);
+      throw new Error('Failed to clean JSON response');
+    }
+  }
+
+  private async querySingleActivity(prompt: string): Promise<string> {
+    try {
+      const response = await this.fetchWithRetry(
+        'https://api.perplexity.ai/chat/completions',
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${process.env.PERPLEXITY_API_KEY}`
+          },
+          body: JSON.stringify({
+            model: 'llama-3.1-sonar-small-128k-online',
+            messages: [
+              {
+                role: 'system',
+                content: `You are a travel expert who searches real booking websites to find current activities and prices. Always verify information from official sources.
+
+CRITICAL JSON FORMATTING RULES:
+1. Return ONLY a valid JSON object
+2. Do NOT include any text before or after the JSON
+3. Do NOT use markdown formatting or code blocks
+4. Use ONLY double quotes for strings and property names
+5. Do NOT use single quotes anywhere
+6. Do NOT include any comments
+7. Do NOT include any trailing commas
+8. Ensure all strings are properly escaped
+9. Ensure all arrays and objects are properly closed
+10. All numbers must be valid JSON numbers (no ranges like "35-40", use average value instead)
+11. All dates must be valid ISO strings
+12. All URLs must be valid and properly escaped
+13. All property names must be double-quoted
+14. Do NOT escape quotes in the response
+15. For price ranges, use the average value (e.g., for "35-40", use 37.5)`
+              },
+              {
+                role: 'user',
+                content: prompt
+              }
+            ],
+            options: {
+              search: true,
+              system_prompt: "You are a travel expert who searches real booking websites to find current activities and prices. Always verify information from official sources.",
+              temperature: 0.1,
+              max_tokens: 4000
+            }
+          })
+        },
+        3
+      );
+
+      if (!response.ok) {
+        throw new Error(`Perplexity API request failed: ${response.status} ${response.statusText}`);
+      }
+
+      const result = await response.json() as PerplexityResponse;
+      
+      if (!result.choices?.[0]?.message?.content) {
+        throw new Error('Invalid response from Perplexity API');
+      }
+
+      return result.choices[0].message.content;
+    } catch (error) {
+      console.error('[Single Activity] Perplexity API error:', error);
+      throw error;
+    }
   }
 
   async generateSingleActivity(params: {
     destination: string;
+    timeOfDay: string;
     dayNumber: number;
-    timeSlot: string;
-    tier: string;
-    existingActivities: any[];
-    flightTimes?: {
-      arrival?: string;
-      departure?: string;
-    };
-    currency?: string;
-    category?: string;
-    userPreferences?: string;
-  }) {
-    console.log('[VacationBudgetAgent] Generating single activity:', {
-      destination: params.destination,
-      dayNumber: params.dayNumber,
-      timeSlot: params.timeSlot,
-      tier: params.tier,
-      category: params.category,
-      userPreferences: params.userPreferences,
-      hasExistingActivities: !!params.existingActivities?.length,
-      flightTimes: params.flightTimes
-    });
-
-    const prompt = `Search ONLY on GetYourGuide, Viator, or official venue websites to find a real, currently bookable ${params.category || ''} activity in ${params.destination} for ${params.timeSlot} of day ${params.dayNumber}.
-
-CRITICAL PRICE REQUIREMENTS:
-You MUST find an activity with an EXACT price that matches the ${params.tier} tier:
-- Budget tier: $0-30 per person
-- Medium tier: $30-100 per person (MUST BE AT LEAST $30)
-- Premium tier: $100-1000 per person (MUST BE AT LEAST $100)
-
-DO NOT return an activity if its price does not EXACTLY match the ${params.tier} tier range.
-For ${params.tier} tier, the price MUST be between $${params.tier === 'budget' ? '0-30' : params.tier === 'medium' ? '30-100' : '100-1000'}.
-
-${params.userPreferences ? `The activity should match these preferences: ${params.userPreferences}` : ''}
-${params.existingActivities.length > 0 ? `It should not overlap with or be similar to these existing activities: ${params.existingActivities.map(a => a.name).join(', ')}.` : ''}
-
-CRITICAL REQUIREMENTS - ALL MUST BE MET:
-1. You MUST search real booking websites (GetYourGuide, Viator, or official venue sites) and provide the EXACT booking URL
-2. The price MUST be the current, exact price from the booking site and MUST be within the specified range for ${params.tier} tier
-3. The activity MUST be in the "${params.category}" category and match the user preferences
-4. All details (name, description, duration, etc.) MUST be copied exactly from the real listing
-5. Include the specific meeting point or venue address in ${params.destination}
-6. For tours/activities, include the actual tour operator's name from the listing
-7. DO NOT make up or generate any details - all information must come from a real, bookable listing
-8. DO NOT reuse the user's input text in the response - find a real activity that matches their preferences
-
-Format the response EXACTLY as this JSON object:
-{
-  "name": "EXACT activity name from booking site",
-  "description": "Full description from the listing",
-  "duration": "Duration in hours (number only) from listing",
-  "price": number,
-  "category": "${params.category || 'Any category'}",
-  "location": "Exact meeting point/address from listing",
-  "rating": "Rating from booking site (number out of 5)",
-  "timeOfDay": "${params.timeSlot}",
-  "referenceUrl": "REQUIRED - Full direct booking URL",
-  "provider": "REQUIRED - Exact tour operator/venue name",
-  "highlights": ["Copy", "the", "exact", "highlights", "from", "the", "listing"]
-}
-
-IMPORTANT RULES:
-1. The price field MUST be a number without any currency symbols or formatting (e.g., 35 not "$35" or "35 USD")
-2. The price MUST be within the specified range for ${params.tier} tier (${params.tier === 'budget' ? '$0-30' : params.tier === 'medium' ? '$30-100' : '$100-1000'} per person)
-3. If you cannot find a real, bookable activity with an exact price and URL, respond with an error message instead of making up details
-4. You MUST verify that the activity exists and is currently bookable
-5. You MUST include the exact booking URL from GetYourGuide, Viator, or the official venue website
-6. The description and highlights MUST be copied directly from the listing - do not generate or modify them
-
-${params.flightTimes?.arrival && params.dayNumber === 1 ? 
-  `Note: This is arrival day. Flight arrives at ${new Date(params.flightTimes.arrival).toLocaleTimeString()}. Activity should start at least 2 hours after arrival.` : ''}
-${params.flightTimes?.departure ? `Note: Flight departs at ${new Date(params.flightTimes.departure).toLocaleTimeString()}. Activity should end at least 3 hours before departure.` : ''}`;
+    budget: number;
+    currency: string;
+  }): Promise<SingleActivityResponse> {
+    const prompt = `Generate a single activity recommendation for ${params.destination} during ${params.timeOfDay} on day ${params.dayNumber} with a budget of ${params.budget} ${params.currency}. The response should be a valid JSON object with the following structure:
+    {
+      "name": "Activity name",
+      "description": "Detailed description",
+      "duration": "Duration in hours (number)",
+      "price": "Price in ${params.currency} (number)",
+      "category": "Category (e.g., Cultural, Adventure, Relaxation)",
+      "location": "Specific location in ${params.destination}",
+      "rating": "Rating out of 5 (number)",
+      "timeOfDay": "${params.timeOfDay}",
+      "referenceUrl": "Optional booking URL",
+      "provider": "Activity provider name",
+      "highlights": ["Array of key highlights"]
+    }`;
 
     try {
-      console.log('[VacationBudgetAgent] Calling Perplexity API with prompt...');
-      const response = await this.queryPerplexity(prompt, 'single-activity') as unknown as SingleActivityResponse;
-      
-      if (!response) {
-        throw new Error('Failed to generate activity');
-      }
-
-      // Validate category
-      if (params.category && (!response.category || response.category.toLowerCase() !== params.category.toLowerCase())) {
-        console.warn('[VacationBudgetAgent] Generated activity has wrong category:', {
-          requested: params.category,
-          received: response.category || 'undefined'
-        });
-        throw new Error(`Generated activity does not match requested category. Requested: ${params.category}, Received: ${response.category || 'undefined'}`);
-      }
-
-      // Stricter URL validation
-      if (!response.referenceUrl || !response.referenceUrl.startsWith('http')) {
-        console.warn('[VacationBudgetAgent] Generated activity missing valid URL:', response.referenceUrl);
-        throw new Error('Generated activity must include a valid booking URL starting with http:// or https://');
-      }
-
-      // Validate URL domain
-      const validDomains = [
-        'getyourguide.com', 
-        'viator.com',
-        'tripadvisor.com',
-        'expedia.com',
-        'booking.com',
-        'airbnb.com',
-        'opentable.com',
-        'resy.com'
-      ];
-      const url = new URL(response.referenceUrl);
-      const isValidDomain = validDomains.some(domain => url.hostname.includes(domain)) || 
-                           url.hostname.includes(params.destination.toLowerCase()) ||
-                           url.hostname.endsWith('.com') ||
-                           url.hostname.endsWith('.net') ||
-                           url.hostname.endsWith('.org');
-      if (!isValidDomain) {
-        console.warn('[VacationBudgetAgent] Invalid booking URL domain:', url.hostname);
-        throw new Error('Booking URL must be from GetYourGuide, Viator, or an official venue website');
-      }
-
-      // Validate that description is not just repeating user preferences
-      if (params.userPreferences && response.description.toLowerCase().includes(params.userPreferences.toLowerCase())) {
-        console.warn('[VacationBudgetAgent] Description appears to be copying user preferences');
-        throw new Error('Activity description must be from the actual listing, not generated from user preferences');
-      }
-
-      // Validate provider
-      if (!response.provider || response.provider.length < 3) {
-        console.warn('[VacationBudgetAgent] Missing or invalid provider:', response.provider);
-        throw new Error('Activity must include a valid provider name from the listing');
-      }
-
-      // Validate highlights
-      if (!Array.isArray(response.highlights) || response.highlights.length === 0) {
-        console.warn('[VacationBudgetAgent] Missing highlights array');
-        throw new Error('Activity must include at least one highlight from the listing');
-      }
-
-      // Validate price format and range
-      const parsePriceString = (priceStr: string | number): number => {
-        if (typeof priceStr === 'number') return priceStr;
-        // Remove any currency symbols and whitespace
-        const numericStr = priceStr.toString().replace(/[^0-9.]/g, '').trim();
-        const parsed = parseFloat(numericStr);
-        if (isNaN(parsed) || parsed <= 0) {
-          throw new Error(`Invalid price format: ${priceStr}`);
-        }
-        return parsed;
-      };
-
-      let parsedPrice: number;
-      try {
-        parsedPrice = parsePriceString(response.price);
-        console.log('[VacationBudgetAgent] Parsed price:', {
-          original: response.price,
-          parsed: parsedPrice
-        });
-      } catch (error) {
-        console.warn('[VacationBudgetAgent] Price parsing error:', {
-          price: response.price,
-          error: error instanceof Error ? error.message : 'Unknown error'
-        });
-        throw new Error('Generated activity must include a valid positive price');
-      }
-
-      // Validate price matches tier
-      const minPrice = params.tier === 'budget' ? 0 : params.tier === 'medium' ? 30 : 90;
-      const maxPrice = params.tier === 'budget' ? 30 : params.tier === 'medium' ? 90 : 1000;
-
-      // Additional validation for medium and premium tiers
-      if (params.tier === 'medium' && parsedPrice < 30) {
-        console.warn('[VacationBudgetAgent] Price too low for medium tier:', {
-          price: parsedPrice,
-          minimumRequired: 30
-        });
-        throw new Error(`Price ${parsedPrice} is too low for medium tier (minimum $30 required)`);
-      }
-      if (params.tier === 'premium' && parsedPrice < 90) {
-        console.warn('[VacationBudgetAgent] Price too low for premium tier:', {
-          price: parsedPrice,
-          minimumRequired: 90
-        });
-        throw new Error(`Price ${parsedPrice} is too low for premium tier (minimum $90 required)`);
-      }
-
-      if (parsedPrice < minPrice || parsedPrice > maxPrice) {
-        console.warn('[VacationBudgetAgent] Price does not match tier:', {
-          price: parsedPrice,
-          tier: params.tier,
-          expectedRange: `${minPrice}-${maxPrice}`
-        });
-        throw new Error(`Price ${parsedPrice} does not match ${params.tier} tier range (${minPrice}-${maxPrice})`);
-      }
-
-      // Log successful price validation
-      console.log('[VacationBudgetAgent] Price validation passed:', {
-        price: parsedPrice,
-        tier: params.tier,
-        range: `${minPrice}-${maxPrice}`
-      });
-
-      // Transform the activity into the expected format
-      const activity = {
-        id: `${params.dayNumber}-${params.timeSlot}-${Date.now()}`,
-        name: response.name,
-        description: response.description,
-        duration: response.duration,
-        price: {
-          amount: parsedPrice,
-          currency: params.currency || 'USD'
-        },
-        location: response.location,
-        rating: response.rating,
-        category: params.category || response.category || 'Undefined',
-        timeSlot: params.timeSlot,
-        dayNumber: params.dayNumber,
-        startTime: params.timeSlot === 'morning' ? '09:00' :
-                  params.timeSlot === 'afternoon' ? '14:00' :
-                  params.timeSlot === 'evening' ? '19:00' : '12:00',
-        tier: params.tier,
-        suggestedOption: true,
-        referenceUrl: response.referenceUrl,
-        provider: response.provider,
-        highlights: response.highlights || []
-      };
-
-      console.log('[VacationBudgetAgent] Successfully generated activity:', {
-        id: activity.id,
-        name: activity.name,
-        price: activity.price,
-        referenceUrl: activity.referenceUrl,
-        provider: activity.provider
-      });
-
-      return activity;
+      const response = await this.querySingleActivity(prompt);
+      const cleanedResponse = this.cleanJsonResponse(response);
+      return JSON.parse(cleanedResponse);
     } catch (error) {
-      console.error('[VacationBudgetAgent] Error generating single activity:', {
-        message: error instanceof Error ? error.message : 'Unknown error',
-        stack: error instanceof Error ? error.stack : undefined
-      });
-      throw error;
+      console.error('[Activity Generation] Error:', error);
+      throw new Error('Failed to generate activity recommendation');
     }
   }
-} 
+}
