@@ -40,7 +40,7 @@ export const handleGoogleCallback = async (req, res) => {
         const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
         const redirectUri = process.env.NODE_ENV === 'production'
             ? 'https://ai-trip-advisor-web.vercel.app/api/auth/callback/google'
-            : 'http://localhost:3001/api/auth/callback/google';
+            : 'http://localhost:3003/api/auth/callback/google';
         const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
             method: 'POST',
             headers: {

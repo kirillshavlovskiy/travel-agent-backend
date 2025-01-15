@@ -203,7 +203,7 @@ function getPrimaryAirportForCity(cityCode: string): string {
 // Calculate budget endpoint
 router.post('/calculate-budget', async (req: Request, res: Response) => {
   // Set a timeout for the entire request
-  const TIMEOUT = 25000; // 25 seconds
+  const TIMEOUT = 120000; // 120 seconds to account for Amadeus API retries
   const timeoutPromise = new Promise((_, reject) => {
     setTimeout(() => reject(new Error('Request timeout')), TIMEOUT);
   });
@@ -550,7 +550,7 @@ router.post('/calculate-budget', async (req: Request, res: Response) => {
                         time: lastInboundSegment.arrival.at
                       },
                       duration: amadeusService.calculateTotalDuration(inboundSegments),
-                      segments: inboundSegments.map((segment: AmadeusSegment) => ({
+                      segments: inboundSegments.map((segment) => ({
                         airline: segment.carrierCode,
                         flightNumber: `${segment.carrierCode}${segment.number}`,
                         aircraft: {
@@ -571,7 +571,7 @@ router.post('/calculate-budget', async (req: Request, res: Response) => {
                         cabinClass: offer.travelerPricings[0].fareDetailsBySegment.find(
                           (fare) => fare.segmentId === `${segment.carrierCode}${segment.number}`
                         )?.cabin || cabinClass
-                      }))
+                      })) as FlightSegment[]
                     };
                   }
               
@@ -780,8 +780,8 @@ router.post('/generate-activity', async (req: Request, res: Response) => {
     const activity = await agent.generateSingleActivity({
       destination,
       dayNumber,
-      timeSlot,
-      tier,
+      timeOfDay: timeSlot,
+      budget: tier,
       category,
       userPreferences,
       existingActivities,

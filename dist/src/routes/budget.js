@@ -4,6 +4,7 @@ import { PrismaClient } from '@prisma/client';
 import { cities } from '../data/cities.js';
 import { airports } from '../data/airports.js';
 import { AmadeusService } from '../services/amadeus.js';
+import { AIRCRAFT_CODES as AIRCRAFT_CODE_MAP } from '../constants/aircraft.js';
 const router = Router();
 const agent = new VacationBudgetAgent();
 const prisma = new PrismaClient();
@@ -96,7 +97,7 @@ function getPrimaryAirportForCity(cityCode) {
 // Calculate budget endpoint
 router.post('/calculate-budget', async (req, res) => {
     // Set a timeout for the entire request
-    const TIMEOUT = 25000; // 25 seconds
+    const TIMEOUT = 120000; // 120 seconds to account for Amadeus API retries
     const timeoutPromise = new Promise((_, reject) => {
         setTimeout(() => reject(new Error('Request timeout')), TIMEOUT);
     });
@@ -213,11 +214,9 @@ router.post('/calculate-budget', async (req, res) => {
                     startDate: String(req.body.startDate),
                     endDate: String(req.body.endDate)
                 };
-                // Process the request with the agent first
-                console.log('[Budget Route] Calling budget agent...');
-                const agentResult = await agent.handleTravelRequest(transformedRequest);
-                // Then search for real-time flights with Amadeus
+                // First search for real-time flights with Amadeus
                 console.log('[Budget Route] Searching for real-time flights with Amadeus...');
+                let agentResult;
                 try {
                     const formattedDepartureDate = transformedRequest.startDate.split('T')[0];
                     const formattedReturnDate = transformedRequest.endDate.split('T')[0];
@@ -256,17 +255,22 @@ router.post('/calculate-budget', async (req, res) => {
                             travelClass: 'FIRST'
                         })
                     ];
-                    // Wait for all searches to complete
+                    // Wait for all searches to complete and process results
                     const allFlights = await Promise.all(searchPromises);
-                    // Combine all flight results
                     const flights = allFlights.flat();
+                    // Call the agent with flight data
+                    console.log('[Budget Route] Calling budget agent for additional data...');
+                    agentResult = await agent.handleTravelRequest({
+                        ...transformedRequest,
+                        flightData: flights
+                    });
                     console.log('[Budget Route] Flight search results:', {
                         totalFlights: flights.length,
                         byClass: {
-                            economy: flights.filter(f => f.travelerPricings[0].fareDetailsBySegment[0].cabin === 'ECONOMY').length,
-                            premiumEconomy: flights.filter(f => f.travelerPricings[0].fareDetailsBySegment[0].cabin === 'PREMIUM_ECONOMY').length,
-                            business: flights.filter(f => f.travelerPricings[0].fareDetailsBySegment[0].cabin === 'BUSINESS').length,
-                            first: flights.filter(f => f.travelerPricings[0].fareDetailsBySegment[0].cabin === 'FIRST').length
+                            economy: flights.filter((f) => f.travelerPricings[0].fareDetailsBySegment[0].cabin === 'ECONOMY').length,
+                            premiumEconomy: flights.filter((f) => f.travelerPricings[0].fareDetailsBySegment[0].cabin === 'PREMIUM_ECONOMY').length,
+                            business: flights.filter((f) => f.travelerPricings[0].fareDetailsBySegment[0].cabin === 'BUSINESS').length,
+                            first: flights.filter((f) => f.travelerPricings[0].fareDetailsBySegment[0].cabin === 'FIRST').length
                         }
                     });
                     if (flights && flights.length > 0) {
@@ -286,15 +290,21 @@ router.post('/calculate-budget', async (req, res) => {
                                 console.log('[Budget Route] Processing flight offer:', {
                                     price: offer.price,
                                     segments: {
-                                        outbound: offer.itineraries[0].segments.map((s) => ({
-                                            departure: s.departure,
-                                            arrival: s.arrival,
-                                            aircraft: s.aircraft
+                                        outbound: offer.itineraries[0].segments.map((segment) => ({
+                                            departure: segment.departure,
+                                            arrival: segment.arrival,
+                                            aircraft: segment.aircraft,
+                                            duration: segment.duration,
+                                            carrierCode: segment.carrierCode,
+                                            number: segment.number
                                         })),
-                                        inbound: offer.itineraries[1]?.segments?.map((s) => ({
-                                            departure: s.departure,
-                                            arrival: s.arrival,
-                                            aircraft: s.aircraft
+                                        inbound: offer.itineraries[1]?.segments?.map((segment) => ({
+                                            departure: segment.departure,
+                                            arrival: segment.arrival,
+                                            aircraft: segment.aircraft,
+                                            duration: segment.duration,
+                                            carrierCode: segment.carrierCode,
+                                            number: segment.number
                                         }))
                                     },
                                     cabinClass
@@ -372,7 +382,7 @@ router.post('/calculate-budget', async (req, res) => {
                                                 flightNumber: `${segment.carrierCode}${segment.number}`,
                                                 aircraft: {
                                                     code: segment.aircraft.code,
-                                                    name: offer.dictionaries?.aircraft?.[segment.aircraft.code] || AIRCRAFT_CODES[segment.aircraft.code] || segment.aircraft.code
+                                                    name: offer.dictionaries?.aircraft?.[segment.aircraft.code] || AIRCRAFT_CODE_MAP[segment.aircraft.code] || segment.aircraft.code
                                                 },
                                                 departure: {
                                                     airport: segment.departure.iataCode,
@@ -385,8 +395,8 @@ router.post('/calculate-budget', async (req, res) => {
                                                     time: segment.arrival.at
                                                 },
                                                 duration: segment.duration,
-                                                cabinClass: offer.travelerPricings[0].fareDetailsBySegment.find((fare) => fare.segmentId === segment.id)?.cabin || cabinClass
-                                            }))
+                                                cabinClass: offer.travelerPricings[0].fareDetailsBySegment.find((fare) => fare.segmentId === `${segment.carrierCode}${segment.number}`)?.cabin || cabinClass
+                                            })),
                                         }
                                     }
                                 };
@@ -422,7 +432,7 @@ router.post('/calculate-budget', async (req, res) => {
                                             flightNumber: `${segment.carrierCode}${segment.number}`,
                                             aircraft: {
                                                 code: segment.aircraft.code,
-                                                name: offer.dictionaries?.aircraft?.[segment.aircraft.code] || AIRCRAFT_CODES[segment.aircraft.code] || segment.aircraft.code
+                                                name: offer.dictionaries?.aircraft?.[segment.aircraft.code] || AIRCRAFT_CODE_MAP[segment.aircraft.code] || segment.aircraft.code
                                             },
                                             departure: {
                                                 airport: segment.departure.iataCode,
@@ -435,7 +445,7 @@ router.post('/calculate-budget', async (req, res) => {
                                                 time: segment.arrival.at
                                             },
                                             duration: segment.duration,
-                                            cabinClass: offer.travelerPricings[0].fareDetailsBySegment.find((fare) => fare.segmentId === segment.id)?.cabin || cabinClass
+                                            cabinClass: offer.travelerPricings[0].fareDetailsBySegment.find((fare) => fare.segmentId === `${segment.carrierCode}${segment.number}`)?.cabin || cabinClass
                                         }))
                                     };
                                 }
@@ -556,10 +566,12 @@ router.post('/calculate-budget', async (req, res) => {
                 }
                 catch (error) {
                     console.error('[Budget Route] Error searching flights:', error);
-                    // Continue with agent results if flight search fails
+                    // If flight search fails, call agent without flight data
+                    console.log('[Budget Route] Calling budget agent without flight data...');
+                    agentResult = await agent.handleTravelRequest(transformedRequest);
                 }
                 return {
-                    ...agentResult,
+                    ...(agentResult || {}),
                     totalBudget: transformedRequest.budget,
                     requestDetails: transformedRequest
                 };
@@ -619,8 +631,8 @@ router.post('/generate-activity', async (req, res) => {
         const activity = await agent.generateSingleActivity({
             destination,
             dayNumber,
-            timeSlot,
-            tier,
+            timeOfDay: timeSlot,
+            budget: tier,
             category,
             userPreferences,
             existingActivities,

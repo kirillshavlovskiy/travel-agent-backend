@@ -221,7 +221,7 @@ export class VacationBudgetAgent {
         return response;
       } catch (error) {
         lastError = error;
-        await new Promise(resolve => setTimeout(resolve, 1000 * Math.pow(2, i)));
+        await new Promise(resolve => setTimeout(resolve, 500 * Math.pow(2, i)));
       }
     }
 
@@ -944,8 +944,8 @@ CRITICAL JSON FORMATTING RULES:
 
   private cleanJsonResponse(response: string): string {
     try {
-      // Remove markdown code block markers
-      let cleaned = response.replace(/```json\n?|\n?```/g, '');
+      // Remove markdown code block markers and any text before/after them
+      let cleaned = response.replace(/^[\s\S]*?```(?:json)?\s*|\s*```[\s\S]*$/g, '');
       
       // Find the first '{' and last '}'
       const startIndex = cleaned.indexOf('{');
@@ -958,8 +958,19 @@ CRITICAL JSON FORMATTING RULES:
       // Extract just the JSON object
       cleaned = cleaned.substring(startIndex, endIndex + 1);
       
-      // Remove any additional text before or after the JSON
-      return cleaned.trim();
+      // Additional cleaning steps
+      cleaned = cleaned
+        .replace(/[\u0000-\u001F\u007F-\u009F]/g, '') // Remove control characters
+        .replace(/\\[rnt]/g, '') // Remove escaped whitespace
+        .replace(/,(\s*[}\]])/g, '$1') // Remove trailing commas
+        .replace(/([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:/g, '$1"$2":') // Ensure property names are quoted
+        .replace(/:\s*'([^']*?)'/g, ':"$1"') // Convert single quotes to double quotes
+        .replace(/\}\s*,\s*\}/g, '}}') // Fix object separators
+        .replace(/\]\s*,\s*\]/g, ']]') // Fix array separators
+        .replace(/\}\s*,\s*\]/g, '}]') // Fix mixed separators
+        .trim();
+
+      return cleaned;
     } catch (error) {
       console.error('[Clean JSON] Error:', error);
       throw new Error('Failed to clean JSON response');
@@ -1039,6 +1050,10 @@ CRITICAL JSON FORMATTING RULES:
     dayNumber: number;
     budget: number;
     currency: string;
+    category?: string;
+    userPreferences?: any;
+    existingActivities?: any[];
+    flightTimes?: any;
   }): Promise<SingleActivityResponse> {
     const prompt = `Generate a single activity recommendation for ${params.destination} during ${params.timeOfDay} on day ${params.dayNumber} with a budget of ${params.budget} ${params.currency}. The response should be a valid JSON object with the following structure:
     {

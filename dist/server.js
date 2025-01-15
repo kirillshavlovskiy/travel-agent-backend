@@ -3,12 +3,13 @@ import cors from 'cors';
 import cookieParser from 'cookie-parser';
 import session from 'express-session';
 import { config } from 'dotenv';
-import authRoutes from './routes/auth.js';
-import budgetRoutes from './routes/budget.js';
-import flightRoutes from './routes/flights.js';
-import hotelRoutes from './routes/hotels.js';
-import perplexityRoutes from './routes/perplexity.js';
-import activitiesRoutes from './routes/activities.js';
+import authRoutes from './src/routes/auth';
+import budgetRoutes from './src/routes/budget';
+import flightRoutes from './src/routes/flights';
+import hotelRoutes from './src/routes/hotels';
+import perplexityRoutes from './src/routes/perplexity';
+import activitiesRoutes from './src/routes/activities';
+import enrichmentRouter from './src/routes/enrichment';
 // Load environment variables
 config();
 const app = express();
@@ -39,6 +40,8 @@ app.use(cors(corsOptions));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
+// Mount auth routes directly (no session required)
+app.use('/api/auth', authRoutes);
 // Public routes (no authentication required)
 app.get('/health', (_req, res) => {
     try {
@@ -92,7 +95,6 @@ const sessionMiddleware = session({
 const authenticatedRouter = express.Router();
 authenticatedRouter.use(sessionMiddleware);
 // Mount authenticated routes
-authenticatedRouter.use('/api/auth', authRoutes);
 authenticatedRouter.use('/api/budget', budgetRoutes);
 authenticatedRouter.use('/api/flights', flightRoutes);
 authenticatedRouter.use('/api/hotels', hotelRoutes);
@@ -100,6 +102,8 @@ authenticatedRouter.use('/api/perplexity', perplexityRoutes);
 authenticatedRouter.use('/api/activities', activitiesRoutes);
 // Mount the authenticated router
 app.use(authenticatedRouter);
+// Mount enrichment routes
+app.use('/api/enrichment', enrichmentRouter);
 // Root endpoint (public)
 app.get('/', (_req, res) => {
     res.json({
