@@ -6,7 +6,7 @@ import {
   TransformedHotelOffer,
   HotelSearchParams 
 } from '../types.js';
-import { logger } from '../utils/logger.js';
+import { logToFile } from '../utils/logger.js';
 
 const AIRCRAFT_CODES: { [key: string]: string } = {
   '319': 'Airbus A319',
@@ -188,12 +188,6 @@ interface FlightSearchParams {
   nonStop?: boolean;
 }
 
-interface RetryConfig {
-  maxRetries: number;
-  baseDelay: number;
-  maxDelay: number;
-}
-
 export class AmadeusService {
   private baseURL: string;
   private clientId: string;
@@ -201,11 +195,6 @@ export class AmadeusService {
   private accessToken: string | null = null;
   private tokenExpiresAt: number | null = null;
   private commonAirlines: Record<string, string> = {};
-  private retryConfig: RetryConfig = {
-    maxRetries: 3,
-    baseDelay: 1000, // 1 second
-    maxDelay: 10000  // 10 seconds
-  };
 
   constructor() {
     this.baseURL = process.env.AMADEUS_API_URL || 'https://test.api.amadeus.com';
@@ -287,7 +276,7 @@ export class AmadeusService {
         })));
       }
     } catch (error) {
-      logger.error('Error fetching airline info', { error });
+      logToFile(`Error fetching airline info: ${error}`);
       // Fallback to dictionaries and common airlines map
       results.push(...codes.map(code => ({
         iataCode: code,
@@ -317,140 +306,127 @@ export class AmadeusService {
     return `PT${hours}H${minutes}M`;
   }
 
-  private async retryWithBackoff<T>(
-    operation: () => Promise<T>,
-    retryCount = 0
-  ): Promise<T> {
+  async searchFlights(params: FlightSearchParams): Promise<any[]> {
     try {
-      return await operation();
-    } catch (error: any) {
-      if (retryCount >= this.retryConfig.maxRetries) {
-        throw error;
-      }
+      console.log('[Amadeus] Starting flight search with params:', {
+        ...params,
+        accessToken: '***' // Hide the token in logs
+      });
 
-      // Calculate delay with exponential backoff
-      const delay = Math.min(
-        this.retryConfig.baseDelay * Math.pow(2, retryCount),
-        this.retryConfig.maxDelay
+      const token = await this.getToken();
+      if (!token) {
+        throw new Error('Failed to obtain valid token');
+      }
+      
+      const response = await axios.get<FlightOffersResponse>(
+        `${this.baseURL}/v2/shopping/flight-offers`,
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json'
+          },
+          params: {
+            originLocationCode: params.originLocationCode,
+            destinationLocationCode: params.destinationLocationCode,
+            departureDate: params.departureDate,
+            returnDate: params.returnDate,
+            adults: params.adults.toString(),
+            travelClass: params.travelClass || 'ECONOMY',
+            max: (params.max || 25).toString(), // Reduced from 50 to 25 for faster response
+            currencyCode: params.currencyCode || 'USD',
+            nonStop: params.nonStop || false
+          },
+          timeout: 15000 // 15 second timeout
+        }
       );
 
-      if (error.response?.status === 429 || error.code === 'ECONNABORTED') {
-        console.log(`[Amadeus] Retrying after ${delay}ms (attempt ${retryCount + 1}/${this.retryConfig.maxRetries})`);
-        await new Promise(resolve => setTimeout(resolve, delay));
-        return this.retryWithBackoff(operation, retryCount + 1);
+      console.log('[Amadeus] Flight search successful:', {
+        status: response.status,
+        flightCount: response.data?.data?.length || 0,
+        sampleFlight: response.data?.data?.[0] ? {
+          price: response.data.data[0].price,
+          itineraries: response.data.data[0].itineraries.map((it: any) => ({
+            segments: it.segments.map((seg: any) => ({
+              departure: seg.departure,
+              arrival: seg.arrival,
+              carrierCode: seg.carrierCode,
+              aircraft: seg.aircraft
+            }))
+          })),
+          travelerPricings: response.data.data[0].travelerPricings
+        } : null,
+        dictionaries: response.data?.dictionaries
+      });
+
+      return response.data?.data || [];
+    } catch (error: any) {
+      console.error('[Amadeus] Flight search error:', {
+        status: error.response?.status,
+        statusText: error.response?.statusText,
+        data: error.response?.data,
+        message: error.message,
+        errors: error.response?.data?.errors,
+        stack: error.stack
+      });
+
+      // Check if we need to refresh the token
+      if (error.response?.status === 401) {
+        console.log('[Amadeus] Token expired, refreshing...');
+        this.accessToken = null; // Clear the token to force refresh
+        await this.getToken();
+        // Retry the request once with the new token
+        return this.searchFlights(params);
       }
 
-      throw error;
-    }
-  }
-
-  async searchFlights(params: FlightSearchParams): Promise<any[]> {
-    return this.retryWithBackoff(async () => {
-      try {
-        console.log('[Amadeus] Starting flight search with params:', {
+      // Handle timeout or network errors
+      if (error.code === 'ECONNABORTED' || error.message.includes('timeout')) {
+        console.log('[Amadeus] Request timed out, retrying with simplified params...');
+        // Retry with simplified parameters
+        return this.searchFlights({
           ...params,
-          accessToken: '***' // Hide the token in logs
+          max: 10, // Further reduce results
+          nonStop: true // Only direct flights
         });
-
-        const token = await this.getToken();
-        if (!token) {
-          throw new Error('Failed to obtain valid token');
-        }
-        
-        const response = await axios.get<FlightOffersResponse>(
-          `${this.baseURL}/v2/shopping/flight-offers`,
-          {
-            headers: {
-              Authorization: `Bearer ${token}`,
-              'Content-Type': 'application/json'
-            },
-            params: {
-              originLocationCode: params.originLocationCode,
-              destinationLocationCode: params.destinationLocationCode,
-              departureDate: params.departureDate,
-              returnDate: params.returnDate,
-              adults: params.adults.toString(),
-              travelClass: params.travelClass || 'ECONOMY',
-              max: (params.max || 25).toString(),
-              currencyCode: params.currencyCode || 'USD',
-              nonStop: params.nonStop || false
-            },
-            timeout: 30000 // Increased timeout to 30 seconds
-          }
-        );
-
-        console.log('[Amadeus] Flight search successful:', {
-          status: response.status,
-          flightCount: response.data?.data?.length || 0,
-          sampleFlight: response.data?.data?.[0] ? {
-            price: response.data.data[0].price,
-            itineraries: response.data.data[0].itineraries.map((it: any) => ({
-              segments: it.segments.map((seg: any) => ({
-                departure: seg.departure,
-                arrival: seg.arrival,
-                carrierCode: seg.carrierCode,
-                aircraft: seg.aircraft
-              }))
-            })),
-            travelerPricings: response.data.data[0].travelerPricings
-          } : null,
-          dictionaries: response.data?.dictionaries
-        });
-
-        return response.data?.data || [];
-      } catch (error: any) {
-        console.error('[Amadeus] Flight search error:', {
-          status: error.response?.status,
-          statusText: error.response?.statusText,
-          data: error.response?.data,
-          message: error.message,
-          errors: error.response?.data?.errors,
-          stack: error.stack
-        });
-
-        // Check if we need to refresh the token
-        if (error.response?.status === 401) {
-          console.log('[Amadeus] Token expired, refreshing...');
-          this.accessToken = null; // Clear the token to force refresh
-          await this.getToken();
-          throw error; // Let retry mechanism handle it
-        }
-
-        throw error;
       }
-    });
+
+      // For dates too far in advance or other errors, return empty array to allow fallback
+      return [];
+    }
   }
 
   determineTier(price: number, cabinClass?: string): 'budget' | 'medium' | 'premium' {
-    // First, consider cabin class as it's the primary factor
-    if (cabinClass) {
-      const upperCabinClass = cabinClass.toUpperCase();
-      
-      // First class is always premium
-      if (upperCabinClass === 'FIRST') {
+    const tier = (() => {
+      // Consider cabin class first
+      if (cabinClass) {
+        const upperCabinClass = cabinClass.toUpperCase();
+        if (upperCabinClass === 'FIRST') {
+          return 'premium';
+        } else if (upperCabinClass === 'BUSINESS') {
+          // Business class can be premium or medium depending on price
+          return price > 1500 ? 'premium' : 'medium';
+        } else if (upperCabinClass === 'PREMIUM_ECONOMY') {
+          // Premium economy is typically medium tier
+          return 'medium';
+        }
+      }
+
+      // Then consider price ranges for economy class
+      if (price <= 500) {
+        return 'budget';
+      } else if (price <= 1000) {
+        return 'medium';
+      } else {
         return 'premium';
       }
-      
-      // Business class can be premium or medium based on price
-      if (upperCabinClass === 'BUSINESS') {
-        return price > 2000 ? 'premium' : 'medium';
-      }
-      
-      // Premium economy is medium unless very expensive
-      if (upperCabinClass === 'PREMIUM_ECONOMY') {
-        return price > 2000 ? 'premium' : 'medium';
-      }
-    }
+    })();
 
-    // For economy class or unspecified cabin class, use price ranges
-    // These thresholds are based on typical market ranges for economy flights
-    if (price <= 800) {
-      return 'budget';
-    } else if (price <= 1500) {
-      return 'medium';
-    } else {
-      return 'premium';
-    }
+    console.log('[Amadeus] Determined tier:', {
+      price,
+      cabinClass,
+      resultingTier: tier
+    });
+
+    return tier;
   }
 
   generateBookingUrl(flightOffer: any): string {
@@ -494,7 +470,7 @@ export class AmadeusService {
       
       return `${baseUrl}?${params.toString()}`;
     } catch (error) {
-      logger.error('Error generating booking URL', { error });
+      logToFile(`Error generating booking URL: ${error}`);
       // Fallback to a basic URL if there's an error
       return 'https://www.amadeus.com/flights';
     }

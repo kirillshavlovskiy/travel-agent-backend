@@ -1,6 +1,5 @@
 import { Router, Request, Response } from 'express';
 import { perplexityClient } from '../services/perplexity.js';
-import { logger } from '../utils/logger.js';
 
 const router = Router();
 
@@ -8,10 +7,7 @@ router.post('/generate', async (req: Request, res: Response) => {
   try {
     const { destination, days, budget, currency, flightTimes } = req.body;
 
-    logger.info('Received activity generation request', { destination, days, budget, currency, flightTimes });
-
     if (!destination || !budget || !currency) {
-      logger.warn('Missing required parameters', { destination, budget, currency });
       return res.status(400).json({ error: 'Missing required parameters' });
     }
 
@@ -31,158 +27,94 @@ Requirements:
 
 For each activity include:
 - Name
-- Description (detailed description of the experience)
+- Description
 - Price per person in ${currency}
 - Duration in hours
 - Location
-- Exact address
-- Opening hours
-- Key highlights or features (as an array of strings)
 - Rating (1-5)
-- Number of reviews
 - Category
 - Preferred time of day (morning/afternoon/evening)
 - Reference URL (direct booking link or official website)
-- Images (array of high-quality image URLs)
 
-Format as a JSON object with an activities array. Each activity should include all the above fields, with images being an array of URLs to high-quality photos of the place/activity.`;
+Format as a JSON object with an activities array. Each activity should include a referenceUrl field with a direct booking link or official website URL.`;
 
-    logger.debug('Sending query to Perplexity API', { query });
     const response = await perplexityClient.chat(query);
     
     if (!response.choices?.[0]?.message?.content) {
-      logger.error('Invalid response format from Perplexity API', { response });
       throw new Error('Invalid response format from Perplexity API');
     }
 
     const content = response.choices[0].message.content;
-    logger.debug('Raw content from Perplexity API', { content });
     
-    // Clean up the content
-    let cleanedContent = content
-      .replace(/```json\n|\n```/g, '')  // Remove markdown code blocks
-      .replace(/(\d+)\s*\([^)]*\)/g, '$1')  // Replace "0 (free entry, but...)" with just the number
-      .replace(/\$\d+/g, (match: string) => match.substring(1))  // Remove $ signs from numbers
-      .trim();
-      
-    logger.debug('Cleaned content', { cleanedContent });
-
-    // Extract just the JSON object
-    const jsonMatch = cleanedContent.match(/(\{[\s\S]*\})/);
-    if (!jsonMatch) {
-      logger.error('Failed to extract JSON from response', { cleanedContent });
-      throw new Error('No valid JSON object found in response');
-    }
+    // Log the raw content for debugging
+    console.log('[Activities API] Raw content from Perplexity:', content);
     
-    const extractedJson = jsonMatch[1];
-    logger.debug('Extracted JSON', { extractedJson });
-    
-    // Try to parse the JSON
+    // Try to parse the entire content first
     let parsedData;
     try {
-      parsedData = JSON.parse(extractedJson);
+      parsedData = JSON.parse(content);
     } catch (e) {
-      logger.error('Failed to parse JSON', {
-        error: e instanceof Error ? e.message : 'Unknown error',
-        position: e instanceof SyntaxError ? e.message.match(/position (\d+)/)?.[1] : 'unknown',
-        extractedJson
-      });
+      // If that fails, try to extract JSON using regex as fallback
+      console.log('[Activities API] Failed to parse full content, attempting to extract JSON');
+      const jsonMatch = content.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) {
+        console.error('[Activities API] Failed to extract JSON from response:', content);
+        throw new Error('No valid JSON object found in response');
+      }
       
-      // Try to salvage the activities array
+      const extractedJson = jsonMatch[0];
+      console.log('[Activities API] Extracted JSON:', extractedJson);
+      
       try {
-        const activitiesMatch = extractedJson.match(/"activities"\s*:\s*\[([\s\S]*?)\}\s*(?:\]|}|$)/);
-        if (activitiesMatch) {
-          const activitiesJson = `{"activities":[${activitiesMatch[1]}}]}`;
-          logger.debug('Attempting to salvage activities', { activitiesJson });
-          parsedData = JSON.parse(activitiesJson);
-        } else {
-          throw new Error('Could not salvage activities from response');
-        }
-      } catch (salvageError) {
-        logger.error('Failed to salvage activities', { error: salvageError });
+        parsedData = JSON.parse(extractedJson);
+      } catch (e) {
+        console.error('[Activities API] Failed to parse extracted JSON:', {
+          error: e instanceof Error ? e.message : 'Unknown error',
+          position: e instanceof SyntaxError ? e.message.match(/position (\d+)/)?.[1] : 'unknown',
+          extractedJson
+        });
         throw new Error('Invalid JSON format in response');
       }
     }
     
     if (!parsedData.activities || !Array.isArray(parsedData.activities)) {
-      logger.error('Invalid data structure', { parsedData });
+      console.error('[Activities API] Invalid data structure:', parsedData);
       throw new Error('Invalid response format: missing or invalid activities array');
     }
 
     // Validate each activity
     const validActivities = parsedData.activities.filter((activity: any) => {
-      // Log the raw activity data
-      logger.debug('Validating activity', { 
-        activityData: {
-          name: activity.name,
-          keyHighlights: activity.key_highlights,
-          openingHours: activity.opening_hours,
-          numReviews: activity.number_of_reviews,
-          preferredTimeOfDay: activity.preferred_time_of_day,
-          referenceUrl: activity.reference_url
-        }
-      });
-
       const isValid = (
         typeof activity.name === 'string' &&
         typeof activity.description === 'string' &&
-        (typeof activity.duration === 'number' || typeof activity.duration === 'string') &&
+        typeof activity.duration === 'number' &&
         typeof activity.price === 'number' &&
         typeof activity.category === 'string' &&
         typeof activity.location === 'string' &&
-        typeof activity.address === 'string' &&
-        Array.isArray(activity.key_highlights) &&
-        typeof activity.opening_hours === 'string' &&
         typeof activity.rating === 'number' &&
-        typeof activity.number_of_reviews === 'number' &&
-        typeof activity.preferred_time_of_day === 'string' &&
-        typeof activity.reference_url === 'string' &&
-        Array.isArray(activity.images)
+        typeof activity.timeOfDay === 'string' &&
+        typeof activity.referenceUrl === 'string'
       );
 
       if (!isValid) {
-        logger.warn('Invalid activity', {
-          name: activity.name,
-          validationErrors: {
-            name: typeof activity.name !== 'string',
-            description: typeof activity.description !== 'string',
-            duration: typeof activity.duration !== 'number' && typeof activity.duration !== 'string',
-            price: typeof activity.price !== 'number',
-            category: typeof activity.category !== 'string',
-            location: typeof activity.location !== 'string',
-            address: typeof activity.address !== 'string',
-            keyHighlights: !Array.isArray(activity.key_highlights),
-            openingHours: typeof activity.opening_hours !== 'string',
-            rating: typeof activity.rating !== 'number',
-            numReviews: typeof activity.number_of_reviews !== 'number',
-            preferredTimeOfDay: typeof activity.preferred_time_of_day !== 'string',
-            referenceUrl: typeof activity.reference_url !== 'string',
-            images: !Array.isArray(activity.images)
-          }
-        });
+        console.warn('[Activities API] Invalid activity:', activity);
       }
 
       return isValid;
     });
 
     if (validActivities.length === 0) {
-      logger.warn('No valid activities found');
-      return res.status(200).json({
-        activities: [],
-        message: "Could not generate valid activities. Please try again.",
-        error: true
-      });
+      console.error('[Activities API] No valid activities found');
+      throw new Error('No valid activities found in response');
     }
-
-    logger.info('Successfully validated activities', { count: validActivities.length });
 
     // Transform activities
     const transformedActivities = validActivities.map((activity: any, index: number) => {
       // Determine time slot with a default value
       let timeSlot = 'morning';  // Default to morning
-      if (activity.preferred_time_of_day?.toLowerCase() === 'afternoon') {
+      if (activity.timeOfDay?.toLowerCase() === 'afternoon') {
         timeSlot = 'afternoon';
-      } else if (activity.preferred_time_of_day?.toLowerCase() === 'evening') {
+      } else if (activity.timeOfDay?.toLowerCase() === 'evening') {
         timeSlot = 'evening';
       }
 
@@ -196,23 +128,16 @@ Format as a JSON object with an activities array. Each activity should include a
           currency
         },
         location: activity.location,
-        address: activity.address,
-        openingHours: activity.opening_hours,
-        highlights: activity.key_highlights,
         rating: activity.rating,
-        reviews: activity.number_of_reviews,
         category: activity.category,
         tier: activity.price <= 30 ? 'budget' : activity.price <= 100 ? 'medium' : 'premium',
-        timeSlot,
+        timeSlot,  // Use the determined time slot
         dayNumber: 1,
         startTime: timeSlot === 'morning' ? '09:00' : 
                    timeSlot === 'afternoon' ? '14:00' : '19:00',
-        referenceUrl: activity.reference_url || '',
-        images: activity.images || []
+        referenceUrl: activity.referenceUrl || activity.url || ''
       };
     });
-
-    logger.info('Successfully transformed activities', { count: transformedActivities.length });
 
     // Group activities by tier and time slot
     const activitiesByDay = new Map();
@@ -298,7 +223,7 @@ Format as a JSON object with an activities array. Each activity should include a
     });
 
   } catch (error) {
-    logger.error('Failed to generate activities', { error: error instanceof Error ? error.message : 'Unknown error' });
+    console.error('[Activities API] Error:', error);
     res.status(500).json({
       error: error instanceof Error ? error.message : 'Failed to generate activities',
       timestamp: new Date().toISOString()
