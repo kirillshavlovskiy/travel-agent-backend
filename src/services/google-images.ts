@@ -11,19 +11,15 @@ interface GoogleImageSearchResult {
 
 export async function searchImages(query: string): Promise<string[]> {
   const GOOGLE_API_KEY = process.env.GOOGLE_CUSTOM_SEARCH_API_KEY;
-  const SEARCH_ENGINE_ID = process.env.GOOGLE_CUSTOM_SEARCH_ENGINE_ID;
   
-  if (!GOOGLE_API_KEY || !SEARCH_ENGINE_ID) {
-    logger.error('Google Custom Search API configuration missing', {
-      hasApiKey: !!GOOGLE_API_KEY,
-      hasSearchEngineId: !!SEARCH_ENGINE_ID
-    });
+  if (!GOOGLE_API_KEY) {
+    logger.error('Google Custom Search API key not configured');
     throw new Error('Google Custom Search API not configured');
   }
 
   try {
     const response = await fetch(
-      `https://customsearch.googleapis.com/customsearch/v1?key=${GOOGLE_API_KEY}&cx=${SEARCH_ENGINE_ID}&q=${encodeURIComponent(query)}&searchType=image&num=3`
+      `https://customsearch.googleapis.com/customsearch/v1?key=${GOOGLE_API_KEY}&cx=partner-pub-9610773351225185:4961151473&q=${encodeURIComponent(query)}&searchType=image&num=3`
     );
 
     if (!response.ok) {
