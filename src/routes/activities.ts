@@ -63,6 +63,13 @@ Format as a JSON object with an activities array. Each activity should include a
       .replace(/```json\n|\n```/g, '')  // Remove markdown code blocks
       .replace(/(\d+)\s*\([^)]*\)/g, '$1')  // Replace "0 (free entry, but...)" with just the number
       .replace(/\$\d+/g, (match: string) => match.substring(1))  // Remove $ signs from numbers
+      .replace(/https:\/\/[^"\s]+/g, (url: string) => {  // Clean up long URLs
+        // If URL is too long or contains invalid characters, replace with a placeholder
+        if (url.length > 500 || /[^\x20-\x7E]/.test(url)) {
+          return "https://placeholder.com/image.jpg";
+        }
+        return url;
+      })
       .trim();
       
     logger.debug('Cleaned content', { cleanedContent });
@@ -88,9 +95,21 @@ Format as a JSON object with an activities array. Each activity should include a
         extractedJson
       });
       
-      // Try to salvage the activities array
+      // Try to salvage the activities array with more aggressive cleaning
       try {
-        const activitiesMatch = extractedJson.match(/"activities"\s*:\s*\[([\s\S]*?)\}\s*(?:\]|}|$)/);
+        // Clean the JSON more aggressively
+        const cleanedJson = extractedJson
+          .replace(/https:\/\/[^"\s]+/g, "https://placeholder.com/image.jpg")  // Replace all URLs with placeholder
+          .replace(/[^\x20-\x7E]/g, '')  // Remove non-printable characters
+          .replace(/,(\s*[}\]])/g, '$1')  // Remove trailing commas
+          .replace(/\}\s*,\s*\}/g, '}}')  // Fix object separators
+          .replace(/\]\s*,\s*\]/g, ']]')  // Fix array separators
+          .replace(/\}\s*,\s*\]/g, '}]')  // Fix mixed separators
+          .replace(/([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:/g, '$1"$2":')  // Ensure property names are quoted
+          .replace(/:\s*'([^']*?)'/g, ':"$1"')  // Convert single quotes to double quotes
+          .trim();
+
+        const activitiesMatch = cleanedJson.match(/"activities"\s*:\s*\[([\s\S]*?)\}\s*(?:\]|}|$)/);
         if (activitiesMatch) {
           const activitiesJson = `{"activities":[${activitiesMatch[1]}}]}`;
           logger.debug('Attempting to salvage activities', { activitiesJson });
@@ -219,7 +238,7 @@ Format as a JSON object with an activities array. Each activity should include a
         openingHours: activity.opening_hours || activity.openingHours,
         highlights: activity.key_highlights || activity.keyHighlights || [],
         rating: activity.rating,
-        reviews: activity.number_of_reviews || activity.numReviews || activity.numberReviews,
+        numberOfReviews: activity.number_of_reviews || activity.numReviews || activity.numberReviews,
         category: activity.category,
         tier,
         timeSlot,

@@ -192,14 +192,37 @@ interface SingleActivityResponse {
   price: number;
   category: string;
   location: string;
+  exact_address: string;
+  opening_hours: string;
   rating: number;
-  timeOfDay: string;
+  number_of_reviews: number;
+  reference_url?: string;
+  key_highlights: string[];
+  preferred_time_of_day: string;
+  images?: string[];
   timeSlot?: string;
   dayNumber?: number;
   tier?: string;
-  referenceUrl?: string;
-  provider: string;
-  highlights: string[];
+}
+
+interface GoogleSearchItem {
+  link: string;
+  image: {
+    contextLink: string;
+    height: number;
+    width: number;
+    byteSize: number;
+    thumbnailLink: string;
+    thumbnailHeight: number;
+    thumbnailWidth: number;
+  };
+}
+
+interface GoogleSearchResponse {
+  items?: GoogleSearchItem[];
+  searchInformation?: {
+    totalResults: string;
+  };
 }
 
 const SYSTEM_MESSAGE = `You are an AI travel budget expert. Your role is to:
@@ -414,7 +437,9 @@ CRITICAL JSON FORMATTING RULES:
             .replace(/\}\s*,\s*\}/g, '}}') // Fix object separators
             .replace(/\]\s*,\s*\]/g, ']]') // Fix array separators
             .replace(/\}\s*,\s*\]/g, '}]') // Fix mixed separators
+            .replace(/([{,]\s*)([^"\s]+):/g, '$1"$2":') // Ensure ALL property names are quoted
             .replace(/[^{}[\]"':,.\w\s-]/g, '') // Remove any other non-JSON characters
+            .replace(/,\s*([\]}])/g, '$1') // Remove trailing commas
             .trim();
           
           console.log(`[${category.toUpperCase()}] Last attempt content:`, lastAttempt);
@@ -943,36 +968,31 @@ CRITICAL JSON FORMATTING RULES:
   }
 
   private cleanJsonResponse(response: string): string {
+    // Extract just the JSON object
+    const jsonStart = response.indexOf('{');
+    const jsonEnd = response.lastIndexOf('}') + 1;
+    if (jsonStart === -1 || jsonEnd === 0) {
+      throw new Error('No JSON object found in response');
+    }
+    let content = response.substring(jsonStart, jsonEnd);
+    
+    // Fix common issues
+    content = content
+      .replace(/```json\n?|\n?```/g, '') // Remove markdown
+      .replace(/(\d+)\s*[-–]\s*(\d+)/g, (_, min, max) => String(Math.round((Number(min) + Number(max)) / 2))) // Handle ranges
+      .replace(/(\d+)\s+[a-zA-Z\s]+(?=[\s,}])/g, '$1') // Remove text after numbers
+      .replace(/([{,]\s*)([a-zA-Z0-9_]+)\s*:/g, '$1"$2":') // Quote property names
+      .replace(/"duration"\s*:\s*"?Flexible"?/g, '"duration": 2') // Fix flexible duration
+      .replace(/,(\s*[}\]])/g, '$1') // Remove trailing commas
+      .replace(/}(\s*){/g, '}, {') // Add missing commas
+      .replace(/[\x00-\x1F\x7F-\x9F]/g, ''); // Remove non-printable chars
+    
     try {
-      // Remove markdown code block markers and any text before/after them
-      let cleaned = response.replace(/^[\s\S]*?```(?:json)?\s*|\s*```[\s\S]*$/g, '');
-      
-      // Find the first '{' and last '}'
-      const startIndex = cleaned.indexOf('{');
-      const endIndex = cleaned.lastIndexOf('}');
-      
-      if (startIndex === -1 || endIndex === -1) {
-        throw new Error('No valid JSON object found in response');
-      }
-      
-      // Extract just the JSON object
-      cleaned = cleaned.substring(startIndex, endIndex + 1);
-      
-      // Additional cleaning steps
-      cleaned = cleaned
-        .replace(/[\u0000-\u001F\u007F-\u009F]/g, '') // Remove control characters
-        .replace(/\\[rnt]/g, '') // Remove escaped whitespace
-        .replace(/,(\s*[}\]])/g, '$1') // Remove trailing commas
-        .replace(/([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:/g, '$1"$2":') // Ensure property names are quoted
-        .replace(/:\s*'([^']*?)'/g, ':"$1"') // Convert single quotes to double quotes
-        .replace(/\}\s*,\s*\}/g, '}}') // Fix object separators
-        .replace(/\]\s*,\s*\]/g, ']]') // Fix array separators
-        .replace(/\}\s*,\s*\]/g, '}]') // Fix mixed separators
-        .trim();
-
-      return cleaned;
-    } catch (error) {
-      console.error('[Clean JSON] Error:', error);
+      // Validate that it's parseable
+      JSON.parse(content);
+      return content;
+    } catch (e) {
+      console.error('Failed to parse cleaned JSON:', content);
       throw new Error('Failed to clean JSON response');
     }
   }
@@ -1055,25 +1075,88 @@ CRITICAL JSON FORMATTING RULES:
     existingActivities?: any[];
     flightTimes?: any;
   }): Promise<SingleActivityResponse> {
-    const prompt = `Generate a single activity recommendation for ${params.destination} during ${params.timeOfDay} on day ${params.dayNumber} with a budget of ${params.budget} ${params.currency}. The response should be a valid JSON object with the following structure:
-    {
-      "name": "Activity name",
-      "description": "Detailed description",
-      "duration": "Duration in hours (number)",
-      "price": "Price in ${params.currency} (number)",
-      "category": "Category (e.g., Cultural, Adventure, Relaxation)",
-      "location": "Specific location in ${params.destination}",
-      "rating": "Rating out of 5 (number)",
-      "timeOfDay": "${params.timeOfDay}",
-      "referenceUrl": "Optional booking URL",
-      "provider": "Activity provider name",
-      "highlights": ["Array of key highlights"]
-    }`;
+    const categoryStr = params.category ? ` in the ${params.category} category` : '';
+    const preferencesStr = params.userPreferences ? ` that matches these preferences: ${JSON.stringify(params.userPreferences)}` : '';
+    
+    const prompt = `Generate a single activity recommendation for ${params.destination} during ${params.timeOfDay} on day ${params.dayNumber}${categoryStr}${preferencesStr} with a budget of ${params.budget} ${params.currency}.
+
+Example response:
+{
+  "name": "Rooftop Dinner at Le Perchoir Marais",
+  "description": "Enjoy a romantic dinner with spectacular views of Paris from this trendy rooftop restaurant. The menu features modern French cuisine with seasonal ingredients.",
+  "duration": 2,
+  "price": 85,
+  "category": "Food & Drink",
+  "location": "Le Perchoir Marais",
+  "exact_address": "33 Rue de la Verrerie, 75004 Paris, France",
+  "opening_hours": "7:00 PM - 11:00 PM",
+  "rating": 4.5,
+  "number_of_reviews": 2500,
+  "reference_url": "https://leperchoir.fr",
+  "key_highlights": ["Panoramic views of Paris", "Modern French cuisine", "Romantic atmosphere"],
+  "preferred_time_of_day": "Evening"
+}
+
+Requirements:
+1. Must be a real, bookable activity
+2. Must be within budget of ${params.budget} ${params.currency}
+3. Must be available during ${params.timeOfDay}
+4. Must match the category "${params.category || 'any'}"
+5. Must include accurate pricing and location details
+6. All prices must be numbers (no ranges)
+7. All text must be in English
+8. URLs must be complete and valid
+9. Ratings must be between 1-5
+10. Duration must be in hours as a number`;
 
     try {
       const response = await this.querySingleActivity(prompt);
       const cleanedResponse = this.cleanJsonResponse(response);
-      return JSON.parse(cleanedResponse);
+      const activity = JSON.parse(cleanedResponse) as SingleActivityResponse;
+
+      // Validate required fields
+      if (!activity.name || !activity.description || !activity.duration || !activity.price || 
+          !activity.category || !activity.location || !activity.exact_address || 
+          !activity.opening_hours || !activity.rating || !activity.number_of_reviews || 
+          !activity.key_highlights || !activity.preferred_time_of_day) {
+        throw new Error('Missing required fields in activity response');
+      }
+
+      // Validate numeric fields
+      if (typeof activity.price !== 'number' || typeof activity.duration !== 'number' ||
+          typeof activity.rating !== 'number' || typeof activity.number_of_reviews !== 'number') {
+        throw new Error('Invalid numeric fields in activity response');
+      }
+
+      // Validate rating range
+      if (activity.rating < 1 || activity.rating > 5) {
+        throw new Error('Rating must be between 1 and 5');
+      }
+
+      // Fetch images from Google
+      try {
+        const searchQuery = `${activity.name} ${activity.location} ${params.destination} photos`;
+        const googleImagesResponse = await fetch(
+          `https://www.googleapis.com/customsearch/v1?key=${process.env.GOOGLE_CUSTOM_SEARCH_API_KEY}&cx=${process.env.GOOGLE_CUSTOM_SEARCH_ENGINE_ID}&searchType=image&q=${encodeURIComponent(searchQuery)}&num=6&imgSize=large&safe=active`
+        );
+        
+        if (googleImagesResponse.ok) {
+          const data = await googleImagesResponse.json() as GoogleSearchResponse;
+          if (data.items && data.items.length > 0) {
+            activity.images = data.items.map(item => item.link);
+          } else {
+            activity.images = [];
+          }
+        } else {
+          console.error('[Google Images] Failed to fetch images:', await googleImagesResponse.text());
+          activity.images = [];
+        }
+      } catch (error) {
+        console.error('[Google Images] Error fetching images:', error);
+        activity.images = [];
+      }
+
+      return activity;
     } catch (error) {
       console.error('[Activity Generation] Error:', error);
       throw new Error('Failed to generate activity recommendation');

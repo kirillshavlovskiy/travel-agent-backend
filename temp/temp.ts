@@ -1,5 +1,9 @@
+// @ts-ignore
 import Amadeus from 'amadeus';
-import { logger } from '../utils/logger.js';
+// @ts-ignore
+import { logger } from '../utils/logger';
+// @ts-ignore
+import { AirlineInfo } from '../types';
 
 export interface AmadeusHotelSearchParams {
   cityCode: string;
@@ -63,6 +67,18 @@ export interface TransformedHotelOffer {
     email: string;
   };
   images: string[];
+}
+
+export interface AmadeusFlightSearchParams {
+  originLocationCode: string;
+  destinationLocationCode: string;
+  departureDate: string;
+  returnDate?: string;
+  adults: number;
+  travelClass?: string;
+  max?: number;
+  currencyCode?: string;
+  nonStop?: boolean;
 }
 
 export class AmadeusService {
@@ -165,14 +181,14 @@ export class AmadeusService {
             {
               hotelIds: hotel.hotelId,
               adults: params.adults,
-            checkInDate: params.checkInDate,
-            checkOutDate: params.checkOutDate,
+              checkInDate: params.checkInDate,
+              checkOutDate: params.checkOutDate,
               roomQuantity: params.roomQuantity,
               priceRange: '100-5000',
               currency: params.currency,
               paymentPolicy: 'NONE',
-            bestRateOnly: true,
-            view: 'FULL'
+              bestRateOnly: true,
+              view: 'FULL'
             }
           );
 
@@ -314,5 +330,125 @@ export class AmadeusService {
       });
       throw error;
     }
+  }
+
+  async searchFlights(params: AmadeusFlightSearchParams) {
+    try {
+      logger.info('Starting flight search with params', {
+        ...params,
+        clientId: this.amadeus ? 'set' : 'not set'
+      });
+
+      // Convert params to match Amadeus API format
+      const searchParams = {
+        originLocationCode: params.originLocationCode,
+        destinationLocationCode: params.destinationLocationCode,
+        departureDate: params.departureDate,
+        returnDate: params.returnDate,
+        adults: params.adults,
+        travelClass: params.travelClass || 'ECONOMY',
+        max: params.max || 25,
+        currencyCode: params.currencyCode || 'USD',
+        nonStop: params.nonStop || false
+      };
+
+      const response = await this.amadeus.shopping.flightOffersSearch.get(searchParams);
+
+      logger.info('Flight search successful', {
+        flightCount: response.data ? response.data.length : 0,
+        sampleFlight: response.data?.[0] ? {
+          price: response.data[0].price,
+          itineraries: response.data[0].itineraries.map((it: any) => ({
+            segments: it.segments.map((seg: any) => ({
+              departure: seg.departure,
+              arrival: seg.arrival,
+              carrierCode: seg.carrierCode,
+              aircraft: seg.aircraft
+            }))
+          })),
+          travelerPricings: response.data[0].travelerPricings
+        } : null,
+        dictionaries: response.dictionaries
+      });
+
+      return response.data || [];
+    } catch (error: unknown) {
+      logger.error('Failed to search for flights', {
+        error,
+        params,
+        response: (error as any).response?.data || 'No response data',
+        fullError: error
+      });
+      throw error;
+    }
+  }
+
+  determineTier(price: number, cabinClass: string): 'budget' | 'medium' | 'premium' {
+    // First check cabin class
+    if (cabinClass === 'FIRST' || cabinClass === 'BUSINESS') {
+      return 'premium';
+    } else if (cabinClass === 'PREMIUM_ECONOMY') {
+      return 'medium';
+    }
+
+    // Then check price ranges for economy
+    if (price <= 1000) {
+      return 'budget';
+    } else if (price <= 2000) {
+      return 'medium';
+    } else {
+      return 'premium';
+    }
+  }
+
+  async getAirlineInfo(airlineCodes: string | string[]): Promise<AirlineInfo[]> {
+    try {
+      const codes = Array.isArray(airlineCodes) ? airlineCodes : [airlineCodes];
+      const uniqueCodes = [...new Set(codes)];
+
+      const response = await this.amadeus.client.get(
+        '/v1/reference-data/airlines',
+        { airlineCodes: uniqueCodes.join(',') }
+      );
+
+      if (!response.data) {
+        return uniqueCodes.map(code => ({ commonName: code }));
+      }
+
+      return response.data.map((airline: any) => ({
+        type: airline.type,
+        iataCode: airline.iataCode,
+        icaoCode: airline.icaoCode,
+        businessName: airline.businessName,
+        commonName: airline.commonName || airline.businessName || airline.iataCode
+      }));
+    } catch (error) {
+      logger.error('Failed to fetch airline information', {
+        error,
+        airlineCodes
+      });
+      // Return basic info using the codes as fallback
+      return (Array.isArray(airlineCodes) ? airlineCodes : [airlineCodes])
+        .map(code => ({ commonName: code }));
+    }
+  }
+
+  calculateTotalDuration(segments: any[]): string {
+    const totalMinutes = segments.reduce((total, segment) => {
+      const durationStr = segment.duration || '0';
+      const minutes = parseInt(durationStr.replace(/[^0-9]/g, ''), 10) || 0;
+      return total + minutes;
+    }, 0);
+
+    const hours = Math.floor(totalMinutes / 60);
+    const minutes = totalMinutes % 60;
+    return `${hours}h ${minutes}m`;
+  }
+
+  generateBookingUrl(offer: any): string {
+    const firstSegment = offer.itineraries[0].segments[0];
+    const lastSegment = offer.itineraries[0].segments[offer.itineraries[0].segments.length - 1];
+    
+    return `https://www.amadeus.com/flights/${firstSegment.departure.iataCode}-${lastSegment.arrival.iataCode}/${firstSegment.departure.at.split('T')[0]}`;
   }
 } 

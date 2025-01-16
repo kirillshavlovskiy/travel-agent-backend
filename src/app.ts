@@ -1,9 +1,9 @@
 import express from 'express';
 import cors from 'cors';
 import morgan from 'morgan';
-import enrichmentRouter from './routes/enrichment';
-import placesRouter from './routes/places';
-import imagesRouter from './routes/images';
+import flightsRouter from './routes/flights.js';
+import hotelsRouter from './routes/hotels.js';
+import { logger } from './utils/logger.js';
 
 const app = express();
 
@@ -12,9 +12,22 @@ app.use(cors());
 app.use(express.json());
 app.use(morgan('dev'));
 
-// Register routes
-app.use('/api/enrichment', enrichmentRouter);
-app.use('/api/places', placesRouter);
-app.use('/api/images', imagesRouter);
+// Routes
+app.use('/api/flights', flightsRouter);
+app.use('/api/hotels', hotelsRouter);
+
+logger.info('Routes mounted', {
+  flights: true,
+  hotels: true
+});
+
+// Error handling
+app.use((err: Error, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  logger.error('Unhandled error:', err);
+  res.status(500).json({
+    error: 'Internal server error',
+    message: err.message
+  });
+});
 
 export default app; 

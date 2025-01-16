@@ -1,0 +1,301 @@
+Monday, August 23, 2021 | By 
+Arek Nawo
+Tutorials10-minute read
+Learn to build a complete hotel booking app using Node.js, React, and Amadeus hotel booking APIs. Part 1 of this 2-part series will take you through setting up the backend with Node and Express. Check out the repo on GitHub and follow along!
+Note: The Hotel Search v2 has been decommissioned since the time of writing. Check out the Hotel Search v3 and Hotel List for the new capabilities.
+
+ 
+
+Amadeus Self-Service APIs provide developers with quick access to essential travel, flight, and hotel data so they can build powerful travel apps quickly.
+
+In this two-part series, you’re going to create a complete hotel booking app using Amadeus Self-Service APIs. You’ll be using Node.js on the backend and React for the frontend. The application will use the following APIs:
+
+Airport & City Search to search for cities with names matching a specified string
+Hotel Search API to find hotels in the selected city and see the best rooms and rates available
+Hotel Booking API to book the selected room and complete the process
+In part one, you’ll create the system’s backend using Express and Amadeus Node SDK. In part two, you'll build the React frontend and connnect it to the backend using the Axios library. Follow along with the repo here.
+
+ 
+
+Creating an Amadeus developer account
+
+First, follow the steps below to create your Amadeus developer account and get an API key and secret needed to call the Amadeus Self-Service APIs:
+
+Create a free account.
+Sign in to your developers account.
+Create a new app in My Self-Service Workspace.
+After creating your app, you will be directed to your app dashboard where you can find your API key and secret. For the purposes of this article, you will use the Amadeus test environment which provides access to sample data. For full data coverage, you'll need to move to the Production environment in your app dashboard.
+
+ 
+
+Setting up your environment
+
+Start by creating a folder and initiating an NPM project in it:
+
+mkdir server && cd server && npm init -y
+
+Then, install the necessary dependencies:Amadeus Node SDK, Express (web application framework), and dotenv (simple module for loading environment variables).
+
+npm i amadeus express dotenv
+ 
+
+Create an src folder and insert three JavaScript files into it: index.js, config.js, and router.js.
+
+The index.js file will serve as an entry point for the app. In it, you’ll initialize the Express server with the following code:
+
+// index.js
+const express = require("express");
+const router = require("./router");
+const PORT = 1338;
+const app = express();
+// Apply JSON parsing middleware
+app.use(express.json());
+// Apply router
+app.use("/", router);
+// Serving app on defined PORT
+app.listen(PORT, () => {
+  console.log(`Express is running on port ${PORT}`);
+});
+ 
+
+Import the required modules, set the app’s port, and create an Express app with a router attached, ending with a listen() call to start the server.
+
+ 
+
+Installing the Amadeus Node SDK
+
+Before running the app, you need to create the router. Here, you’ll define the app’s endpoints and make the connection with Amadeus Node SDK:
+
+// router.js
+const { API_KEY, API_SECRET } = require("./config");
+const Amadeus = require("amadeus");
+const express = require("express");
+// Create router
+const router = express.Router();
+// ...
+module.exports = router;
+ 
+
+At the beginning of the router.js file, you should import the necessary modules, including environment variables from config.js, and create a router instance.
+
+Environment variables will load atconfig.js, using the dotenv module:
+
+// config.js
+const dotenv = require("dotenv");
+dotenv.config();
+// Export env variables
+module.exports = {
+  API_KEY: process.env.API_KEY,
+  API_SECRET: process.env.API_SECRET,
+};
+ 
+
+Upon loading, the module is immediately used to load env variables with a .config() call. After that, the variables are available at process.env.
+
+With this setup, you can set the env variables through your environment’s controls or with a .env file at the project’s root during development:
+
+API_KEY=YOUR_AMADEUS_API_KEY
+API_SECRET=YOUR_AMADEUS_API_SECRET
+ 
+
+You can get your Amadeus API access credentials from My Self-Service Workspace.
+
+You can now get back to the router.js and initialize the Amadeus API client, as follows:
+
+// ...
+// Create Amadeus API client
+const amadeus = new Amadeus({
+  clientId: API_KEY,
+  clientSecret: API_SECRET,
+});
+// ...
+ 
+
+Implementing backend logic
+
+With the SDK connection established, you can begin creating the app’s endpoints. All the endpoints will correlate with specific actions on the frontend.
+
+The endpoints will look like so:
+
+City search suggestions with the Airport & City Search API
+Querying hotels in given city with the first endpoint of the Hotel Search API
+Querying offers for given hotel with the second endpoint of the Hotel Search API
+Confirming offer validity with the third endpoint of the Hotel Search API
+Book the offer with Hotel Booking API
+City search suggestions with Airport & City Search API
+Let’s start with the /api/search endpoint. This will be used to suggest city names to the user as they search:
+
+// ...
+const API = "api";
+// City search suggestions
+router.get(`/${API}/search`, async (req, res) => {
+  const { keyword } = req.query;
+  const response = await amadeus.referenceData.locations.get({
+    keyword,
+    subType: Amadeus.location.city,
+  });
+  try {
+    await res.json(JSON.parse(response.body));
+  } catch (err) {
+    await res.json(err);
+  }
+});
+// ...
+ 
+
+The typed keyword is accessed as a query argument and passed through to the Amadeus Airport & City Search API call. Also, notice the subType property passed to the SDK - this is required to tell the API that you’re looking for cities, instead of airports, or both.
+
+The endpoint responds to GET requests to /api/search, with an appropriate response or error JSON object.
+
+Querying hotels in given city with the first endpoint of the Hotel Search API
+When successful, the /api/search response will contain the selected city’s cityCode:
+
+const exampleResponse = {
+  // ...
+  data: [
+    {
+      // ...
+      address: {
+        // ...
+        cityCode: "NYC",
+      },
+      // ...
+    },
+    // ...
+  ],
+};
+ 
+
+The cityCode will be passed as a query parameter to the /api/hotels endpoint in order to get the available hotels for the given city using the Amadeus Hotel Search API:
+
+// ...
+// Querying hotels
+router.get(`/${API}/hotels`, async (req, res) => {
+  const { cityCode } = req.query;
+  const response = await amadeus.shopping.hotelOffers.get({
+    cityCode,
+  });
+  try {
+    await res.json(JSON.parse(response.body));
+  } catch (err) {
+    await res.json(err);
+  }
+});
+// ...
+ 
+
+Apart from a different SDK call, the rest of the code remains similar to the previous endpoint.
+
+  Querying offers for given hotel with the second endpoint of the Hotel Search API
+Upon picking the hotel, the user should be presented with a list of the hotel’s offers (combinations of rooms, rates and conditions that are available for booking). For that, you’ll use the 2nd endpoint of the Amadeus Hotel Search API and hotelID from the /api/hotels response:
+
+const exampleResponse = {
+  data: {
+    // ...
+    hotel: {
+      // ...
+      hotelId: "BGMILBGB",
+      // ...
+    },
+    // ...
+  },
+};
+ 
+
+The retrieved hotelID will be forwarded as a query parameter to a new endpoint,  /api/offers, to be used with the SDK:
+
+// ...
+// Querying hotel offers
+router.get(`/${API}/offers`, async (req, res) => {
+  const { hotelId } = req.query;
+  const response = await amadeus.shopping.hotelOffersByHotel.get({
+    hotelId,
+  });
+  try {
+    await res.json(JSON.parse(response.body));
+  } catch (err) {
+    await res.json(err);
+  }
+});
+// ...
+  Confirming offer validity with the third endpoint of the Hotel Search API
+With the offer list already presented, you’re only one step away from booking. Once the user selects an offer, you need to confirm that the offer is still available and retrieve the final price and conditions using the 3rd endpoint of the Hotel Search API. Bookings are made every minute, so it’s important to confirm that an offer is still available especially if time has passed between when the user views the offer and when they decide to book.
+
+To do this, first retrieve the offerID from the previous API response:
+
+const exampleResponse = {
+  data: {
+    // ...
+    offers: [
+      {
+        id: "DIM2TT7NP8",
+        // ...
+      },
+      // ...
+    ],
+  },
+};
+ 
+
+Next, create a new /api/offer endpoint, accepting the offerID as a query parameter, confirming the offer and getting its details:
+
+// ...
+// Confirming the offer
+router.get(`/${API}/offer`, async (req, res) => {
+  const { offerId } = req.query;
+  const response = await amadeus.shopping.hotelOffer(offerId).get();
+  try {
+    await res.json(JSON.parse(response.body));
+  } catch (err) {
+    await res.json(err);
+  }
+});
+// ...
+  Booking the offer with Hotel Booking API
+With the offer verified, it’s time to finalize the process by booking it through the Amadeus Hotel Booking API:
+
+// ...
+// Booking
+router.post(`/${API}/booking`, async (req, res) => {
+  const { offerId } = req.query;
+  const { body } = req;
+  const response = await amadeus.booking.hotelBookings.post(
+    JSON.stringify({
+      data: {
+        offerId,
+        guests: body.guests,
+        payments: body.payments,
+      },
+    })
+  );
+  try {
+    await res.json(JSON.parse(response.body));
+  } catch (err) {
+    await res.json(err);
+  }
+});
+// ...
+ 
+
+Notice how this is the only POST endpoint you’ve created. This makes sense because you’re creating the booking through the API, also using the .post() method on the SDK.
+
+Besides the offerID passed as a query parameter, other details like guests and payment info, come from the request body.
+
+After this request, the room is booked and the process is complete.
+
+ 
+
+Testing the results
+
+To test your app, first ensure you’re using proper testing via API\\_KEY and API\\_SECRET from the Amadeus My Self-Service Workspace dashboard. Then, run your server with the following command:
+
+node ./src/index.js
+ 
+
+Let’s summarize how our newly created API works:
+
+The user starts typing the city name in the search form. GET requests are made to the /api/search endpoint, passing the typed phrase as a keyword query parameter, and city names are recommended to the user.
+Once the user selects a city, you save its cityCode and pass it via a GET request to /api/hotels. This retrieves a list of available hotels in the city along with hotel details and their cheapest offer.
+When the user picks a hotel, use the hotelID in a GET request to /api/offers. This fetches all the available offers for the selected hotel.
+Because new bookings are constantly being made by other users, confirm the availability and details of the user’s selected offer with a GET request to /api/offer, passing the offerID of the selected offer.
+If everything looks correct, do a POST request to /api/booking, passing the offerID as a query parameter, as well as other information through the request’s body, to book the hotel.

@@ -29,31 +29,30 @@ export interface AmadeusFareDetail {
 }
 
 export interface AmadeusFlightOffer {
+  type: string;
   id: string;
+  source: string;
+  instantTicketingRequired: boolean;
+  nonHomogeneous: boolean;
+  oneWay: boolean;
+  lastTicketingDate: string;
+  numberOfBookableSeats: number;
+  itineraries: AmadeusItinerary[];
   price: {
-    total: string;
     currency: string;
-  };
-  itineraries: Array<{
-    segments: Array<{
-      departure: {
-        iataCode: string;
-        terminal?: string;
-        at: string;
-      };
-      arrival: {
-        iataCode: string;
-        terminal?: string;
-        at: string;
-      };
-      duration: string;
-      carrierCode: string;
-      number: string;
-      aircraft: {
-        code: string;
-      };
+    total: string;
+    base: string;
+    fees: Array<{
+      amount: string;
+      type: string;
     }>;
-  }>;
+    grandTotal: string;
+    billingCurrency?: string;
+  };
+  pricingOptions: {
+    fareType: string[];
+    includedCheckedBagsOnly: boolean;
+  };
   validatingAirlineCodes: string[];
   travelerPricings: Array<{
     travelerId: string;
@@ -62,44 +61,27 @@ export interface AmadeusFlightOffer {
     price: {
       currency: string;
       total: string;
+      base: string;
     };
     fareDetailsBySegment: Array<{
       segmentId: string;
       cabin: string;
+      fareBasis: string;
+      brandedFare: string;
       class: string;
       includedCheckedBags: {
         quantity: number;
-        weight?: number;
-        weightUnit?: string;
       };
-      brandedFare?: string;
-      brandedFareLabel?: string;
-      fareBasis: string;
-      amenities?: Array<{
-        description: string;
-        isChargeable: boolean;
-        amenityType: string;
-        amenityProvider: {
-          name: string;
-        };
-      }>;
     }>;
   }>;
   dictionaries?: {
-    aircraft: Record<string, string>;
-    carriers: Record<string, string>;
-    currencies: Record<string, string>;
-    locations: Record<string, { cityCode: string; countryCode: string; }>;
+    carriers?: {
+      [key: string]: string;
+    };
   };
-};
+}
 
 export interface AmadeusSegment {
-  id: string;
-  carrierCode: string;
-  number: string;
-  aircraft: {
-    code: string;
-  };
   departure: {
     iataCode: string;
     terminal?: string;
@@ -110,7 +92,18 @@ export interface AmadeusSegment {
     terminal?: string;
     at: string;
   };
+  carrierCode: string;
+  number: string;
+  aircraft: {
+    code: string;
+  };
+  operating?: {
+    carrierCode: string;
+  };
   duration: string;
+  id: string;
+  numberOfStops: number;
+  blacklistedInEU: boolean;
 }
 
 export interface AmadeusItinerary {
