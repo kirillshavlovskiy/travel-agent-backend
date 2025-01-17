@@ -4,7 +4,32 @@ import { logger } from '../utils/logger.js';
 
 const router = Router();
 
-// Add helper function to clean and validate response
+// Add this helper function to fix common JSON issues
+function sanitizeJsonString(str: string): string {
+  return str
+    // Fix common JSON issues
+    .replace(/\n/g, ' ')                    // Remove newlines
+    .replace(/\r/g, ' ')                    // Remove carriage returns
+    .replace(/\t/g, ' ')                    // Remove tabs
+    .replace(/\s+/g, ' ')                   // Normalize spaces
+    .replace(/"\s*:\s*undefined/g, '":null') // Replace undefined with null
+    .replace(/"\s*:\s*NaN/g, '":0')         // Replace NaN with 0
+    .replace(/"\s*:\s*Infinity/g, '":0')    // Replace Infinity with 0
+    .replace(/"\s*:\s*-Infinity/g, '":0')   // Replace -Infinity with 0
+    .replace(/"\s*:\s*'/g, '":"')           // Fix single quotes after colon
+    .replace(/'\s*:/g, '"":')               // Fix single quotes before colon
+    .replace(/:\s*'([^']*)'/g, ':"$1"')     // Replace single quoted values
+    .replace(/,(\s*[}\]])/g, '$1')          // Remove trailing commas
+    .replace(/,\s*,/g, ',')                 // Remove double commas
+    .replace(/\[\s*,/g, '[')                // Remove leading comma in arrays
+    .replace(/{\s*,/g, '{')                 // Remove leading comma in objects
+    .replace(/}\s*{/g, '},{')               // Fix adjacent objects
+    .replace(/]\s*\[/g, '],[')              // Fix adjacent arrays
+    .replace(/"\s*}/g, '"}')                // Fix space before closing brace
+    .replace(/"\s*]/g, '"]')                // Fix space before closing bracket
+    .trim();
+}
+
 function cleanAndValidateResponse(content: string): any {
   logger.debug('Cleaning and validating response', { 
     contentLength: content.length,
@@ -15,9 +40,10 @@ function cleanAndValidateResponse(content: string): any {
   content = content
     .replace(/```json\n?|\n?```/g, '')  // Remove markdown
     .replace(/[\u0000-\u001F\u007F-\u009F]/g, '') // Remove control characters
-    .replace(/\n\s*\n/g, '\n')  // Remove empty lines
-    .replace(/,(\s*[}\]])/g, '$1')  // Remove trailing commas
     .trim();
+
+  // Sanitize the content
+  content = sanitizeJsonString(content);
 
   try {
     // First try to parse the entire response
@@ -40,17 +66,11 @@ function cleanAndValidateResponse(content: string): any {
         const match = content.match(pattern);
         if (match) {
           // Clean the matched content
-          let extractedContent = match[1]
-            .replace(/,(\s*[}\]])/g, '$1')  // Remove trailing commas
-            .replace(/\}\s*\{/g, '},{')     // Fix object separators
-            .replace(/\]\s*\[/g, '],[')     // Fix array separators
-            .replace(/"\s*:\s*undefined/g, '":null')  // Replace undefined with null
-            .replace(/"\s*:\s*'([^']*)'/g, '":"$1"') // Replace single quotes with double quotes
-            .trim();
+          let extractedContent = sanitizeJsonString(match[1]);
           
           // Ensure the content ends properly
           if (!extractedContent.endsWith('}')) {
-            extractedContent += '}';
+            extractedContent = extractedContent.replace(/,\s*$/, '') + '}';
           }
           
           const extracted = pattern === patterns[2] 
@@ -76,6 +96,28 @@ function cleanAndValidateResponse(content: string): any {
             continue; // Try next pattern
           }
         }
+      }
+      
+      // If we get here, try one last attempt with a more aggressive cleanup
+      try {
+        const activityMatches = content.match(/\{\s*"day"\s*:\s*\d+[^}]+\}/g) || [];
+        if (activityMatches.length > 0) {
+          const cleanedActivities = activityMatches
+            .map(match => sanitizeJsonString(match))
+            .join(',');
+          
+          const finalJson = `{"activities":[${cleanedActivities}]}`;
+          const parsed = JSON.parse(finalJson);
+          
+          if (!Array.isArray(parsed.activities)) {
+            throw new Error('Parsed result does not contain activities array');
+          }
+          return parsed;
+        }
+      } catch (lastError) {
+        logger.warn('Failed last attempt cleanup', {
+          error: lastError instanceof Error ? lastError.message : 'Unknown error'
+        });
       }
       
       // If we get here, none of the patterns matched or parsed successfully
