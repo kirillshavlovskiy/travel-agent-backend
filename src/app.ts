@@ -4,6 +4,7 @@ import morgan from 'morgan';
 import flightsRouter from './routes/flights.js';
 import hotelsRouter from './routes/hotels.js';
 import { logger } from './utils/logger.js';
+import locationsRouter from './routes/locations.js';
 
 const app = express();
 
@@ -15,6 +16,7 @@ app.use(morgan('dev'));
 // Routes
 app.use('/api/flights', flightsRouter);
 app.use('/api/hotels', hotelsRouter);
+app.use('/api/locations', locationsRouter);
 
 logger.info('Routes mounted', {
   flights: true,
