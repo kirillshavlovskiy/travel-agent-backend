@@ -33,5 +33,8 @@ declare module 'amadeus' {
     shopping: AmadeusShopping;
   }
 
-  export default Amadeus;
+  export default class Amadeus {
+    constructor(config: AmadeusConfig);
+    client: AmadeusClient;
+  }
 } 
