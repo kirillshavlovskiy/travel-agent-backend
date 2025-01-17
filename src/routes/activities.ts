@@ -16,36 +16,65 @@ router.post('/generate', async (req: Request, res: Response) => {
     }
 
     const query = `Generate a ${days}-day activity plan for ${destination} with a total budget of ${budget} ${currency}. 
-For each day, suggest multiple activities across different price ranges:
+For EACH DAY (Day 1 to Day ${days}), suggest multiple activities across different price ranges:
 - Budget activities (under $30 per person): 2-3 options per time slot
 - Medium-priced activities ($30-$100 per person): 2-3 options per time slot
 - Premium/exclusive activities (over $100 per person): 2-3 options per time slot
 
 Requirements:
-1. Each day should have multiple activities from each price tier (budget, medium, premium)
-2. Activities should be distributed across time slots (morning, afternoon, evening)
-3. Include a diverse range of categories (cultural, adventure, entertainment, etc.)
-4. Premium activities should be truly exclusive experiences
-5. Consider local specialties and unique experiences
-6. Respect arrival time ${flightTimes?.arrival || 'flexible'} and departure time ${flightTimes?.departure || 'flexible'}
+1. IMPORTANT: Clearly specify which day (1 to ${days}) each activity belongs to
+2. Each day should have multiple activities from each price tier (budget, medium, premium)
+3. Activities should be distributed across time slots (morning, afternoon, evening)
+4. Include a diverse range of categories (cultural, adventure, entertainment, etc.)
+5. Premium activities should be truly exclusive experiences
+6. Consider local specialties and unique experiences
+7. For Day 1, respect arrival time ${flightTimes?.arrival || 'flexible'}
+8. For Day ${days}, respect departure time ${flightTimes?.departure || 'flexible'}
 
-For each activity include:
-- Name
-- Description (detailed description of the experience)
-- Price per person in ${currency}
-- Duration in hours
-- Location
-- Exact address
-- Opening hours
-- Key highlights or features (as an array of strings)
-- Rating (1-5)
-- Number of reviews
-- Category
-- Preferred time of day (morning/afternoon/evening)
-- Reference URL (direct booking link or official website)
-- Images (array of high-quality image URLs)
+For each activity MUST include:
+1. Basic Information:
+   - Day number (1 to ${days})
+   - Name (full official name of the activity/venue)
+   - Category (specific like "Cultural Tour", "Food Experience", "Adventure Activity", etc.)
+   - Location (full name of area/district)
+   - Exact address (complete street address with postal code if applicable)
 
-Format as a JSON object with an activities array. Each activity should include all the above fields, with images being an array of URLs to high-quality photos of the place/activity.`;
+2. Detailed Description:
+   - Main description (3-4 detailed sentences about the experience)
+   - Key highlights (5 specific features or unique aspects, each 1-2 sentences)
+   - What's included (list of 3-4 specific items/services included in the price)
+   - Additional notes (any special requirements, what to bring, etc.)
+
+3. Timing & Duration:
+   - Operating hours (specific format: "Monday-Friday: 9:00-17:00, Saturday: 10:00-16:00, Sunday: Closed")
+   - Recommended time slot (morning/afternoon/evening with specific start time)
+   - Duration (exact hours and minutes, e.g., "2 hours 30 minutes")
+   - Best time to visit (specific advice about peak/quiet times)
+
+4. Pricing & Booking:
+   - Price per person in ${currency} (specific amount, not a range)
+   - What's excluded (list of 2-3 items not included in the price)
+   - Booking requirements (advance booking time, group size limits, etc.)
+   - Cancellation policy (specific terms)
+
+5. Contact & Reviews:
+   - Official website URL (must be actual URL, not placeholder)
+   - Booking platform URL (specific URL for direct booking)
+   - Phone (international format with country code)
+   - Email (official contact email)
+   - Rating (realistic rating between 1-5 with one decimal)
+   - Number of reviews (realistic number based on popularity)
+
+6. Media:
+   - Main image URL (high-quality photo of the activity/venue)
+   - Gallery URLs (2-3 additional photos showing different aspects)
+
+Price Guidelines:
+- Budget activities: $15-30 per person
+- Medium activities: $31-100 per person
+- Premium activities: $101-300 per person
+
+Format as a JSON object with an activities array. Each activity must include ALL the above fields with accurate, realistic data. Do not use placeholder text - all information should be specific and realistic for the actual activity and location.`;
 
     logger.debug('Sending query to Perplexity API', { query });
     const response = await perplexityClient.chat(query);
@@ -58,21 +87,63 @@ Format as a JSON object with an activities array. Each activity should include a
     const content = response.choices[0].message.content;
     logger.debug('Raw content from Perplexity API', { content });
     
+    // Log the content before cleaning
+    logger.debug('Content before cleaning:', {
+      firstDayMatch: content.match(/\"day\"\s*:\s*(\d+)/),
+      firstDayNumberMatch: content.match(/\"day_number\"\s*:\s*(\d+)/),
+      firstDayNumberAltMatch: content.match(/\"dayNumber\"\s*:\s*(\d+)/)
+    });
+    
     // Clean up the content
     let cleanedContent = content
       .replace(/```json\n|\n```/g, '')  // Remove markdown code blocks
       .replace(/(\d+)\s*\([^)]*\)/g, '$1')  // Replace "0 (free entry, but...)" with just the number
+      
+      // Fix unquoted day numbers
+      .replace(/([{,]\s*)(day|day_number|dayNumber)\s*:\s*(\d+)/g, '$1"$2":$3')  // Quote day field names
+      
       .replace(/\$\d+/g, (match: string) => match.substring(1))  // Remove $ signs from numbers
       .replace(/https:\/\/[^"\s]+/g, (url: string) => {  // Clean up long URLs
-        // If URL is too long or contains invalid characters, replace with a placeholder
-        if (url.length > 500 || /[^\x20-\x7E]/.test(url)) {
+        // If URL is too long or contains invalid characters or repeated patterns, use a placeholder
+        if (url.length > 100 || /[^\x20-\x7E]/.test(url) || /(\/[^\/]+)\1{10,}/.test(url)) {
           return "https://placeholder.com/image.jpg";
         }
         return url;
       })
+      .replace(/,(\s*[\]}])/g, '$1')  // Remove trailing commas
+      .trim();
+
+    // Log any unquoted day numbers that might still exist
+    logger.debug('Checking for unquoted day numbers:', {
+      dayMatches: cleanedContent.match(/[{,]\s*(day|day_number|dayNumber)\s*:\s*\d+/g),
+      quotedDayMatches: cleanedContent.match(/[{,]\s*"(day|day_number|dayNumber)"\s*:\s*\d+/g)
+    });
+
+    // Log the content after first cleaning steps
+    logger.debug('Content after initial cleaning:', {
+      firstDayMatch: cleanedContent.match(/\"day\"\s*:\s*(\d+)/),
+      firstDayNumberMatch: cleanedContent.match(/\"day_number\"\s*:\s*(\d+)/),
+      firstDayNumberAltMatch: cleanedContent.match(/\"dayNumber\"\s*:\s*(\d+)/)
+    });
+
+    cleanedContent = cleanedContent
+      .replace(/\$\d+/g, (match: string) => match.substring(1))  // Remove $ signs from numbers
+      .replace(/https:\/\/[^"\s]+/g, (url: string) => {  // Clean up long URLs
+        // If URL is too long or contains invalid characters or repeated patterns, use a placeholder
+        if (url.length > 100 || /[^\x20-\x7E]/.test(url) || /(\/[^\/]+)\1{10,}/.test(url)) {
+          return "https://placeholder.com/image.jpg";
+        }
+        return url;
+      })
+      .replace(/,(\s*[\]}])/g, '$1')  // Remove trailing commas
       .trim();
       
-    logger.debug('Cleaned content', { cleanedContent });
+    // Log the content after all cleaning steps
+    logger.debug('Content after all cleaning:', {
+      firstDayMatch: cleanedContent.match(/\"day\"\s*:\s*(\d+)/),
+      firstDayNumberMatch: cleanedContent.match(/\"day_number\"\s*:\s*(\d+)/),
+      firstDayNumberAltMatch: cleanedContent.match(/\"dayNumber\"\s*:\s*(\d+)/)
+    });
 
     // Extract just the JSON object
     const jsonMatch = cleanedContent.match(/(\{[\s\S]*\})/);
@@ -97,7 +168,7 @@ Format as a JSON object with an activities array. Each activity should include a
       
       // Try to salvage the activities array with more aggressive cleaning
       try {
-        // Clean the JSON more aggressively
+        // Clean the JSON more carefully to preserve day numbers
         const cleanedJson = extractedJson
           .replace(/https:\/\/[^"\s]+/g, "https://placeholder.com/image.jpg")  // Replace all URLs with placeholder
           .replace(/[^\x20-\x7E]/g, '')  // Remove non-printable characters
@@ -105,9 +176,16 @@ Format as a JSON object with an activities array. Each activity should include a
           .replace(/\}\s*,\s*\}/g, '}}')  // Fix object separators
           .replace(/\]\s*,\s*\]/g, ']]')  // Fix array separators
           .replace(/\}\s*,\s*\]/g, '}]')  // Fix mixed separators
-          .replace(/([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:/g, '$1"$2":')  // Ensure property names are quoted
+          .replace(/([{,]\s*)(?!")(day(?:_number|Number)?|name|description|duration|price|category|location|address|key_highlights|keyHighlights|opening_hours|openingHours|rating|number_of_reviews|numReviews|preferred_time_of_day|preferredTimeOfDay|reference_url|referenceUrl|images)\s*:/g, '$1"$2":')  // Quote only specific property names
           .replace(/:\s*'([^']*?)'/g, ':"$1"')  // Convert single quotes to double quotes
+          .replace(/,+(\s*[}\]])/g, '$1')  // Remove multiple trailing commas
+          .replace(/\[\s*,/g, '[')  // Remove leading commas in arrays
+          .replace(/,\s*\]/g, ']')  // Remove trailing commas in arrays
           .trim();
+
+        logger.debug('Cleaned JSON before parsing:', { 
+          firstActivity: cleanedJson.substring(0, cleanedJson.indexOf('},') + 2)
+        });
 
         const activitiesMatch = cleanedJson.match(/"activities"\s*:\s*\[([\s\S]*?)\}\s*(?:\]|}|$)/);
         if (activitiesMatch) {
@@ -130,6 +208,15 @@ Format as a JSON object with an activities array. Each activity should include a
 
     // Validate each activity
     const validActivities = parsedData.activities.filter((activity: any) => {
+      // Log the raw activity data
+      logger.debug('Raw activity data before validation:', {
+        name: activity.name,
+        day: activity.day,
+        day_number: activity.day_number,
+        dayNumber: activity.dayNumber,
+        timeSlot: activity.preferred_time_of_day || activity.preferredTimeOfDay
+      });
+
       // Log the raw activity data
       logger.debug('Validating activity', { 
         activityData: {
@@ -165,7 +252,8 @@ Format as a JSON object with an activities array. Each activity should include a
         typeof (activity.number_of_reviews || activity.numReviews || activity.numberReviews) === 'number' &&
         typeof (activity.preferred_time_of_day || activity.preferredTimeOfDay) === 'string' &&
         typeof (activity.reference_url || activity.referenceUrl || activity.referenceURL) === 'string' &&
-        Array.isArray(activity.images)
+        Array.isArray(activity.images) &&
+        (typeof activity.day === 'number' || typeof activity.day_number === 'number' || typeof activity.dayNumber === 'number' || true)
       );
 
       if (!isValid) {
@@ -185,7 +273,11 @@ Format as a JSON object with an activities array. Each activity should include a
             numReviews: typeof (activity.number_of_reviews || activity.numReviews) !== 'number',
             preferredTimeOfDay: typeof (activity.preferred_time_of_day || activity.preferredTimeOfDay) !== 'string',
             referenceUrl: typeof (activity.reference_url || activity.referenceUrl) !== 'string',
-            images: !Array.isArray(activity.images)
+            images: !Array.isArray(activity.images),
+            dayNumber: activity.day === undefined && activity.day_number === undefined && activity.dayNumber === undefined ? 
+              'Missing day number' : 
+              typeof activity.day !== 'number' && typeof activity.day_number !== 'number' && typeof activity.dayNumber !== 'number' ? 
+              'Invalid day number type' : null
           }
         });
       }
@@ -208,12 +300,31 @@ Format as a JSON object with an activities array. Each activity should include a
     const transformedActivities = validActivities.map((activity: any, index: number) => {
       // Determine time slot with a default value
       let timeSlot = 'morning';  // Default to morning
-      const preferredTime = (activity.preferred_time_of_day || activity.preferredTimeOfDay || '').toLowerCase();
-      if (preferredTime === 'afternoon') {
+      
+      // Safely handle potentially undefined values
+      const preferredTime = activity?.preferred_time_of_day || activity?.preferredTimeOfDay || '';
+      const normalizedTime = preferredTime.toString().toLowerCase().trim();
+      
+      if (normalizedTime === 'afternoon') {
         timeSlot = 'afternoon';
-      } else if (preferredTime === 'evening') {
+      } else if (normalizedTime === 'evening') {
         timeSlot = 'evening';
       }
+
+      // Get day number from activity data first, only use calculated value as fallback
+      const rawDayNumber = activity.day || activity.day_number || activity.dayNumber;
+      const calculatedDayNumber = Math.floor(index / Math.ceil(validActivities.length / days)) + 1;
+      const dayNumber = (rawDayNumber && rawDayNumber >= 1 && rawDayNumber <= days) ? rawDayNumber : calculatedDayNumber;
+
+      logger.debug('Day number assignment:', {
+        activityName: activity.name,
+        rawDayNumber,
+        index,
+        totalActivities: validActivities.length,
+        days,
+        calculatedDayNumber,
+        finalDayNumber: dayNumber
+      });
 
       // Convert duration to number
       const duration = typeof activity.duration === 'string' ? parseFloat(activity.duration) : activity.duration;
@@ -242,7 +353,7 @@ Format as a JSON object with an activities array. Each activity should include a
         category: activity.category,
         tier,
         timeSlot,
-        dayNumber: 1,
+        dayNumber,
         startTime: timeSlot === 'morning' ? '09:00' : 
                    timeSlot === 'afternoon' ? '14:00' : '19:00',
         referenceUrl: activity.reference_url || activity.referenceUrl || activity.referenceURL || '',
@@ -254,37 +365,28 @@ Format as a JSON object with an activities array. Each activity should include a
 
     // Group activities by tier and time slot
     const activitiesByDay = new Map();
-    let currentDay = 1;
-    const activitiesPerDay = Math.ceil(transformedActivities.length / days);
 
+    // Initialize the map with empty arrays for all days
+    for (let day = 1; day <= days; day++) {
+      activitiesByDay.set(day, {
+        budget: { morning: [], afternoon: [], evening: [] },
+        medium: { morning: [], afternoon: [], evening: [] },
+        premium: { morning: [], afternoon: [], evening: [] }
+      });
+    }
+
+    // Group activities by their assigned day number
     transformedActivities.forEach((activity: any) => {
-      activity.dayNumber = currentDay;
-      
-      if (!activitiesByDay.has(currentDay)) {
-        activitiesByDay.set(currentDay, {
-          budget: { morning: [], afternoon: [], evening: [] },
-          medium: { morning: [], afternoon: [], evening: [] },
-          premium: { morning: [], afternoon: [], evening: [] }
-        });
-      }
-
-      const dayActivities = activitiesByDay.get(currentDay);
+      const dayActivities = activitiesByDay.get(activity.dayNumber);
       if (dayActivities && dayActivities[activity.tier] && dayActivities[activity.tier][activity.timeSlot]) {
         dayActivities[activity.tier][activity.timeSlot].push(activity);
       } else {
         console.warn('[Activities API] Invalid activity tier or time slot:', {
           tier: activity.tier,
           timeSlot: activity.timeSlot,
-          activityId: activity.id
+          activityId: activity.id,
+          dayNumber: activity.dayNumber
         });
-      }
-
-      const totalActivities = Object.values(dayActivities).flatMap((tier: any) => 
-        Object.values(tier).flatMap(slot => slot)
-      ).length;
-
-      if (totalActivities >= activitiesPerDay) {
-        currentDay++;
       }
     });
 
@@ -330,9 +432,203 @@ Format as a JSON object with an activities array. Each activity should include a
       });
     });
 
+    // Add validation before returning the activities
+    interface ActivityValidation {
+      name: string;
+      description: {
+        main: string;
+        highlights: string[];
+        included: string[];
+        notes?: string;
+      };
+      price: { 
+        amount: number; 
+        currency: string;
+        excluded: string[];
+        bookingRequirements: string;
+        cancellationPolicy: string;
+      };
+      location: {
+        area: string;
+        address: string;
+      };
+      timing: {
+        operatingHours: {
+          [key: string]: string; // e.g., "Monday-Friday": "9:00-17:00"
+        };
+        recommendedTimeSlot: string;
+        duration: string;
+        bestTimeToVisit: string;
+      };
+      category: string;
+      tier: string;
+      contact: {
+        website: string;
+        bookingUrl: string;
+        phone: string;
+        email: string;
+      };
+      reviews: {
+        rating: number;
+        count: number;
+      };
+      media: {
+        mainImage: string;
+        gallery: string[];
+      };
+      dayNumber: number;
+      timeSlot: string;
+    }
+
+    const validateActivities = (activities: ActivityValidation[]) => {
+      return activities.filter(activity => {
+        // Log the activity being validated
+        logger.debug('Validating activity', {
+          name: activity.name,
+          price: activity.price,
+          tier: activity.tier
+        });
+
+        // Check for required fields
+        if (!activity.name || !activity.description?.main || !activity.price?.amount || !activity.location?.area) {
+          logger.warn('Activity missing basic required fields', { 
+            activity: activity.name,
+            hasDescription: !!activity.description?.main,
+            hasPrice: !!activity.price?.amount,
+            hasLocation: !!activity.location?.area
+          });
+          return false;
+        }
+
+        // Validate description
+        if (!activity.description.highlights?.length || activity.description.highlights.length < 5) {
+          logger.warn('Activity missing required highlights', {
+            activity: activity.name,
+            highlightsCount: activity.description.highlights?.length
+          });
+          return false;
+        }
+
+        // Validate price ranges
+        const price = activity.price.amount;
+        if (activity.tier === 'budget' && (price < 15 || price > 30)) {
+          logger.warn('Invalid price for budget activity', { 
+            activity: activity.name, 
+            price,
+            tier: activity.tier
+          });
+          return false;
+        }
+        if (activity.tier === 'medium' && (price < 31 || price > 100)) {
+          logger.warn('Invalid price for medium activity', { 
+            activity: activity.name, 
+            price,
+            tier: activity.tier
+          });
+          return false;
+        }
+        if (activity.tier === 'premium' && (price < 101 || price > 300)) {
+          logger.warn('Invalid price for premium activity', { 
+            activity: activity.name, 
+            price,
+            tier: activity.tier
+          });
+          return false;
+        }
+
+        // Validate URLs
+        if (!activity.contact?.website?.startsWith('http') || !activity.contact?.bookingUrl?.startsWith('http')) {
+          logger.warn('Invalid or missing URLs', { 
+            activity: activity.name,
+            website: activity.contact?.website,
+            bookingUrl: activity.contact?.bookingUrl
+          });
+          return false;
+        }
+
+        // Validate contact info
+        if (!activity.contact?.phone || !activity.contact?.email) {
+          logger.warn('Missing contact information', { 
+            activity: activity.name,
+            hasPhone: !!activity.contact?.phone,
+            hasEmail: !!activity.contact?.email
+          });
+          return false;
+        }
+
+        // Validate timing
+        if (!activity.timing?.operatingHours || !activity.timing?.duration) {
+          logger.warn('Missing timing information', {
+            activity: activity.name,
+            hasOperatingHours: !!activity.timing?.operatingHours,
+            hasDuration: !!activity.timing?.duration
+          });
+          return false;
+        }
+
+        // Validate media
+        if (!activity.media?.mainImage?.startsWith('http') || !activity.media?.gallery?.length) {
+          logger.warn('Missing or invalid media', {
+            activity: activity.name,
+            hasMainImage: !!activity.media?.mainImage,
+            galleryCount: activity.media?.gallery?.length
+          });
+          return false;
+        }
+
+        return true;
+      });
+    };
+
+    // Helper function to generate itinerary for a specific tier
+    function generateItineraryForTier(activities: ActivityValidation[], tier: string) {
+      const days = Math.max(...activities.map(a => a.dayNumber));
+      return Array.from({ length: days }, (_, i) => {
+        const dayNumber = i + 1;
+        const dayActivities = activities.filter(a => 
+          a.dayNumber === dayNumber && 
+          (a.tier === tier || 
+           (tier === 'medium' && a.tier === 'budget') ||
+           (tier === 'premium' && (a.tier === 'medium' || a.tier === 'budget')))
+        );
+
+        return {
+          dayNumber,
+          morning: dayActivities.find(a => a.timeSlot === 'morning'),
+          afternoon: dayActivities.find(a => a.timeSlot === 'afternoon'),
+          evening: dayActivities.find(a => a.timeSlot === 'evening'),
+          morningOptions: dayActivities.filter(a => a.timeSlot === 'morning'),
+          afternoonOptions: dayActivities.filter(a => a.timeSlot === 'afternoon'),
+          eveningOptions: dayActivities.filter(a => a.timeSlot === 'evening')
+        };
+      });
+    }
+
+    // Validate and process activities
+    const processedActivities = validateActivities(transformedActivities);
+
+    if (processedActivities.length === 0) {
+      logger.error('No valid activities after validation');
+      throw new Error('Failed to generate valid activities with required details');
+    }
+
+    logger.info('Successfully validated activities', {
+      total: transformedActivities.length,
+      valid: processedActivities.length,
+      byTier: processedActivities.reduce((acc: Record<string, number>, activity: ActivityValidation) => {
+        acc[activity.tier] = (acc[activity.tier] || 0) + 1;
+        return acc;
+      }, {})
+    });
+
+    // Update the response to use validated activities
     res.json({
-      activities: transformedActivities,
-      suggestedItineraries
+      activities: processedActivities,
+      suggestedItineraries: {
+        budget: generateItineraryForTier(processedActivities, 'budget'),
+        medium: generateItineraryForTier(processedActivities, 'medium'),
+        premium: generateItineraryForTier(processedActivities, 'premium')
+      }
     });
 
   } catch (error) {

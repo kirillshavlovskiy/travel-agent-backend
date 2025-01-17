@@ -9,6 +9,7 @@ interface PerplexityResponse {
   openingHours?: string;
   rating?: number;
   reviews?: number;
+  error?: string;
 }
 
 export class PerplexityService {
@@ -82,19 +83,68 @@ export class PerplexityService {
           messages: [
             {
               role: 'system',
-              content: 'You are a helpful assistant that provides detailed information about places and activities. Please include relevant images, addresses, descriptions, and other useful details in your responses.'
+              content: `You are a travel planning assistant that creates detailed, well-structured activity itineraries. 
+              Each activity must be properly categorized by price tier, day number, and time slot.
+              
+              Price tiers must be strictly followed:
+              - Budget: Under $30 per person
+              - Medium: $30-$100 per person
+              - Premium: Over $100 per person
+              
+              Time slots must be evenly distributed:
+              - Morning: 9 AM - 12 PM
+              - Afternoon: 12 PM - 5 PM
+              - Evening: 5 PM - 10 PM`
             },
             {
               role: 'user',
-              content: `Please provide detailed information about ${query} including:
-              1. A brief description
-              2. The exact address
-              3. Key highlights or features
-              4. Opening hours if applicable
-              5. Relevant high-quality images (provide URLs)
-              6. Ratings and reviews if available
+              content: `Create a comprehensive ${query} including:
+
+              For EACH DAY of the trip, provide exactly:
+              Morning activities (9 AM - 12 PM):
+              - 1 Budget activity (under $30)
+              - 1 Medium activity ($30-$100)
+              - 1 Premium activity (over $100)
+
+              Afternoon activities (12 PM - 5 PM):
+              - 1 Budget activity (under $30)
+              - 1 Medium activity ($30-$100)
+              - 1 Premium activity (over $100)
+
+              Evening activities (5 PM - 10 PM):
+              - 1 Budget activity (under $30)
+              - 1 Medium activity ($30-$100)
+              - 1 Premium activity (over $100)
+
+              Requirements:
+              - Each activity MUST have a specific day number (1, 2, 3, etc.)
+              - Each activity MUST have a specific time slot (morning, afternoon, evening)
+              - Activities must be appropriate for their time slot (e.g. dinner in evening)
+              - Premium activities must be truly exclusive experiences
+              - Consider local specialties and unique experiences
+              - Respect arrival/departure times
               
-              Format the response as a JSON object with these fields: description, address, highlights (array), openingHours, images (array of URLs), rating, reviews`
+              For each activity provide:
+              {
+                name: string
+                description: string
+                price: number (exact amount in USD)
+                duration: number (in hours)
+                location: string
+                address: string
+                openingHours: string
+                keyHighlights: string[]
+                rating: number (1-5)
+                numberOfReviews: number
+                category: string
+                dayNumber: number (1, 2, 3, etc.)
+                timeSlot: "morning" | "afternoon" | "evening"
+                referenceUrl: string
+                images: string[]
+                priceCategory: "budget" | "medium" | "premium"
+              }
+
+              Format the response as a JSON object with an activities array containing all activities properly organized by day and time slot.`
             }
           ]
         },
@@ -111,9 +161,11 @@ export class PerplexityService {
       try {
         return JSON.parse(content);
       } catch (e) {
+        console.error('Failed to parse Perplexity response:', e);
         // If parsing fails, return a structured response with just the text
         return {
-          text: content
+          text: content,
+          error: 'Failed to parse activity data'
         };
       }
     } catch (error) {
