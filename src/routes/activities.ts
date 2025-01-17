@@ -35,99 +35,72 @@ function cleanAndValidateResponse(content: string): any {
     contentLength: content.length,
     contentPreview: content.substring(0, 200)
   });
-  
+
   // Remove markdown code block markers and clean the content
   content = content
     .replace(/```json\n?|\n?```/g, '')  // Remove markdown
     .replace(/[\u0000-\u001F\u007F-\u009F]/g, '') // Remove control characters
     .trim();
 
-  // Sanitize the content
-  content = sanitizeJsonString(content);
-
+  // First attempt: Try to parse the entire content as JSON
   try {
-    // First try to parse the entire response
     return JSON.parse(content);
   } catch (parseError) {
-    logger.warn('Failed to parse complete response, attempting to extract valid JSON', { 
+    logger.warn('Failed to parse complete response, attempting to extract activities', { 
       error: parseError instanceof Error ? parseError.message : 'Unknown error',
-      contentStart: content.substring(0, 500)
+      contentPreview: content.substring(0, 500)
     });
-    
+
     try {
-      // Try to find JSON object with activities array using multiple patterns
-      const patterns = [
-        /\{\s*"activities"\s*:\s*\[([\s\S]*?)\]\s*\}/,
-        /\{\s*"activities"\s*:\s*\[([\s\S]*)\]\s*\}/,
-        /\[([\s\S]*)\]/
-      ];
+      // Extract activities array using regex
+      const activitiesMatch = content.match(/\{\s*"activities"\s*:\s*\[([\s\S]*?)\]\s*\}/);
+      if (!activitiesMatch) {
+        throw new Error('Could not find activities array in response');
+      }
+
+      // Clean up the activities array content
+      let activitiesContent = activitiesMatch[1];
       
-      for (const pattern of patterns) {
-        const match = content.match(pattern);
-        if (match) {
-          // Clean the matched content
-          let extractedContent = sanitizeJsonString(match[1]);
-          
-          // Ensure the content ends properly
-          if (!extractedContent.endsWith('}')) {
-            extractedContent = extractedContent.replace(/,\s*$/, '') + '}';
-          }
-          
-          const extracted = pattern === patterns[2] 
-            ? `{"activities":[${extractedContent}]}`
-            : `{"activities":[${extractedContent}]}`;
-            
-          logger.debug('Found matching pattern, attempting to parse', {
-            pattern: pattern.toString(),
-            extractedPreview: extracted.substring(0, 200)
+      // Split into individual activity objects
+      const activityMatches = activitiesContent.match(/\{[^{]*?"day"\s*:\s*\d+[^}]*?\}/g);
+      if (!activityMatches) {
+        throw new Error('No activity objects found in response');
+      }
+
+      // Process each activity object
+      const activities = activityMatches.map(activityStr => {
+        try {
+          // Clean up the activity string
+          const cleanedActivity = activityStr
+            .replace(/([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:/g, '$1"$2":') // Quote unquoted keys
+            .replace(/:\s*'([^']*?)'/g, ':"$1"') // Replace single quotes with double quotes
+            .replace(/,\s*}/g, '}') // Remove trailing commas
+            .replace(/\\/g, '\\\\') // Escape backslashes
+            .replace(/([^\\])"/g, '$1\\"') // Escape unescaped quotes
+            .replace(/\s+/g, ' '); // Normalize whitespace
+
+          return JSON.parse(cleanedActivity);
+        } catch (activityError) {
+          logger.warn('Failed to parse activity', {
+            activity: activityStr,
+            error: activityError instanceof Error ? activityError.message : 'Unknown error'
           });
-          
-          try {
-            const parsed = JSON.parse(extracted);
-            if (!Array.isArray(parsed.activities)) {
-              throw new Error('Parsed result does not contain activities array');
-            }
-            return parsed;
-          } catch (innerError) {
-            logger.warn('Failed to parse extracted content', {
-              error: innerError instanceof Error ? innerError.message : 'Unknown error',
-              extractedPreview: extracted.substring(0, 500)
-            });
-            continue; // Try next pattern
-          }
+          return null;
         }
+      }).filter(Boolean);
+
+      if (activities.length === 0) {
+        throw new Error('No valid activities could be parsed');
       }
-      
-      // If we get here, try one last attempt with a more aggressive cleanup
-      try {
-        const activityMatches = content.match(/\{\s*"day"\s*:\s*\d+[^}]+\}/g) || [];
-        if (activityMatches.length > 0) {
-          const cleanedActivities = activityMatches
-            .map(match => sanitizeJsonString(match))
-            .join(',');
-          
-          const finalJson = `{"activities":[${cleanedActivities}]}`;
-          const parsed = JSON.parse(finalJson);
-          
-          if (!Array.isArray(parsed.activities)) {
-            throw new Error('Parsed result does not contain activities array');
-          }
-          return parsed;
-        }
-      } catch (lastError) {
-        logger.warn('Failed last attempt cleanup', {
-          error: lastError instanceof Error ? lastError.message : 'Unknown error'
-        });
-      }
-      
-      // If we get here, none of the patterns matched or parsed successfully
-      logger.error('Could not find valid JSON structure', {
-        contentPreview: content.substring(0, 1000),
-        patterns: patterns.map(p => p.toString())
+
+      logger.debug('Successfully parsed activities', {
+        count: activities.length,
+        firstActivity: activities[0]
       });
-      
-      throw new Error('Could not find valid JSON structure in response');
-    } catch (extractError: unknown) {
+
+      return { activities };
+
+    } catch (extractError) {
       logger.error('Failed to extract activities from response', { 
         error: extractError instanceof Error ? extractError.message : 'Unknown error',
         originalError: parseError instanceof Error ? parseError.message : 'Unknown error'
