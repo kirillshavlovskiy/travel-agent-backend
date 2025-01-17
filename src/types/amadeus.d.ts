@@ -1,36 +1,12 @@
 declare module 'amadeus' {
-  interface AmadeusClient {
-    get(params: any): Promise<any>;
-    post(params: any): Promise<any>;
-  }
-
-  interface AmadeusShoppingFlightOffersSearchPricing {
-    post(params: any): Promise<any>;
-  }
-
-  interface AmadeusShoppingFlightOffersSearch {
-    get(params: any): Promise<any>;
-    pricing: AmadeusShoppingFlightOffersSearchPricing;
-  }
-
-  interface AmadeusShoppingHotelOffers {
-    get(params: any): Promise<any>;
-  }
-
-  interface AmadeusShopping {
-    flightOffersSearch: AmadeusShoppingFlightOffersSearch;
-    hotelOffers: AmadeusShoppingHotelOffers;
-  }
-
-  interface AmadeusOptions {
+  interface AmadeusConfig {
     clientId: string;
     clientSecret: string;
     hostname?: string;
   }
 
-  class Amadeus {
-    constructor(options: AmadeusOptions);
-    shopping: AmadeusShopping;
+  interface AmadeusClient {
+    get(endpoint: string, params?: Record<string, any>): Promise<any>;
   }
 
   export default class Amadeus {
