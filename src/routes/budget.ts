@@ -154,6 +154,7 @@ interface TransformedRequest {
   startDate: string;
   endDate: string;
   flightData?: AmadeusFlightOffer[];
+  days: number;
 }
 
 // Get available cities and airports
@@ -320,7 +321,8 @@ router.post('/calculate-budget', async (req: Request, res: Response) => {
       currency: String(req.body.currency || 'USD'),
       budget: req.body.budgetLimit ? parseFloat(String(req.body.budgetLimit)) : undefined,
       startDate: String(req.body.startDate),
-      endDate: String(req.body.endDate)
+      endDate: String(req.body.endDate),
+      days: Math.ceil((new Date(req.body.endDate).getTime() - new Date(req.body.startDate).getTime()) / (1000 * 60 * 60 * 24))
     };
 
         // First search for real-time flights with Amadeus
@@ -330,45 +332,30 @@ router.post('/calculate-budget', async (req: Request, res: Response) => {
           const formattedDepartureDate = transformedRequest.startDate.split('T')[0];
           const formattedReturnDate = transformedRequest.endDate.split('T')[0];
 
-          // Search for flights in all cabin classes
-          const searchPromises = [
-            amadeusService.searchFlights({
-              originLocationCode: originAirportCode,
-              destinationLocationCode: destinationAirportCode,
-              departureDate: formattedDepartureDate,
-              returnDate: formattedReturnDate,
-              adults: transformedRequest.travelers,
-              travelClass: 'ECONOMY'
-            }),
-            amadeusService.searchFlights({
-              originLocationCode: originAirportCode,
-              destinationLocationCode: destinationAirportCode,
-              departureDate: formattedDepartureDate,
-              returnDate: formattedReturnDate,
-              adults: transformedRequest.travelers,
-              travelClass: 'PREMIUM_ECONOMY'
-            }),
-            amadeusService.searchFlights({
-              originLocationCode: originAirportCode,
-              destinationLocationCode: destinationAirportCode,
-              departureDate: formattedDepartureDate,
-              returnDate: formattedReturnDate,
-              adults: transformedRequest.travelers,
-              travelClass: 'BUSINESS'
-            }),
-            amadeusService.searchFlights({
-              originLocationCode: originAirportCode,
-              destinationLocationCode: destinationAirportCode,
-              departureDate: formattedDepartureDate,
-              returnDate: formattedReturnDate,
-              adults: transformedRequest.travelers,
-              travelClass: 'FIRST'
-            })
-          ];
+          // Search for flights in all cabin classes sequentially
+          const allFlights = [];
+          const cabinClasses: Array<'ECONOMY' | 'PREMIUM_ECONOMY' | 'BUSINESS' | 'FIRST'> = ['ECONOMY', 'PREMIUM_ECONOMY', 'BUSINESS', 'FIRST'];
+          
+          for (const travelClass of cabinClasses) {
+            try {
+              const flights = await amadeusService.searchFlights({
+                originLocationCode: originAirportCode,
+                destinationLocationCode: destinationAirportCode,
+                departureDate: formattedDepartureDate,
+                returnDate: formattedReturnDate,
+                adults: transformedRequest.travelers,
+                travelClass
+              });
+              allFlights.push(...flights);
+              // Add a small delay between requests to avoid rate limits
+              await new Promise<void>(resolve => setTimeout(resolve, 1000));
+            } catch (error) {
+              console.warn(`[Budget Route] Failed to fetch flights for ${travelClass}`, { error });
+            }
+          }
 
-          // Wait for all searches to complete and process results
-          const allFlights = await Promise.all(searchPromises);
-          const flights: AmadeusFlightOffer[] = allFlights.flat();
+          // Process results
+          const flights = allFlights;
 
           // Call the agent with flight data
           console.log('[Budget Route] Calling budget agent for additional data...');
@@ -428,33 +415,26 @@ router.post('/calculate-budget', async (req: Request, res: Response) => {
                   });
 
               // Try to get airline info, but don't fail if it's not available
-              let airlineInfo: AirlineInfo;
+              let airlineInfo: AirlineInfo = { commonName: firstSegment.carrierCode };
               try {
                 // First try to get airline info for the actual carrier
                 const carrierInfo = offer.dictionaries?.carriers?.[firstSegment.carrierCode];
                 if (typeof carrierInfo === 'string') {
                   airlineInfo = { commonName: carrierInfo };
-                } else if (carrierInfo && typeof carrierInfo === 'object') {
-                  airlineInfo = carrierInfo as AirlineInfo;
-                } else {
-                  // Fallback to validating airline if carrier info not found
-                  const airlineInfoArray = await amadeusService.getAirlineInfo(offer.validatingAirlineCodes[0]);
-                  airlineInfo = airlineInfoArray[0] || { commonName: firstSegment.carrierCode };
                 }
               } catch (error) {
                 console.warn('[Budget Route] Error fetching airline info:', error);
-                // Use the carrier code as fallback
-                airlineInfo = { commonName: firstSegment.carrierCode };
+                // Use the carrier code as fallback (already set in initialization)
               }
 
-                  const price = parseFloat(offer.price.total);
-                  const tier = amadeusService.determineTier(offer);
+              const price = parseFloat(offer.price.total);
+              const tier = amadeusService.determineTier(offer);
 
-                  console.log('[Budget Route] Determined flight tier:', {
-                    price,
-                    cabinClass,
-                    tier
-                  });
+              console.log('[Budget Route] Determined flight tier:', {
+                price,
+                cabinClass,
+                tier
+              });
 
               // Create a consistent flight data structure
                   const flightData: FlightDetails = {
@@ -501,7 +481,7 @@ router.post('/calculate-budget', async (req: Request, res: Response) => {
                       flightNumber: `${segment.carrierCode}${segment.number}`,
                       aircraft: {
                         code: segment.aircraft.code,
-                        name: offer.dictionaries?.aircraft?.[segment.aircraft.code] || AIRCRAFT_CODE_MAP[segment.aircraft.code] || segment.aircraft.code
+                        name: AIRCRAFT_CODES[segment.aircraft.code] || segment.aircraft.code
                       },
                       departure: {
                         airport: segment.departure.iataCode,
@@ -555,7 +535,7 @@ router.post('/calculate-budget', async (req: Request, res: Response) => {
                         flightNumber: `${segment.carrierCode}${segment.number}`,
                         aircraft: {
                           code: segment.aircraft.code,
-                          name: offer.dictionaries?.aircraft?.[segment.aircraft.code] || AIRCRAFT_CODE_MAP[segment.aircraft.code] || segment.aircraft.code
+                          name: AIRCRAFT_CODES[segment.aircraft.code] || segment.aircraft.code
                         },
                         departure: {
                           airport: segment.departure.iataCode,
