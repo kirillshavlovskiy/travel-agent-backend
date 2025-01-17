@@ -8,22 +8,23 @@ const router = Router();
 function cleanAndValidateResponse(content: string): any {
   logger.debug('Cleaning and validating response', { 
     contentLength: content.length,
-    contentPreview: content.substring(0, 200) // Log the start of the content
+    contentPreview: content.substring(0, 200)
   });
   
-  // Remove markdown code block markers if present
-  content = content.replace(/```json\n?|\n?```/g, '');
-  
-  // Remove any leading/trailing whitespace
-  content = content.trim();
-  
-  // Try multiple parsing strategies
+  // Remove markdown code block markers and clean the content
+  content = content
+    .replace(/```json\n?|\n?```/g, '')  // Remove markdown
+    .replace(/[\u0000-\u001F\u007F-\u009F]/g, '') // Remove control characters
+    .replace(/\n\s*\n/g, '\n')  // Remove empty lines
+    .replace(/,(\s*[}\]])/g, '$1')  // Remove trailing commas
+    .trim();
+
   try {
     // First try to parse the entire response
     return JSON.parse(content);
   } catch (parseError) {
     logger.warn('Failed to parse complete response, attempting to extract valid JSON', { 
-      error: parseError,
+      error: parseError instanceof Error ? parseError.message : 'Unknown error',
       contentStart: content.substring(0, 500)
     });
     
@@ -38,20 +39,46 @@ function cleanAndValidateResponse(content: string): any {
       for (const pattern of patterns) {
         const match = content.match(pattern);
         if (match) {
+          // Clean the matched content
+          let extractedContent = match[1]
+            .replace(/,(\s*[}\]])/g, '$1')  // Remove trailing commas
+            .replace(/\}\s*\{/g, '},{')     // Fix object separators
+            .replace(/\]\s*\[/g, '],[')     // Fix array separators
+            .replace(/"\s*:\s*undefined/g, '":null')  // Replace undefined with null
+            .replace(/"\s*:\s*'([^']*)'/g, '":"$1"') // Replace single quotes with double quotes
+            .trim();
+          
+          // Ensure the content ends properly
+          if (!extractedContent.endsWith('}')) {
+            extractedContent += '}';
+          }
+          
           const extracted = pattern === patterns[2] 
-            ? `{"activities":[${match[1]}]}` 
-            : `{"activities":[${match[1]}]}`;
+            ? `{"activities":[${extractedContent}]}`
+            : `{"activities":[${extractedContent}]}`;
             
           logger.debug('Found matching pattern, attempting to parse', {
             pattern: pattern.toString(),
             extractedPreview: extracted.substring(0, 200)
           });
           
-          return JSON.parse(extracted);
+          try {
+            const parsed = JSON.parse(extracted);
+            if (!Array.isArray(parsed.activities)) {
+              throw new Error('Parsed result does not contain activities array');
+            }
+            return parsed;
+          } catch (innerError) {
+            logger.warn('Failed to parse extracted content', {
+              error: innerError instanceof Error ? innerError.message : 'Unknown error',
+              extractedPreview: extracted.substring(0, 500)
+            });
+            continue; // Try next pattern
+          }
         }
       }
       
-      // If we get here, none of the patterns matched
+      // If we get here, none of the patterns matched or parsed successfully
       logger.error('Could not find valid JSON structure', {
         contentPreview: content.substring(0, 1000),
         patterns: patterns.map(p => p.toString())
