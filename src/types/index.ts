@@ -75,4 +75,28 @@ export interface AmadeusHotelSearchParams {
   currency?: string;
   radius?: number;
   ratings?: string;
+}
+
+export interface Activity {
+  id?: string;
+  name: string;
+  description: string;
+  duration: number;
+  price: {
+    amount: number;
+    currency: string;
+  };
+  category: string;
+  location: string;
+  address: string;
+  keyHighlights: string[];
+  openingHours: string;
+  rating: number;
+  numberOfReviews: number;
+  preferredTimeOfDay: 'morning' | 'afternoon' | 'evening';
+  referenceUrl: string;
+  images: string[];
+  timeSlot?: string;
+  dayNumber?: number;
+  tier?: string;
 } 

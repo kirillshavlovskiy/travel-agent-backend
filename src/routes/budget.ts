@@ -448,7 +448,7 @@ router.post('/calculate-budget', async (req: Request, res: Response) => {
               }
 
                   const price = parseFloat(offer.price.total);
-                  const tier = amadeusService.determineTier(price, cabinClass);
+                  const tier = amadeusService.determineTier(offer);
 
                   console.log('[Budget Route] Determined flight tier:', {
                     price,

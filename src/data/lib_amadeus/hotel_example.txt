@@ -299,3 +299,871 @@ Once the user selects a city, you save its cityCode and pass it via a GET reques
 When the user picks a hotel, use the hotelID in a GET request to /api/offers. This fetches all the available offers for the selected hotel.
 Because new bookings are constantly being made by other users, confirm the availability and details of the user’s selected offer with a GET request to /api/offer, passing the offerID of the selected offer.
 If everything looks correct, do a POST request to /api/booking, passing the offerID as a query parameter, as well as other information through the request’s body, to book the hotel.
+
+In this 2-part series, you'll build a complete hotel booking app using Node.js, React, and Amadeus hotel booking APIs. Part 2 will guide you through building your hotel app's frontend with React and connecting it to the backend with the Axios library.
+Note: The Hotel Search v2 has been decommissioned since the time of writing. Check out the Hotel Search v3 and Hotel List for the new capabilities.
+
+ 
+
+In this two-part series, you’ll build a complete hotel booking app in Node.js and React using Amadeus Self-Service APIs. In part one of this series, you saw how to build the Node.js backend using the Amadeus Node SDK and the Express framework, and how to implement the logic to call the Amadeus Hotel Search API and Hotel Booking API.
+
+Now, you’ll learn how to build the frontend using React and connect it to the backend with the Axios library. You can follow along with this GitHub repo.
+
+ 
+
+Setting up your development environment
+
+Start by using Create React App (CRA) to set up the basics of your React frontend:
+
+npx create-react-app app
+cd app
+ 
+
+Then install the following additional dependencies:
+
+parts of the Material-UI library for quick styling
+Day.js for date manipulation
+clsx for class names concatenation
+Axios for backend requests
+npm install @material-ui/core @material-ui/icons @material-ui/lab @material-ui/pickers
+@date-io/dayjs@1.x dayjs clsx axios
+ 
+
+Next, remove the unnecessary template files from the src directory (leave only index.js and App.js) and use the following <link> tag to load Material-UI font.
+
+<!-- public/index.html -->
+<!-- ... -->
+<head>
+  <!-- ... -->
+  <link
+    rel="stylesheet"
+    href="https://fonts.googleapis.com/css?family=Roboto:300,400,500,700&display=swap"
+  />
+</head>
+<!-- ... -->
+ 
+
+To finish the process, add the proxy field to package.json. This will trigger CRA to proxy unresolved requests to the provided origin, letting you connect your app to the backend—as if it was on the same origin—without any CORS issues.
+
+// package.json
+{
+  // ...
+  // The origin the backend is running on
+  "proxy": "http://localhost:1338"
+  // ...
+}
+ 
+
+Building the app base
+
+With the setup in place, run npm start and go to src/index.js to start building your app.
+
+Next, initiate React rendering and use the necessary renderless components to provide proper context for the rest of the app.
+
+// index.js
+import React from "react";
+import ReactDOM from "react-dom";
+import { CssBaseline, ThemeProvider, createTheme } from "@material-ui/core";
+import { MuiPickersUtilsProvider } from "@material-ui/pickers";
+import DayjsUtils from "@date-io/dayjs";
+import { App } from "./App";
+const theme = createTheme();
+ReactDOM.render(
+  <ThemeProvider theme={theme}>
+    <MuiPickersUtilsProvider utils={DayjsUtils}>
+      <CssBaseline />
+      <App />
+    </MuiPickersUtilsProvider>
+  </ThemeProvider>,
+  document.querySelector("#root")
+);
+ 
+
+App.js is where you should use useState() to set up the required state app-wide. The initiated cityCode will be set from the Search component and then used to show hotel listings.
+
+import React, { useState } from "react";
+import { Container, makeStyles } from "@material-ui/core";
+import { Search } from "./Search";
+import dayjs from "dayjs";
+const useStyles = makeStyles({
+  // ...
+});
+const App = () => {
+  const classes = useStyles();
+  const [cityCode, setCityCode] = useState(null);
+  return (
+    <Container maxWidth="sm" className={classes.container}>
+      <Search setCityCode={setCityCode} />
+    </Container>
+  );
+};
+export { App };
+ 
+
+City search autocomplete
+
+To build a city search field with autocomplete functionality, you can use the Autocomplete component from the Material-UI library
+
+import React, { useEffect, useState } from "react";
+import {
+  Grid,
+  InputAdornment,
+  makeStyles,
+  TextField,
+  Typography,
+} from "@material-ui/core";
+import { Autocomplete } from "@material-ui/lab";
+import {
+  LocationOn as PinIcon,
+  Search as MagnifierIcon,
+} from "@material-ui/icons";
+import clsx from "clsx";
+import { search } from "./api";
+const useStyles = makeStyles((theme) => ({
+  // ...
+}));
+const Search = ({ setCityCode }) => {
+  const classes = useStyles();
+  const [inputValue, setInputValue] = useState("");
+  const [options, setOptions] = useState([]);
+  useEffect(() => {
+    const { process, cancel } = search(inputValue);
+    process((options) => {
+      setOptions(options);
+    });
+    return () => cancel();
+  }, [inputValue]);
+  return (
+    <div>
+      <Autocomplete
+        autoComplete
+        autoHighlight
+        freeSolo
+        disableClearable
+        blurOnSelect
+        clearOnBlur
+        options={options}
+        onChange={(event, newValue) => {
+          setCityCode(newValue.code);
+        }}
+        onInputChange={(event, newInputValue) => {
+          setInputValue(newInputValue);
+        }}
+        getOptionLabel={(option) => option.city || ""}
+        renderOption={(option) => {
+          return (
+            <Grid container alignItems="center">
+              <Grid item>
+                <PinIcon className={clsx(classes.icon, classes.optionIcon)} />
+              </Grid>
+              <Grid item xs>
+                <span className={classes.cityName}>{option.city}</span>
+                <Typography variant="body2" color="textSecondary">
+                  {option.country}
+                  {option.state ? `, ${option.state}` : ""}
+                </Typography>
+              </Grid>
+            </Grid>
+          );
+        }}
+        renderInput={(props) => (
+          <TextField
+            {...props}
+            placeholder="Search"
+            label="City"
+            variant="outlined"
+            InputProps={{
+              ...props.InputProps,
+              startAdornment: (
+                <InputAdornment position="start">
+                  <MagnifierIcon
+                    className={clsx(classes.icon, classes.searchIcon)}
+                  />
+                </InputAdornment>
+              ),
+            }}
+          />
+        )}
+      />
+    </div>
+  );
+};
+export { Search };
+ 
+
+User input is held in inputValue and set as the user types. When it updates, the effect is triggered.
+
+The effect uses a custom search() function to fetch the autocomplete options. Then, when the user selects an option, cityCode gets populated.
+
+All connection with the backend happens in the api.js file through the Axios library.
+
+import axios from "axios";
+const { CancelToken } = axios;
+const search = (input) => {
+  if (input) {
+    try {
+      const source = CancelToken.source();
+      const request = axios.get(`/api/search?keyword=${input}`, {
+        cancelToken: source.token,
+      });
+      return {
+        async process(callback) {
+          request.then((response) => {
+            const json = response.data;
+            if (json && json.data) {
+              callback(
+                json.data.map(({ address }) => {
+                  return {
+                    city: address.cityName,
+                    code: address.cityCode,
+                    country: address.countryName,
+                    state: address.stateCode,
+                  };
+                })
+              );
+            }
+          });
+        },
+        cancel() {
+          source.cancel();
+        },
+      };
+    } catch (error) {
+      console.error(error);
+    }
+  }
+  return {
+    process() {
+      return [];
+    },
+    cancel() {},
+  };
+};
+ 
+
+Among all API-related functions, search() is a special one. As it’s called so frequently (as the user types), it’s important to optimize the requests. To do that, you can use Axios’ request cancellation feature to cancel—and save—your API calls when irrelevant results are still loading.
+
+You can cancel your requests with a cancellation token which, in the case of search(), is created on every call (the source variable). The returned object contains two methods:
+
+cancel(), which is used later during effect cleanup
+process(), which retrieves and parses data from the request
+Search and autocomplete should now be working. Make sure your backend is running and give it a try.
+
+React hotel booking app - city search suggestions
+
+ 
+
+In addition to city, you'll also have to add check-in and check-out date filters to the search to be able to make requests to the Amadeus Hotel Search API. The API support richer search parameters like price, room count or rating, but for the sake of this tutorial you'll stick to the basics.
+
+ 
+
+Check-in and check-out filters
+
+Date filters will be handled by the DateFilters component. But like cityCode, the related state should be placed at the root App component. This allows the checkInDate and checkOutDate properties to be transferred to the hotel listing component for use with the Hotel Search API:
+
+// ...
+import { DateFilters } from "./DateFilters";
+import dayjs from "dayjs";
+// ...
+const App = () => {
+  // ...
+  const [checkInDate, setCheckInDate] = useState(dayjs());
+  const [checkOutDate, setCheckOutDate] = useState(dayjs().add(1, "day"));
+  return (
+    <Container maxWidth="sm" className={classes.container}>
+      {/* ... */}
+      <DateFilters
+        checkInDate={checkInDate}
+        checkOutDate={checkOutDate}
+        setCheckInDate={setCheckInDate}
+        setCheckOutDate={setCheckOutDate}
+      />
+    </Container>
+  );
+};
+// ...
+ 
+
+The DateFilters component—aside from the markup—assures the Hotel Search API requirement for checkOutDate will always be at least one day later than checkInDate:
+
+import React, { useEffect, useRef } from "react";
+import { makeStyles } from "@material-ui/core";
+import { DatePicker } from "@material-ui/pickers";
+import dayjs from "dayjs";
+const useStyles = makeStyles((theme) => ({
+  // ...
+}));
+const DateFilters = ({
+  checkInDate,
+  checkOutDate,
+  setCheckOutDate,
+  setCheckInDate,
+}) => {
+  const classes = useStyles();
+  const minCheckIn = useRef(dayjs());
+  useEffect(() => {
+    const minCheckOutDate = checkInDate.add(1, "day");
+    setCheckOutDate(
+      +minCheckOutDate > +checkOutDate ? minCheckOutDate : checkOutDate
+    );
+  }, [checkInDate, checkOutDate, setCheckOutDate]);
+  return (
+    <div className={classes.datePickersContainer}>
+      <DatePicker
+        autoOk
+        variant="inline"
+        inputVariant="outlined"
+        label="Check In"
+        value={checkInDate}
+        minDate={minCheckIn.current}
+        onChange={(date) => setCheckInDate(date)}
+        className={classes.datePicker}
+      />
+      <div className={classes.spacer} />
+      <DatePicker
+        autoOk
+        variant="inline"
+        inputVariant="outlined"
+        label="Check Out"
+        value={checkOutDate}
+        minDate={checkInDate.add(1, "day")}
+        onChange={(date) => setCheckOutDate(date)}
+        className={classes.datePicker}
+      />
+    </div>
+  );
+};
+export { DateFilters };
+ 
+
+With date filters, the UI looks like this:
+
+React hotel booking app date filters
+
+ 
+
+Hotel listings
+
+The cityCode, as well as checkInDate and checkOutDate, can be used to query and show matching hotels to the user. For that, let’s create a Hotels component:
+
+import { useEffect, useState } from "react";
+import {
+  Accordion,
+  AccordionDetails,
+  AccordionSummary,
+  CircularProgress,
+  Typography,
+  makeStyles,
+} from "@material-ui/core";
+import {
+  Apartment as HotelIcon,
+  ExpandMore as ExpandIcon,
+} from "@material-ui/icons";
+import { getHotels } from "./api";
+const useStyles = makeStyles((theme) => ({
+  // ...
+}));
+const Hotels = ({ cityCode, checkInDate, checkOutDate }) => {
+  const classes = useStyles();
+  const [loading, setLoading] = useState(false);
+  const [activeHotelId, setActiveHotelId] = useState(false);
+  const [hotels, setHotels] = useState(null);
+  const handleChange = (hotelId) => (event, expanded) => {
+    setActiveHotelId(expanded ? hotelId : false);
+  };
+  useEffect(() => {
+    // ...
+  }, [cityCode, checkInDate, checkOutDate]);
+  if (loading) {
+    return <CircularProgress />;
+  }
+  if (hotels && hotels.length === 0) {
+    return <span>NO RESULTS</span>;
+  }
+  return (
+    <div className={classes.hotelList}>
+      {hotels &&
+        hotels.map((hotel) => {
+          const { name, address, hotelId, media } = hotel;
+          const image = media ? media[0].uri : "";
+          const active = activeHotelId === hotelId;
+          return (
+            <Accordion
+              key={hotelId}
+              expanded={active}
+              onChange={handleChange(hotelId)}
+            >
+              <AccordionSummary expandIcon={<ExpandIcon />}>
+                <div className={classes.hotelListing}>
+                  <div className={classes.hotelGraphic}>
+                    {image ? (
+                      <img
+                        src={image}
+                        alt="HOTEL"
+                        className={classes.hotelImage}
+                      />
+                    ) : (
+                      <HotelIcon className={classes.hotelIcon} />
+                    )}
+                  </div>
+                  <div className={classes.hotelDetails}>
+                    <Typography className={classes.hotelName}>
+                      {name}
+                    </Typography>
+                    <Typography
+                      color="textSecondary"
+                      className={classes.hotelAddress}
+                    >
+                      {address.lines.map((line) => {
+                        return <span key={line}>{line}</span>;
+                      })}
+                      <span>
+                        {address.cityName}
+                        {address.stateCode ? `, ${address.stateCode}` : ""}
+                        {` ${address.postalCode}`}
+                      </span>
+                    </Typography>
+                  </div>
+                </div>
+              </AccordionSummary>
+              <AccordionDetails>{/* Display offers */}</AccordionDetails>
+            </Accordion>
+          );
+        })}
+    </div>
+  );
+};
+export { Hotels };
+ 
+
+Individual hotel listings are displayed as expandable accordions, showing hotel name, image, address in summary, and available offers when expanded.
+
+Hotel listings are queried in an effect, dependent on previous query variables.
+
+// ...
+useEffect(() => {
+  if (cityCode) {
+    setLoading(true);
+    getHotels(
+      cityCode,
+      checkInDate.format("YYYY-MM-DD"),
+      checkOutDate.format("YYYY-MM-DD")
+    )
+      .then((hotels) => {
+        setHotels(hotels);
+        setLoading(false);
+      })
+      .catch((error) => {
+        console.error(error);
+        setLoading(false);
+      });
+  } else {
+    setHotels(null);
+  }
+}, [cityCode, checkInDate, checkOutDate]);
+// ...
+ 
+
+The effect manages the loading effect and uses the getHotels() function from the api.js module to query matching hotels from the backend.cityCode and date filters (formatted with Day.js for use with Amadeus APIs) are passed to the call.
+
+The getHotels() function uses the corresponding /api/hotels endpoint, passing all query variables as parameters. The relevant data then gets extracted and returned.
+
+// ...
+const getHotels = async (cityCode, checkInDate, checkOutDate) => {
+  try {
+    const response = await axios.get(
+      `/api/hotels?cityCode=${cityCode}&checkInDate=${checkInDate}&checkOutDate=${checkOutDate}`
+    );
+    const json = response.data;
+    if (json && json.data) {
+      return json.data.map(({ hotel }) => hotel);
+    }
+  } catch (error) {
+    console.error(error);
+  }
+  return [];
+};
+export { search, getHotels };
+ 
+
+Since the backend has only been set up to receive the cityCode parameter, remember to adapt it for checkInDate, checkOutDate, and any other parameters you want to use from the Hotel Search API. We discussed this in more detail in part one of this series.
+
+With the Hotels component ready, drop it in the App, pass required props, and check out the results.
+
+// ...
+import { Hotels } from "./Hotels";
+// ...
+const App = () => {
+  // ...
+  return (
+    <Container maxWidth="sm" className={classes.container}>
+      {/* ... */}
+      <div className={classes.results}>
+        <Hotels
+          cityCode={cityCode}
+          checkInDate={checkInDate}
+          checkOutDate={checkOutDate}
+        />
+      </div>
+    </Container>
+  );
+};
+// ...
+ 
+
+Here’s how the hotel listings look right now:
+
+React hotel booking app hotel listings
+
+ 
+
+Hotel offers
+
+With hotel listings done, you can now move on to creating the hotel offers preview. Hotel offers are the priced packages of rooms and rates that are available to book at a given hotel.
+
+For that, set up another component: Offers.
+
+import { useEffect, useState } from "react";
+import {
+  Button,
+  CircularProgress,
+  List,
+  ListItem,
+  ListItemText,
+  makeStyles,
+  ListItemIcon,
+  Divider,
+} from "@material-ui/core";
+import { LocalOffer as TagIcon } from "@material-ui/icons";
+import { getOffers } from "./api";
+const useStyles = makeStyles((theme) => ({
+  // ...
+}));
+const Offers = ({ active, hotelId, setOfferId }) => {
+  const classes = useStyles();
+  const [loading, setLoading] = useState(true);
+  const [offers, setOffers] = useState([]);
+  useEffect(() => {
+    // ...
+  }, [active, hotelId]);
+  if (loading) {
+    return (
+      <div className={classes.offerLoadingContainer}>
+        <CircularProgress />
+      </div>
+    );
+  }
+  return (
+    <List className={classes.offerList}>
+      <Divider />
+      {offers.map((offer, index) => {
+        const [headline, ...description] = offer.room.description.text.split(
+          "\n"
+        );
+        return (
+          <ListItem
+            alignItems="flex-start"
+            divider={index !== offers.length - 1}
+            className={classes.offerListing}
+            key={offer.id}
+          >
+            <ListItemIcon className={classes.offerIcon}>
+              <TagIcon />
+            </ListItemIcon>
+            <ListItemText
+              className={classes.offerTextWrapper}
+              primary={<span className={classes.offerText}>{headline}</span>}
+              secondary={
+                <>
+                  {description.map((line) => {
+                    return (
+                      <span key={line} className={classes.offerText}>
+                        {line}
+                      </span>
+                    );
+                  })}
+                </>
+              }
+            />
+            <div>
+              <Button color="primary" variant="contained">
+                {offer.price.total}
+                {offer.price.currency}
+              </Button>
+            </div>
+          </ListItem>
+        );
+      })}
+    </List>
+  );
+};
+export { Offers };
+ 
+
+Hotel offers can be presented as a list, with each item containing a headline, additional description, and a booking button with an associated price tag. The Amadeus Hotel Search API also returns additional details like room type or guest count.
+
+Similar to hotel listings, all offers are fetched from the effect dependent upon active prop determining whether the hotel offer accordion is expanded or not. getOffers() is used to connect with the API.
+
+// ...
+useEffect(() => {
+  if (active) {
+    setLoading(true);
+    getOffers(hotelId)
+      .then((offers) => {
+        setOffers(offers);
+        setLoading(false);
+      })
+      .catch((error) => {
+        console.error(error);
+        setLoading(false);
+      });
+  } else {
+    setOffers([]);
+  }
+}, [active, hotelId]);
+// ...
+ 
+
+Given hotelId, the getOffers() function sends it as a query parametr to the /api/offers endpoint to retrieve and parse the offers.
+
+// ...
+const getOffers = async (hotelId) => {
+  try {
+    const response = await axios.get(`/api/offers?hotelId=${hotelId}`);
+    const json = response.data;
+    if (json && json.data) {
+      return json.data.offers;
+    }
+  } catch (error) {
+    console.error(error);
+  }
+  return [];
+};
+export { search, getHotels, getOffers };
+ 
+
+The ready Offers component should be placed inside Hotels, within AccordionDetails.
+
+// ...
+import { Offers } from "./Offers";
+// ...
+const Hotels = ({ cityCode, checkInDate, checkOutDate }) => {
+  // ...
+  return (
+    <div className={classes.hotelList}>
+      {/* ... */}
+      <Accordion
+        key={hotelId}
+        expanded={active}
+        onChange={handleChange(hotelId)}
+      >
+        {/* ... */}
+        <AccordionDetails>
+          <Offers active={active} hotelId={hotelId} />
+        </AccordionDetails>
+      </Accordion>
+      {/* ... */}
+    </div>
+  );
+};
+// ...
+ 
+
+Here’s how the offer listings look:
+
+React hotel booking app hotel offers
+
+ 
+
+Booking dialog
+
+Before booking an offer, the user should be presented with a dialog requesting guest and payment details. To handle this, you’ll first need to retrieve the offerId and have access to it from the root App component to pass it on to the booking dialog.
+
+// ...
+import { BookingDialog } from "./BookingDialog";
+// ...
+const App = () => {
+  // ...
+  const [offerId, setOfferId] = useState(null);
+  return (
+    <Container maxWidth="sm" className={classes.container}>
+      {/* ... */}
+      <div className={classes.results}>
+        <Hotels
+          cityCode={cityCode}
+          checkInDate={checkInDate}
+          checkOutDate={checkOutDate}
+          setOfferId={setOfferId}
+        />
+      </div>
+      <BookingDialog offerId={offerId} setOfferId={offerId} />
+    </Container>
+  );
+};
+// ...
+ 
+
+The offerId can then be set upon clicking an offer button.
+
+// ...
+<Button
+  color="primary"
+  variant="contained"
+  onClick={() => setOfferId(offer.id)}
+>
+  {offer.price.total}
+  {offer.price.currency}
+</Button>;
+// ...
+The booking dialog itself will make two calls to the API—to verify the offer availability and to book it, respectively.
+
+import { useEffect, useState } from "react";
+import {
+  Button,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogContentText,
+  DialogTitle,
+} from "@material-ui/core";
+import { confirmOffer, makeBooking } from "./api";
+const BookingDialog = ({ offerId, setOfferId }) => {
+  const [available, setAvailable] = useState(null);
+  const handleClose = () => setOfferId(null);
+  const handleBooking = async () => {
+    // ...
+  };
+  useEffect(() => {
+    // ...
+  }, [offerId]);
+  return (
+    <Dialog
+      open={Boolean(offerId)}
+      onClose={handleClose}
+      fullWidth
+      maxWidth="xs"
+    >
+      <DialogTitle id="simple-dialog-title">Book the offer</DialogTitle>
+      <DialogContent>
+        <DialogContentText>
+          Offer: {offerId} {available === false && " is not available"}
+        </DialogContentText>
+      </DialogContent>
+      <DialogActions>
+        <Button
+          onClick={handleClose}
+          color="primary"
+          disabled={typeof available !== "boolean"}
+        >
+          Cancel
+        </Button>
+        <Button
+          color="primary"
+          variant="contained"
+          autoFocus
+          disabled={!available}
+          onClick={handleBooking}
+        >
+          Continue
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
+};
+export { BookingDialog };
+ 
+
+For now, the dialog is fairly simple. It currently displays the offerId and some actions buttons, but more will be added in the future.
+
+The handleBooking() function and a single effect manage most of the component’s logic.
+
+// ...
+const handleBooking = async () => {
+  const response = await makeBooking(offerId);
+  if (response) {
+    console.log(response);
+    handleClose();
+  }
+};
+useEffect(() => {
+  if (offerId) {
+    confirmOffer(offerId)
+      .then((response) => {
+        if (response) {
+          const [offer] = response.offers;
+          setAvailable(offer && offer.id === offerId);
+        } else {
+          setAvailable(false);
+        }
+      })
+      .catch((error) => {
+        console.error(error);
+      });
+  } else {
+    setAvailable(null);
+  }
+}, [offerId]);
+// ...
+ 
+
+The effect makes a request to confirm the offer, making the Continue button active once it registers a positive response. From there, the button’s click action triggers the booking process.
+
+confirmOffer() and makeBooking() originate from api.js, making requests to specific API endpoints.
+
+const confirmOffer = async (offerId) => {
+  try {
+    const response = await axios.get(`/api/offer?offerId=${offerId}`);
+    const json = response.data;
+    if (json && json.data) {
+      return json.data;
+    }
+  } catch (error) {
+    console.error(error);
+  }
+  return null;
+};
+const makeBooking = async (offerId) => {
+  const testData = {
+    guests: [
+      {
+        name: {
+          title: "MR",
+          firstName: "BOB",
+          lastName: "SMITH",
+        },
+        contact: {
+          phone: "+33679278416",
+          email: "bob.smith@email.com",
+        },
+      },
+    ],
+    payments: [
+      {
+        method: "creditCard",
+        card: {
+          vendorCode: "VI",
+          cardNumber: "4111111111111111",
+          expiryDate: "2023-01",
+        },
+      },
+    ],
+  };
+  try {
+    const response = await axios.post(
+      `/api/booking?offerId=${offerId}`,
+      testData
+    );
+    const json = response.data;
+    if (json && json.data) {
+      return json.data;
+    }
+  } catch (error) {
+    console.error(error);
+  }
+  return null;
+};
+ 
+
+Take a closer look at makeBooking(). Here, test data is used alongside offerId as a query parameter to make a POST request to /api/booking (which is the Amadeus Hotel Booking API).
+
+This step finalizes the dialog and whole booking flow.

@@ -359,6 +359,13 @@ CRITICAL JSON FORMATTING RULES:
           const average = (parseInt(min) + parseInt(max)) / 2;
           return average.toString();
         });
+
+        // Step 2.5: Handle mathematical expressions in price fields
+        cleanContent = cleanContent.replace(/"price":\s*(\d+\.?\d*)\s*\+\s*(\d+\.?\d*)/g, (_, num1, num2) => {
+          const sum = parseFloat(num1) + parseFloat(num2);
+          return `"price": ${sum}`;
+        });
+
         console.log(`[${category.toUpperCase()}] After handling price ranges:`, cleanContent);
 
         // Step 3: Fix quotes and escape characters

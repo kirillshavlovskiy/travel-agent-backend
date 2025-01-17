@@ -7,55 +7,50 @@ import { logger } from '../utils/logger.js';
 const router = express.Router();
 const amadeusService = new AmadeusService();
 
-// City code mapping for common destinations
-const CITY_CODES: Record<string, string> = {
-  'Amsterdam, Netherlands': 'AMS',
-  'Amsterdam': 'AMS'
-};
-
 const searchHotelsSchema = z.object({
   destination: z.string(),
-  checkInDate: z.string(),
-  checkOutDate: z.string(),
-  numberOfTravelers: z.number()
+  checkInDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  checkOutDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  adults: z.number().int().positive(),
+  roomQuantity: z.number().int().positive().optional().default(1),
+  priceRange: z.string().optional(),
+  ratings: z.string().optional()
 });
 
 router.post('/search', validateRequest(searchHotelsSchema), async (req, res) => {
   try {
-    const { destination, checkInDate, checkOutDate, numberOfTravelers } = req.body;
+    const { destination, checkInDate, checkOutDate, adults, roomQuantity = 1, ratings = '1,2,3,4,5' } = req.body;
 
     logger.info('Searching for hotels', {
       destination,
       checkInDate,
       checkOutDate,
-      numberOfTravelers
+      adults
     });
-
-    // Convert destination to city code
-    const cityCode = CITY_CODES[destination];
-    if (!cityCode) {
-      logger.error('Invalid city code', { destination });
-      return res.status(400).json({
-        error: 'Invalid destination',
-        details: 'City code not found for the provided destination',
-        code: 'INVALID_CITY_CODE'
-      });
-    }
 
     const hotels = await amadeusService.searchHotels({
-      cityCode,
+      cityCode: destination,
       checkInDate,
       checkOutDate,
-      adults: numberOfTravelers,
-      roomQuantity: 1,
+      adults,
+      roomQuantity,
       currency: 'USD',
       radius: 50,
-      ratings: '1,2,3,4,5'
+      ratings
     });
 
-    logger.info('Hotels found', { count: hotels.length });
+    const transformedHotels = hotels.map(hotel => amadeusService.transformHotelOffer(hotel));
 
-    res.json(hotels);
+    logger.info('Hotels found', { 
+      count: hotels.length,
+      transformedCount: transformedHotels.length
+    });
+
+    res.json({
+      success: true,
+      data: transformedHotels,
+      count: transformedHotels.length
+    });
   } catch (error: unknown) {
     logger.error('Failed to search for hotels', error);
     
@@ -69,23 +64,28 @@ router.post('/search', validateRequest(searchHotelsSchema), async (req, res) => 
         detail: 'An unknown error occurred'
       };
 
-      res.status(errorDetails.status).json({
+      return res.status(errorDetails.status).json({
+        success: false,
         error: 'Failed to search for hotels',
         details: errorDetails.detail,
         code: errorDetails.code,
         title: errorDetails.title
       });
-    } else if (error instanceof Error) {
-      res.status(500).json({
+    }
+
+    if (error instanceof Error) {
+      return res.status(500).json({
+        success: false,
         error: 'Failed to search for hotels',
         details: error.message
       });
-    } else {
-      res.status(500).json({
-        error: 'Failed to search for hotels',
-        details: 'An unknown error occurred'
-      });
     }
+
+    res.status(500).json({
+      success: false,
+      error: 'Failed to search for hotels',
+      details: 'An unknown error occurred'
+    });
   }
 });
 
