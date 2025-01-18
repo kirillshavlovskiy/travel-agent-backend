@@ -253,14 +253,32 @@ export class AmadeusService {
     const clientId = process.env.AMADEUS_CLIENT_ID;
     const clientSecret = process.env.AMADEUS_CLIENT_SECRET;
 
+    logger.info('Initializing Amadeus service', {
+      hasClientId: !!clientId,
+      hasClientSecret: !!clientSecret
+    });
+
     if (!clientId || !clientSecret) {
+      logger.error('Missing Amadeus API credentials', {
+        clientIdPresent: !!clientId,
+        clientSecretPresent: !!clientSecret
+      });
       throw new Error('Missing Amadeus API credentials');
     }
 
-    this.amadeus = new Amadeus({
-      clientId,
-      clientSecret,
-    });
+    try {
+      this.amadeus = new Amadeus({
+        clientId,
+        clientSecret,
+      });
+      logger.info('Amadeus client initialized successfully');
+    } catch (error) {
+      logger.error('Failed to initialize Amadeus client', {
+        error: error instanceof Error ? error.message : 'Unknown error',
+        stack: error instanceof Error ? error.stack : undefined
+      });
+      throw error;
+    }
   }
 
   async searchHotels(params: AmadeusHotelSearchParams): Promise<AmadeusHotelOffer[]> {

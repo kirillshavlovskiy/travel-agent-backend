@@ -307,16 +307,6 @@ Format as a JSON object with an activities array. Each activity should include a
       const calculatedDayNumber = Math.floor(index / Math.ceil(validActivities.length / days)) + 1;
       const dayNumber = (rawDayNumber && rawDayNumber >= 1 && rawDayNumber <= days) ? rawDayNumber : calculatedDayNumber;
 
-      logger.debug('Day number assignment:', {
-        activityName: activity.name,
-        rawDayNumber,
-        index,
-        totalActivities: validActivities.length,
-        days,
-        calculatedDayNumber,
-        finalDayNumber: dayNumber
-      });
-
       // Convert duration to number
       const duration = typeof activity.duration === 'string' ? 
         parseFloat(activity.duration) : 
@@ -339,6 +329,26 @@ Format as a JSON object with an activities array. Each activity should include a
       // Determine tier based on price
       const tier = price <= 30 ? 'budget' : price <= 100 ? 'medium' : 'premium';
 
+      // Get highlights from either key_highlights or keyHighlights
+      const highlights = activity.key_highlights || activity.keyHighlights || [];
+
+      // Ensure highlights are properly formatted
+      const formattedHighlights = highlights.map((highlight: any) => {
+        if (typeof highlight === 'string') {
+          return highlight.trim();
+        }
+        return '';
+      }).filter(Boolean);
+
+      // Add default highlights if none are provided
+      if (formattedHighlights.length === 0) {
+        formattedHighlights.push(
+          `${tier.charAt(0).toUpperCase() + tier.slice(1)} tier activity`,
+          `${duration} hour duration`,
+          activity.category || 'Various activities available'
+        );
+      }
+
       return {
         id: `activity_${index + 1}`,
         name: activity.name,
@@ -350,11 +360,11 @@ Format as a JSON object with an activities array. Each activity should include a
         },
         location: activity.location,
         address: activity.exact_address || activity.exactAddress || activity.address || '',
-        openingHours: activity.opening_hours || activity.openingHours,
-        highlights: activity.key_highlights || activity.keyHighlights || [],
-        rating: activity.rating,
+        openingHours: activity.opening_hours || activity.openingHours || 'Hours may vary',
+        highlights: formattedHighlights,
+        rating: activity.rating || 0,
         numberOfReviews: activity.number_of_reviews || activity.numReviews || activity.numberOfReviews || 0,
-        category: activity.category,
+        category: activity.category || 'General',
         tier,
         timeSlot,
         dayNumber,
@@ -449,5 +459,74 @@ Format as a JSON object with an activities array. Each activity should include a
     });
   }
 });
+
+function validateActivity(activity: any): boolean {
+  // Required fields
+  if (!activity.day || !activity.name || !activity.description || 
+      typeof activity.price !== 'number' || !activity.location) {
+    logger.debug('Activity validation failed: missing required fields', { activity });
+    return false;
+  }
+
+  // Duration must be a number
+  if (typeof activity.duration !== 'number' || isNaN(activity.duration)) {
+    logger.debug('Activity validation failed: invalid duration', { 
+      duration: activity.duration,
+      type: typeof activity.duration
+    });
+    return false;
+  }
+
+  // Price must be a non-negative number
+  if (activity.price < 0) {
+    logger.debug('Activity validation failed: negative price', { price: activity.price });
+    return false;
+  }
+
+  // Rating must be between 1-5 if provided
+  if (activity.rating && (activity.rating < 1 || activity.rating > 5)) {
+    logger.debug('Activity validation failed: invalid rating', { rating: activity.rating });
+    return false;
+  }
+
+  // Review count must be a non-negative number if provided
+  if (activity.reviewCount && (typeof activity.reviewCount !== 'number' || activity.reviewCount < 0)) {
+    logger.debug('Activity validation failed: invalid review count', { reviewCount: activity.reviewCount });
+    return false;
+  }
+
+  // Day must be a positive integer
+  if (!Number.isInteger(activity.day) || activity.day < 1) {
+    logger.debug('Activity validation failed: invalid day', { day: activity.day });
+    return false;
+  }
+
+  // Preferred time of day must be valid if provided
+  if (activity.preferredTimeOfDay && 
+      !['morning', 'afternoon', 'evening'].includes(activity.preferredTimeOfDay)) {
+    logger.debug('Activity validation failed: invalid preferred time', { 
+      preferredTime: activity.preferredTimeOfDay 
+    });
+    return false;
+  }
+
+  // Highlights must be an array if provided
+  if (activity.highlights && !Array.isArray(activity.highlights)) {
+    logger.debug('Activity validation failed: highlights not an array', { 
+      highlights: activity.highlights 
+    });
+    return false;
+  }
+
+  // Images must be an array if provided
+  if (activity.images && !Array.isArray(activity.images)) {
+    logger.debug('Activity validation failed: images not an array', { 
+      images: activity.images 
+    });
+    return false;
+  }
+
+  return true;
+}
 
 export default router; 

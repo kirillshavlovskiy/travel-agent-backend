@@ -1,90 +1,82 @@
 import express from 'express';
 import { z } from 'zod';
 import { validateRequest } from '../middleware/validateRequest.js';
-import { AmadeusService } from '../services/amadeus.js';
+import { HotelService } from '../services/hotels.js';
 import { logger } from '../utils/logger.js';
 
 const router = express.Router();
-const amadeusService = new AmadeusService();
+const hotelService = new HotelService();
+
+// City code mapping for common destinations
+const CITY_CODES: Record<string, string> = {
+  'Amsterdam, Netherlands': 'AMS',
+  'Amsterdam': 'AMS',
+  'Paris, France': 'PAR',
+  'Paris': 'PAR',
+  'London, United Kingdom': 'LON',
+  'London': 'LON',
+  'New York, United States': 'NYC',
+  'New York': 'NYC'
+};
 
 const searchHotelsSchema = z.object({
-  destination: z.string(),
-  checkInDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-  checkOutDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  destinations: z.array(z.object({
+    cityCode: z.string(),
+    arrivalDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    arrivalTime: z.string().regex(/^\d{2}:\d{2}$/).optional(),
+    departureDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    departureTime: z.string().regex(/^\d{2}:\d{2}$/).optional()
+  })).min(1),
   adults: z.number().int().positive(),
   roomQuantity: z.number().int().positive().optional().default(1),
-  priceRange: z.string().optional(),
-  ratings: z.string().optional()
+  ratings: z.string().optional(),
+  currency: z.string().optional().default('USD')
 });
 
 router.post('/search', validateRequest(searchHotelsSchema), async (req, res) => {
   try {
-    const { destination, checkInDate, checkOutDate, adults, roomQuantity = 1, ratings = '1,2,3,4,5' } = req.body;
+    const { destinations, adults, roomQuantity = 1, ratings, currency = 'USD' } = req.body;
 
-    logger.info('Searching for hotels', {
-      destination,
-      checkInDate,
-      checkOutDate,
-      adults
+    logger.info('Searching for hotels with multi-destination params:', {
+      destinations,
+      adults,
+      roomQuantity
     });
 
-    const hotels = await amadeusService.searchHotels({
-      cityCode: destination,
-      checkInDate,
-      checkOutDate,
+    // Create search plan with proper check-in/check-out dates
+    const searchPlan = hotelService.createSearchPlan(destinations);
+
+    logger.info('Created search plan:', { searchPlan });
+
+    // Search hotels for all destinations
+    const results = await hotelService.searchHotelsMultiDestination({
+      destinations: searchPlan,
       adults,
       roomQuantity,
-      currency: 'USD',
-      radius: 50,
-      ratings
+      ratings,
+      currency,
+      radius: 50 // Default radius in KM
     });
 
-    const transformedHotels = hotels.map(hotel => amadeusService.transformHotelOffer(hotel));
+    const totalHotels = results.reduce((sum, result) => sum + result.hotels.length, 0);
+    logger.info('Hotels found', { count: totalHotels });
 
-    logger.info('Hotels found', { 
-      count: hotels.length,
-      transformedCount: transformedHotels.length
-    });
-
-    res.json({
+    return res.json({
       success: true,
-      data: transformedHotels,
-      count: transformedHotels.length
+      data: results,
+      count: totalHotels
     });
-  } catch (error: unknown) {
-    logger.error('Failed to search for hotels', error);
-    
-    // Handle Amadeus API errors
-    if (error && typeof error === 'object' && 'response' in error) {
-      const amadeusError = error as any;
-      const errorDetails = amadeusError.response?.result?.errors?.[0] || {
-        status: 500,
-        code: 'UNKNOWN_ERROR',
-        title: 'Unknown Error',
-        detail: 'An unknown error occurred'
-      };
 
-      return res.status(errorDetails.status).json({
-        success: false,
-        error: 'Failed to search for hotels',
-        details: errorDetails.detail,
-        code: errorDetails.code,
-        title: errorDetails.title
-      });
-    }
+  } catch (error) {
+    logger.error('Error searching hotels:', {
+      error: error instanceof Error ? error.message : 'Unknown error',
+      stack: error instanceof Error ? error.stack : undefined
+    });
 
-    if (error instanceof Error) {
-      return res.status(500).json({
-        success: false,
-        error: 'Failed to search for hotels',
-        details: error.message
-      });
-    }
-
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
-      error: 'Failed to search for hotels',
-      details: 'An unknown error occurred'
+      error: error instanceof Error ? error.message : 'Internal server error',
+      code: 'HOTEL_SEARCH_ERROR'
     });
   }
 });

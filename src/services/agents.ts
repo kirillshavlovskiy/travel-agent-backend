@@ -547,36 +547,49 @@ Requirements:
 6. Consider local specialties and unique experiences
 7. For Day 1, respect arrival time ${request.startDate}
 8. For Day ${request.days}, respect departure time ${request.endDate}
+9. Duration MUST be a single number in hours (no ranges like "1-2", use average instead)
+
+Description Format:
+Each activity description should be detailed and engaging, following this structure:
+- First sentence: Overview of the activity and its main appeal
+- Second sentence: Specific details about what visitors can do/experience
+- Third sentence: Unique selling points or special features
+
+Highlights Format:
+Each activity should have 3-5 key highlights that are:
+- Bullet-pointed and concise
+- Focused on unique selling points
+- Include a mix of practical and experiential features
 
 Return a JSON object with this EXACT structure:
 {
   "activities": [
     {
       "day": number (1 to ${request.days}),
-                  "name": "string",
-      "description": "string",
-                  "price": number,
-      "duration": number,
+      "name": "string",
+      "description": "string (following the format above)",
+      "price": number,
+      "duration": number (single number in hours, no ranges),
       "location": "string",
       "address": "string",
       "openingHours": "string",
-      "highlights": ["string"],
+      "highlights": ["string (3-5 bullet points)"],
       "rating": number (1-5),
-                  "reviewCount": number,
+      "reviewCount": number,
       "category": "string",
       "preferredTimeOfDay": "morning" | "afternoon" | "evening",
       "referenceUrl": "string (max 100 chars)",
       "images": ["string (max 100 chars)"]
     }
   ]
-        }
+}
 
-        IMPORTANT RULES:
+IMPORTANT RULES:
 1. Use ONLY double quotes for strings and property names
-        2. Do NOT use single quotes anywhere
-        3. Do NOT include any trailing commas
-        4. All prices must be numbers (no currency symbols or commas)
-5. Duration must be a number (hours)
+2. Do NOT use single quotes anywhere
+3. Do NOT include any trailing commas
+4. All prices must be numbers (no currency symbols or commas)
+5. Duration must be a single number in hours (no ranges)
 6. Rating must be a number between 1 and 5
 7. Review count must be a number
 8. Day must be a number between 1 and ${request.days}
@@ -585,7 +598,9 @@ Return a JSON object with this EXACT structure:
 11. Return ONLY the JSON object, no additional text
 12. Do not wrap the response in markdown code blocks
 13. All URLs must be less than 100 characters
-14. Use short, direct URLs for referenceUrl and images`;
+14. Use short, direct URLs for referenceUrl and images
+15. Each description must follow the three-sentence format specified above
+16. Each activity must have 3-5 properly formatted highlights`;
 
     return prompt;
   }
@@ -616,36 +631,73 @@ Return a JSON object with this EXACT structure:
   }
 
   private cleanJsonResponse(content: string): string {
-    logger.debug('Cleaning JSON response');
+    logger.debug('Content before cleaning:', content);
     
-    // Remove any markdown code block markers
-    content = content.replace(/```json\n?|\n?```/g, '');
-    
-    // Clean up any malformed URLs that might break JSON parsing
-    // Look for repeated patterns in URLs that indicate they're malformed
-    content = content.replace(/(\/[^\/]+)\1{10,}/g, '/malformed-url-removed');
-    content = content.replace(/https?:\/\/[^\s"]+(?=\s|"|$)/g, 'https://placeholder.com/image.jpg');
-    
-    // Find the activities array closing bracket
-    const activitiesEndMatch = content.match(/\s*}\s*\]\s*}\s*$/);
-    if (!activitiesEndMatch) {
-      // If we can't find the end, try to reconstruct it
-      if (content.includes('"images": [')) {
-        content = content.replace(/\s*"images":\s*\[[^\]]*$/, '"images": []}}]}');
-      }
-    }
+    try {
+      // Remove any markdown code block markers
+      content = content.replace(/```json\n?|\n?```/g, '');
+      
+      // Remove any text before the first {
+      content = content.substring(content.indexOf('{'));
+      
+      // Remove any text after the last }
+      content = content.substring(0, content.lastIndexOf('}') + 1);
+      
+      // Quote unquoted property names
+      content = content.replace(/(\{|\,)\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*:/g, '$1"$2":');
+      
+      // Fix duration ranges by taking the average
+      content = content.replace(/"duration"\s*:\s*"?(\d+)-(\d+)"?/g, (match, start, end) => {
+        const avg = (parseInt(start) + parseInt(end)) / 2;
+        return `"duration": ${avg}`;
+      });
 
-    // Clean up any trailing commas in arrays and objects
-    content = content.replace(/,(\s*[}\]])/g, '$1');
-    
-    // Clean up any leading commas in arrays
-    content = content.replace(/\[,\s*/g, '[');
-    
-    logger.debug('Cleaned JSON response. First activity:', {
-      firstActivity: content.substring(0, content.indexOf('"images"'))
-    });
-    
+      // Convert any remaining duration ranges to single numbers
+      content = content.replace(/"duration"\s*:\s*"([0-9.]+)"/g, '"duration": $1');
+      
+      // Quote unquoted string values
+      content = content.replace(/:\s*(Free|Yes|No|true|false)(\s*[,}])/gi, ':"$1"$2');
+      
+      // Clean up any malformed URLs
+      content = content.replace(/(\/[^\/]+)\1{10,}/g, '/malformed-url-removed');
+      content = content.replace(/https?:\/\/[^\s"]+(?=\s|"|$)/g, 'https://placeholder.com/image.jpg');
+      
+      // Clean up any trailing commas in arrays and objects
+      content = content.replace(/,(\s*[}\]])/g, '$1');
+      content = content.replace(/,\s*$/gm, '');
+      
+      // Clean up any leading commas in arrays
+      content = content.replace(/\[,\s*/g, '[');
+      
+      // Ensure all property values are properly quoted
+      content = content.replace(/:\s*([^"{[\s][^,}\]]*[^"{}\]\s])(\s*[,}])/g, ':"$1"$2');
+
+      // Try parsing the cleaned content to validate it
+      JSON.parse(content);
+      
+      logger.debug('Cleaned JSON response:', content);
+      
       return content;
+    } catch (error) {
+      logger.error('Failed to clean JSON response:', { error, content });
+      // Return a valid empty activity object as fallback
+      return JSON.stringify({
+        name: "Fallback Activity",
+        description: "Unable to generate activity details. Please try again.",
+        duration: 2,
+        price: 0,
+        category: "General",
+        location: "To be determined",
+        exact_address: "",
+        opening_hours: "",
+        rating: 0,
+        number_of_reviews: 0,
+        reference_url: "",
+        key_highlights: ["Please try generating another activity"],
+        preferred_time_of_day: "morning",
+        images: []
+      });
+    }
   }
 
   private async querySingleActivity(prompt: string): Promise<string> {
@@ -741,10 +793,22 @@ CRITICAL JSON FORMATTING RULES:
     
     const prompt = `Generate a single activity recommendation for ${params.destination} during ${params.timeOfDay} on day ${params.dayNumber}${categoryStr}${preferencesStr} with a budget of ${params.budget} ${params.currency}.
 
+Description Format:
+Each activity description should be detailed and engaging, following this structure:
+- First sentence: Overview of the activity and its main appeal
+- Second sentence: Specific details about what visitors can do/experience
+- Third sentence: Unique selling points or special features
+
+Highlights Format:
+Each activity should have 3-5 key highlights that are:
+- Bullet-pointed and concise
+- Focused on unique selling points
+- Include a mix of practical and experiential features
+
 Example response:
 {
   "name": "Rooftop Dinner at Le Perchoir Marais",
-  "description": "Enjoy a romantic dinner with spectacular views of Paris from this trendy rooftop restaurant. The menu features modern French cuisine with seasonal ingredients.",
+  "description": "Enjoy a romantic dinner with breathtaking views of Paris from this trendy rooftop restaurant. The menu features modern French cuisine with seasonal ingredients and expertly crafted cocktails. Known for its exceptional service and carefully curated wine list, this venue offers an unforgettable dining experience.",
   "duration": 2,
   "price": 85,
   "category": "Food & Drink",
@@ -754,7 +818,12 @@ Example response:
   "rating": 4.5,
   "number_of_reviews": 2500,
   "reference_url": "https://leperchoir.fr",
-  "key_highlights": ["Panoramic views of Paris", "Modern French cuisine", "Romantic atmosphere"],
+  "key_highlights": [
+    "Panoramic views of Paris",
+    "Modern French cuisine with seasonal menu",
+    "Expert mixologists and craft cocktails",
+    "Carefully curated wine selection"
+  ],
   "preferred_time_of_day": "Evening"
 }
 
@@ -764,11 +833,15 @@ Requirements:
 3. Must be available during ${params.timeOfDay}
 4. Must match the category "${params.category || 'any'}"
 5. Must include accurate pricing and location details
-6. All prices must be numbers (no ranges)
-7. All text must be in English
-8. URLs must be complete and valid
-9. Ratings must be between 1-5
-10. Duration must be in hours as a number`;
+6. All prices must be numbers (no ranges or text like "Free")
+7. All text must be in English and properly quoted
+8. URLs must be complete, valid and quoted
+9. Ratings must be between 1-5 as numbers
+10. Duration must be in hours as a number
+11. All property names and string values must be in double quotes
+12. No trailing commas in arrays or objects
+13. Description must follow the three-sentence format specified above
+14. Must include 3-5 properly formatted highlights`;
 
     try {
       const response = await this.querySingleActivity(prompt);
