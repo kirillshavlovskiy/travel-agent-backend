@@ -9,9 +9,9 @@ import { AmadeusSegment, AmadeusFare, AmadeusFareDetail, AmadeusFlightOffer } fr
 import { AIRCRAFT_CODES as AIRCRAFT_CODE_MAP } from '../constants/aircraft.js';
 
 const router = Router();
-const agent = new VacationBudgetAgent();
-const prisma = new PrismaClient();
 const amadeusService = new AmadeusService();
+const agent = new VacationBudgetAgent(amadeusService);
+const prisma = new PrismaClient();
 
 // Import AIRCRAFT_CODES from amadeus service
 const AIRCRAFT_CODES: { [key: string]: string } = {
@@ -202,7 +202,7 @@ function getPrimaryAirportForCity(cityCode: string): string {
 }
 
 // Calculate budget endpoint
-router.post('/calculate-budget', async (req: Request, res: Response) => {
+router.post('/calculate', async (req: Request, res: Response) => {
   // Set a timeout for the entire request
   const TIMEOUT = 120000; // 120 seconds to account for Amadeus API retries
   const timeoutPromise = new Promise((_, reject) => {
@@ -277,19 +277,19 @@ router.post('/calculate-budget', async (req: Request, res: Response) => {
     }
 
     // Get origin airport code
-    const originAirportCode = req.body.departureLocation.code;
-    if (!airports.some(a => a.value === originAirportCode)) {
-      console.error('[Budget Route] Invalid origin airport code:', originAirportCode);
-      return res.status(400).json({
-        success: false,
-        error: 'Invalid origin airport code',
-        timestamp: new Date().toISOString()
-      });
-    }
+    const originAirportCode = getPrimaryAirportForCity(req.body.departureLocation.code);
+    console.log('[Budget Route] Using airport code for origin:', {
+      cityCode: req.body.departureLocation.code,
+      airportCode: originAirportCode
+    });
 
     // Get destination airport code
     const destinationCityCode = req.body.destinations[0].code;
     const destinationAirportCode = getPrimaryAirportForCity(destinationCityCode);
+    console.log('[Budget Route] Using airport code for destination:', {
+      cityCode: destinationCityCode,
+      airportCode: destinationAirportCode
+    });
 
     // Race between the actual work and the timeout
     const result = await Promise.race([
@@ -325,52 +325,80 @@ router.post('/calculate-budget', async (req: Request, res: Response) => {
       days: Math.ceil((new Date(req.body.endDate).getTime() - new Date(req.body.startDate).getTime()) / (1000 * 60 * 60 * 24))
     };
 
+        // Initialize agentResult
+        let agentResult: any = {
+          flights: {
+            budget: {
+              min: 0,
+              max: 0,
+              average: 0,
+              confidence: 0,
+              source: 'Amadeus API',
+              references: []
+            },
+            medium: {
+              min: 0,
+              max: 0,
+              average: 0,
+              confidence: 0,
+              source: 'Amadeus API',
+              references: []
+            },
+            premium: {
+              min: 0,
+              max: 0,
+              average: 0,
+              confidence: 0,
+              source: 'Amadeus API',
+              references: []
+            }
+          }
+        };
+
         // First search for real-time flights with Amadeus
         console.log('[Budget Route] Searching for real-time flights with Amadeus...');
-        let agentResult;
         try {
           const formattedDepartureDate = transformedRequest.startDate.split('T')[0];
           const formattedReturnDate = transformedRequest.endDate.split('T')[0];
 
-          // Search for flights in all cabin classes sequentially
-          const allFlights = [];
-          const cabinClasses: Array<'ECONOMY' | 'PREMIUM_ECONOMY' | 'BUSINESS' | 'FIRST'> = ['ECONOMY', 'PREMIUM_ECONOMY', 'BUSINESS', 'FIRST'];
-          
-          for (const travelClass of cabinClasses) {
-            try {
-              const flights = await amadeusService.searchFlights({
+          // Search for flights in all cabin classes
+          const cabinClasses = ['ECONOMY', 'PREMIUM_ECONOMY', 'BUSINESS', 'FIRST'];
+          const searchPromises = cabinClasses.flatMap(cabinClass => [
+            // Outbound flight
+            amadeusService.searchFlights({
+              segments: [{
                 originLocationCode: originAirportCode,
                 destinationLocationCode: destinationAirportCode,
-                departureDate: formattedDepartureDate,
-                returnDate: formattedReturnDate,
-                adults: transformedRequest.travelers,
-                travelClass
-              });
-              allFlights.push(...flights);
-              // Add a small delay between requests to avoid rate limits
-              await new Promise<void>(resolve => setTimeout(resolve, 1000));
-            } catch (error) {
-              console.warn(`[Budget Route] Failed to fetch flights for ${travelClass}`, { error });
-            }
-          }
+                departureDate: formattedDepartureDate
+              }, {
+                originLocationCode: destinationAirportCode,
+                destinationLocationCode: originAirportCode,
+                departureDate: formattedReturnDate
+              }],
+              adults: transformedRequest.travelers,
+              travelClass: cabinClass
+            })
+          ]);
 
-          // Process results
-          const flights = allFlights;
-
-          // Call the agent with flight data
-          console.log('[Budget Route] Calling budget agent for additional data...');
-          agentResult = await agent.handleTravelRequest({
-            ...transformedRequest,
-            flightData: flights
-          });
+          // Wait for all searches to complete and process results
+          const allFlights = await Promise.all(searchPromises);
+          const flights: AmadeusFlightOffer[] = allFlights.flat();
 
           console.log('[Budget Route] Flight search results:', {
             totalFlights: flights.length,
             byClass: {
-              economy: flights.filter((f: AmadeusFlightOffer) => f.travelerPricings[0].fareDetailsBySegment[0].cabin === 'ECONOMY').length,
-              premiumEconomy: flights.filter((f: AmadeusFlightOffer) => f.travelerPricings[0].fareDetailsBySegment[0].cabin === 'PREMIUM_ECONOMY').length,
-              business: flights.filter((f: AmadeusFlightOffer) => f.travelerPricings[0].fareDetailsBySegment[0].cabin === 'BUSINESS').length,
-              first: flights.filter((f: AmadeusFlightOffer) => f.travelerPricings[0].fareDetailsBySegment[0].cabin === 'FIRST').length
+              economy: flights.filter((f: AmadeusFlightOffer) => 
+                f.travelerPricings[0].fareDetailsBySegment[0].cabin === 'ECONOMY').length,
+              premiumEconomy: flights.filter((f: AmadeusFlightOffer) => 
+                f.travelerPricings[0].fareDetailsBySegment[0].cabin === 'PREMIUM_ECONOMY').length,
+              business: flights.filter((f: AmadeusFlightOffer) => 
+                f.travelerPricings[0].fareDetailsBySegment[0].cabin === 'BUSINESS').length,
+              first: flights.filter((f: AmadeusFlightOffer) => 
+                f.travelerPricings[0].fareDetailsBySegment[0].cabin === 'FIRST').length
+            },
+            byDirection: {
+              roundTrip: flights.filter((f: AmadeusFlightOffer) => 
+                f.itineraries[0].segments.length > 1).length
             }
           });
 
@@ -415,26 +443,33 @@ router.post('/calculate-budget', async (req: Request, res: Response) => {
                   });
 
               // Try to get airline info, but don't fail if it's not available
-              let airlineInfo: AirlineInfo = { commonName: firstSegment.carrierCode };
+              let airlineInfo: AirlineInfo;
               try {
                 // First try to get airline info for the actual carrier
                 const carrierInfo = offer.dictionaries?.carriers?.[firstSegment.carrierCode];
                 if (typeof carrierInfo === 'string') {
                   airlineInfo = { commonName: carrierInfo };
+                } else if (carrierInfo && typeof carrierInfo === 'object') {
+                  airlineInfo = carrierInfo as AirlineInfo;
+                } else {
+                  // Fallback to validating airline if carrier info not found
+                  const airlineInfoArray = await amadeusService.getAirlineInfo(offer.validatingAirlineCodes[0]);
+                  airlineInfo = airlineInfoArray[0] || { commonName: firstSegment.carrierCode };
                 }
               } catch (error) {
                 console.warn('[Budget Route] Error fetching airline info:', error);
-                // Use the carrier code as fallback (already set in initialization)
+                // Use the carrier code as fallback
+                airlineInfo = { commonName: firstSegment.carrierCode };
               }
 
-              const price = parseFloat(offer.price.total);
-              const tier = amadeusService.determineTier(offer);
+                  const price = parseFloat(offer.price.total);
+                  const tier = amadeusService.determineTier(offer);
 
-              console.log('[Budget Route] Determined flight tier:', {
-                price,
-                cabinClass,
-                tier
-              });
+                  console.log('[Budget Route] Determined flight tier:', {
+                    price,
+                    cabinClass,
+                    tier
+                  });
 
               // Create a consistent flight data structure
                   const flightData: FlightDetails = {
@@ -619,30 +654,9 @@ router.post('/calculate-budget', async (req: Request, res: Response) => {
             // If we have Amadeus flights, use them exclusively
             if (Object.keys(groupedFlights).length > 0) {
               agentResult.flights = {
-                budget: groupedFlights.budget || {
-                  min: 0,
-                  max: 0,
-                  average: 0,
-                  confidence: 0,
-                  source: 'Amadeus API',
-                  references: []
-                },
-                medium: groupedFlights.medium || {
-                  min: 0,
-                  max: 0,
-                  average: 0,
-                  confidence: 0,
-                  source: 'Amadeus API',
-                  references: []
-                },
-                premium: groupedFlights.premium || {
-                  min: 0,
-                  max: 0,
-                  average: 0,
-                  confidence: 0,
-                  source: 'Amadeus API',
-                  references: []
-                }
+                budget: groupedFlights.budget || agentResult.flights.budget,
+                medium: groupedFlights.medium || agentResult.flights.medium,
+                premium: groupedFlights.premium || agentResult.flights.premium
               };
             }
             // If no Amadeus flights at all, keep Perplexity results
@@ -756,7 +770,6 @@ router.post('/generate-activity', async (req: Request, res: Response) => {
     }
 
     console.log('[Budget API] Calling VacationBudgetAgent to generate activity...');
-    const agent = new VacationBudgetAgent();
     const activity = await agent.generateSingleActivity({
       destination,
       dayNumber,

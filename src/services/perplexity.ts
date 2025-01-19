@@ -34,13 +34,22 @@ export class PerplexityService {
           messages: [
             {
               role: 'system',
-              content: 'You are a helpful assistant that provides detailed information about places and activities in JSON format.'
+              content: `You are a helpful assistant that provides detailed information about places and activities in JSON format.
+              CRITICAL: Return ONLY a valid JSON object with no markdown formatting or code blocks.
+              Use ONLY double quotes for strings and property names.
+              Do NOT use single quotes anywhere.
+              Do NOT include any trailing commas.
+              All numbers must be valid JSON numbers (no ranges like "35-40", use average value instead).`
             },
             {
               role: 'user',
               content: query
             }
-          ]
+          ],
+          options: {
+            temperature: 0.1,
+            max_tokens: 4000
+          }
         },
         {
           headers: {
@@ -49,6 +58,20 @@ export class PerplexityService {
           }
         }
       );
+
+      // Clean the response content before returning
+      if (response.data.choices?.[0]?.message?.content) {
+        const content = response.data.choices[0].message.content
+          .replace(/```json\n?|\n?```/g, '') // Remove markdown code blocks
+          .replace(/^\s*\n/gm, '') // Remove empty lines
+          .replace(/\r\n/g, '\n') // Normalize line endings
+          .replace(/\n/g, ' ') // Convert newlines to spaces
+          .replace(/\t/g, ' ') // Convert tabs to spaces
+          .replace(/\s+/g, ' ') // Normalize spaces
+          .trim();
+
+        response.data.choices[0].message.content = content;
+      }
 
       return response.data;
     } catch (error) {

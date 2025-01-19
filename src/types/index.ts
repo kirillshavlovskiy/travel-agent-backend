@@ -28,26 +28,23 @@ export interface TransformedHotelOffer {
 
 export interface AmadeusHotelOffer {
   id: string;
-  hotel: {
-    hotelId: string;
-    name: string;
-    rating?: string;
-    description?: {
-      text: string;
-      lang: string;
-    };
-    amenities?: string[];
-    media?: {
-      uri: string;
-      category: string;
-    }[];
-    latitude?: string;
-    longitude?: string;
-    address?: {
-      cityName: string;
-    };
+  name: string;
+  rating?: string;
+  description?: {
+    text: string;
+    lang: string;
   };
-  offers?: {
+  amenities?: string[];
+  media?: Array<{
+    uri: string;
+    category: string;
+  }>;
+  latitude?: string;
+  longitude?: string;
+  address?: {
+    cityName: string;
+  };
+  offers?: Array<{
     id: string;
     self: string;
     price: {
@@ -63,7 +60,7 @@ export interface AmadeusHotelOffer {
         };
       };
     };
-  }[];
+  }>;
 }
 
 export interface AmadeusHotelSearchParams {

@@ -1,7 +1,9 @@
 import { Router, Request, Response } from 'express';
 import { logger } from '../utils/logger.js';
+import { AmadeusService } from '../services/amadeus';
 
 const router = Router();
+const amadeusService = new AmadeusService();
 
 // Define supported locations with their details
 const supportedLocations = [
@@ -65,35 +67,117 @@ const supportedLocations = [
 ];
 
 // Get all supported locations
-router.get('/', (req: Request, res: Response) => {
-  logger.info('Fetching all supported locations');
-  res.json({ locations: supportedLocations });
+router.get('/', async (req: Request, res: Response) => {
+  try {
+    logger.info('Fetching all supported locations');
+    
+    // Try to get some default locations from Amadeus
+    try {
+      const defaultCities = ['Paris', 'London', 'New York', 'Tokyo', 'Dubai'];
+      const locations = [];
+      
+      for (const city of defaultCities) {
+        try {
+          const cityLocations = await amadeusService.searchLocations(city);
+          if (cityLocations.length > 0) {
+            locations.push(cityLocations[0]);
+          }
+        } catch (cityError) {
+          logger.warn(`Failed to fetch location for ${city}`, { 
+            error: cityError instanceof Error ? cityError.message : 'Unknown error' 
+          });
+        }
+      }
+
+      if (locations.length > 0) {
+        logger.info('Successfully fetched default locations', { count: locations.length });
+        return res.json({
+          success: true,
+          data: locations,
+          count: locations.length
+        });
+      }
+    } catch (amadeusError) {
+      logger.error('Failed to fetch locations from Amadeus', {
+        error: amadeusError instanceof Error ? amadeusError.message : 'Unknown error'
+      });
+    }
+
+    // Fallback to static locations if Amadeus fails
+    logger.info('Using fallback static locations', { count: supportedLocations.length });
+    return res.json({
+      success: true,
+      data: supportedLocations,
+      count: supportedLocations.length
+    });
+  } catch (error) {
+    logger.error('Error fetching locations', {
+      error: error instanceof Error ? error.message : 'Unknown error',
+      stack: error instanceof Error ? error.stack : undefined
+    });
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to fetch locations'
+    });
+  }
 });
 
 // Search locations by query
-router.get('/search', (req: Request, res: Response) => {
-  const { query } = req.query;
-  
-  if (!query || typeof query !== 'string') {
-    logger.warn('Invalid search query', { query });
-    return res.status(400).json({ error: 'Invalid search query' });
+router.get('/search', async (req: Request, res: Response) => {
+  try {
+    const { keyword } = req.query;
+
+    if (!keyword || typeof keyword !== 'string') {
+      logger.warn('Invalid or missing keyword parameter', { keyword });
+      return res.status(400).json({
+        success: false,
+        error: 'Missing or invalid keyword parameter'
+      });
+    }
+
+    logger.info('Searching locations', { keyword });
+    
+    try {
+      const locations = await amadeusService.searchLocations(keyword);
+      logger.info('Successfully retrieved locations', { 
+        count: locations.length,
+        keyword 
+      });
+
+      return res.json({
+        success: true,
+        data: locations,
+        count: locations.length
+      });
+    } catch (amadeusError) {
+      logger.error('Amadeus API error', { 
+        error: amadeusError instanceof Error ? amadeusError.message : 'Unknown error',
+        stack: amadeusError instanceof Error ? amadeusError.stack : undefined,
+        keyword 
+      });
+      
+      // If no locations found, return empty array instead of error
+      if (amadeusError instanceof Error && amadeusError.message.includes('No location found')) {
+        return res.json({
+          success: true,
+          data: [],
+          count: 0
+        });
+      }
+
+      throw amadeusError;
+    }
+  } catch (error) {
+    logger.error('Error searching locations', { 
+      error: error instanceof Error ? error.message : 'Unknown error',
+      stack: error instanceof Error ? error.stack : undefined 
+    });
+    
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to search locations'
+    });
   }
-
-  logger.info('Searching locations', { query });
-  
-  const normalizedQuery = query.toLowerCase();
-  const results = supportedLocations.filter(location => 
-    location.name.toLowerCase().includes(normalizedQuery) ||
-    location.country.toLowerCase().includes(normalizedQuery) ||
-    location.displayName.toLowerCase().includes(normalizedQuery) ||
-    location.airports.some(airport => airport.toLowerCase().includes(normalizedQuery))
-  );
-
-  res.json({ 
-    results,
-    count: results.length,
-    query
-  });
 });
 
 // Get location by ID
@@ -106,10 +190,16 @@ router.get('/:id', (req: Request, res: Response) => {
   
   if (!location) {
     logger.warn('Location not found', { id });
-    return res.status(404).json({ error: 'Location not found' });
+    return res.status(404).json({
+      success: false,
+      error: 'Location not found'
+    });
   }
   
-  res.json(location);
+  res.json({
+    success: true,
+    data: location
+  });
 });
 
 export default router; 

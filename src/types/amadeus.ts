@@ -1,7 +1,56 @@
 export interface AmadeusService {
-  name: string;
-  description?: string;
-  isChargeable?: boolean;
+  amadeus: {
+    shopping: {
+      flightOffersSearch: {
+        get(params: {
+          originLocationCode: string;
+          destinationLocationCode: string;
+          departureDate: string;
+          adults: number;
+          travelClass: string;
+          max?: number;
+          currencyCode?: string;
+          nonStop?: boolean;
+        }): Promise<{
+          body: {
+            data: AmadeusFlightOffer[];
+            dictionaries?: {
+              carriers?: { [key: string]: string };
+              aircraft?: { [key: string]: string };
+            };
+          };
+        }>;
+      };
+      hotelOffers: {
+        get(params: HotelSearchParams): Promise<{
+          body: {
+            data: AmadeusHotelOffer[];
+          };
+        }>;
+      };
+    };
+    referenceData: {
+      locations: {
+        get(params: {
+          keyword: string;
+          subType?: string;
+          countryCode?: string;
+          page?: number;
+        }): Promise<{
+          body: {
+            data: Array<{
+              name: string;
+              iataCode: string;
+              address: {
+                cityName: string;
+                countryName: string;
+              };
+            }>;
+          };
+        }>;
+      };
+    };
+  };
 }
 
 export interface AmadeusAmenity {
@@ -78,6 +127,9 @@ export interface AmadeusFlightOffer {
     carriers?: {
       [key: string]: string;
     };
+    aircraft?: {
+      [key: string]: string;
+    };
   };
 }
 
@@ -132,98 +184,121 @@ export interface HotelSearchParams {
 }
 
 export interface AmadeusHotelOffer {
-  id: string;
   hotelId: string;
   name: string;
-  description?: {
-    text: string;
-    lang: string;
-  };
-  available: boolean;
-  offers: Array<{
+  rating?: string;
+  cityName?: string;
+  description?: string;
+  offers?: Array<{
     id: string;
     checkInDate: string;
     checkOutDate: string;
-    rateCode: string;
-    rateFamilyEstimated?: {
-      code: string;
-      type: string;
-    };
-    room: {
-      type: string;
-      typeEstimated: {
-        category: string;
-        beds: number;
-        bedType: string;
-      };
-      description: {
-        text: string;
-        lang: string;
-      };
-    };
-    guests: {
-      adults: number;
-      childAges?: number[];
-    };
+    roomQuantity: number;
     price: {
       currency: string;
-      base: string;
       total: string;
-      taxes?: Array<{
-        code: string;
-        amount: string;
-        currency: string;
-        included: boolean;
-      }>;
-    };
-    policies: {
-      guarantee?: {
-        acceptedPayments: {
-          methods: string[];
-          cards: string[];
+      variations?: {
+        average?: {
+          base: string;
         };
+        changes?: Array<{
+          startDate: string;
+          endDate: string;
+          base: string;
+        }>;
       };
-      paymentType: string;
+    };
+    policies?: {
       cancellation?: {
-        deadline: string;
-        description?: {
-          text: string;
-          lang: string;
-        };
+        description?: string;
       };
     };
   }>;
-  self: string;
+  geoCode?: {
+    latitude: number;
+    longitude: number;
+  };
+  media?: string[];
 }
 
 export interface TransformedHotelOffer {
-  id: string;
-  hotelId: string;
   name: string;
-  description: string;
-  available: boolean;
-  checkInDate: string;
-  checkOutDate: string;
-  roomType: string;
-  bedType: string;
-  numBeds: number;
-  tier: string;
+  location: string;
   price: {
     currency: string;
     total: number;
     perNight: number;
     amount: number;
   };
-  cancellationPolicy?: {
-    deadline: string;
-    description: string;
-  };
-  amenities: string[];
-  rating?: number;
-  location: {
+  tier: string;
+  type: string;
+  amenities: string;
+  rating: number;
+  reviewScore: number;
+  reviewCount: number;
+  images: string[];
+  referenceUrl: string;
+  coordinates: {
     latitude: number;
     longitude: number;
-    address: string;
   };
-  images: string[];
+  features: string[];
+  policies: {
+    checkIn: string;
+    checkOut: string;
+    cancellation: string;
+  };
+}
+
+export interface Amadeus {
+  shopping: {
+    flightOffersSearch: {
+      get(params: {
+        originLocationCode: string;
+        destinationLocationCode: string;
+        departureDate: string;
+        adults: number;
+        travelClass: string;
+        max?: number;
+        currencyCode?: string;
+        nonStop?: boolean;
+      }): Promise<{
+        body: {
+          data: AmadeusFlightOffer[];
+          dictionaries?: {
+            carriers?: { [key: string]: string };
+            aircraft?: { [key: string]: string };
+          };
+        };
+      }>;
+    };
+    hotelOffers: {
+      get(params: HotelSearchParams): Promise<{
+        body: {
+          data: AmadeusHotelOffer[];
+        };
+      }>;
+    };
+  };
+  referenceData: {
+    locations: {
+      get(params: {
+        keyword: string;
+        subType?: string;
+        countryCode?: string;
+        page?: number;
+      }): Promise<{
+        body: {
+          data: Array<{
+            name: string;
+            iataCode: string;
+            address: {
+              cityName: string;
+              countryName: string;
+            };
+          }>;
+        };
+      }>;
+    };
+  };
 } 

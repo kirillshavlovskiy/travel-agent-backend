@@ -33,50 +33,69 @@ const searchHotelsSchema = z.object({
   currency: z.string().optional().default('USD')
 });
 
-router.post('/search', validateRequest(searchHotelsSchema), async (req, res) => {
+interface Destination {
+  cityCode: string;
+  arrivalDate: string;
+  departureDate: string;
+}
+
+router.post('/search', async (req: Request, res: Response) => {
+  const { destinations, adults, roomQuantity, currency } = req.body;
+
+  // Log the exact request payload
+  logger.info('[Hotels Route] Raw request body:', JSON.stringify(req.body, null, 2));
+
+  logger.info('[Hotels Route] Received search request:', {
+    destinations,
+    adults,
+    roomQuantity,
+    currency,
+    timestamp: new Date().toISOString()
+  });
+
   try {
-    const { destinations, adults, roomQuantity = 1, ratings, currency = 'USD' } = req.body;
-
-    logger.info('Searching for hotels with multi-destination params:', {
-      destinations,
-      adults,
-      roomQuantity
-    });
-
-    // Create search plan with proper check-in/check-out dates
-    const searchPlan = hotelService.createSearchPlan(destinations);
-
-    logger.info('Created search plan:', { searchPlan });
-
-    // Search hotels for all destinations
-    const results = await hotelService.searchHotelsMultiDestination({
-      destinations: searchPlan,
+    // Log the exact payload being sent to the hotel service
+    const searchParams = {
+      destinations: destinations.map((dest: any) => ({
+        cityCode: dest.cityCode,
+        arrivalDate: dest.arrivalDate,
+        departureDate: dest.departureDate
+      })),
       adults,
       roomQuantity,
-      ratings,
-      currency,
-      radius: 50 // Default radius in KM
+      currency
+    };
+    
+    logger.info('[Hotels Route] Calling hotel service with params:', JSON.stringify(searchParams, null, 2));
+
+    const results = await hotelService.searchHotelsMultiDestination(searchParams);
+
+    logger.info('[Hotels Route] Search completed:', {
+      totalHotels: results.reduce((sum, result) => sum + result.hotels.length, 0),
+      destinations: results.map(r => r.cityCode),
+      timestamp: new Date().toISOString(),
+      results: results.map(r => ({
+        cityCode: r.cityCode,
+        checkInDate: r.checkInDate,
+        checkOutDate: r.checkOutDate,
+        hotelCount: r.hotels.length
+      }))
     });
 
-    const totalHotels = results.reduce((sum, result) => sum + result.hotels.length, 0);
-    logger.info('Hotels found', { count: totalHotels });
-
-    return res.json({
+    res.json({
       success: true,
-      data: results,
-      count: totalHotels
+      data: results
     });
-
   } catch (error) {
-    logger.error('Error searching hotels:', {
+    logger.error('[Hotels Route] Error searching hotels:', {
       error: error instanceof Error ? error.message : 'Unknown error',
-      stack: error instanceof Error ? error.stack : undefined
+      stack: error instanceof Error ? error.stack : undefined,
+      requestBody: req.body
     });
 
-    return res.status(500).json({
+    res.status(500).json({
       success: false,
-      error: error instanceof Error ? error.message : 'Internal server error',
-      code: 'HOTEL_SEARCH_ERROR'
+      error: 'Failed to search hotels'
     });
   }
 });

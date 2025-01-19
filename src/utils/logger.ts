@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import winston from 'winston';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -65,5 +66,61 @@ export const logger = {
     // Use console.log instead of console.debug for better visibility
     console.log(consoleMessage);
     fs.appendFileSync(logFile, fileMessage);
+  }
+};
+
+// Add dedicated hotel processing logger
+export const hotelLogger = winston.createLogger({
+  level: 'info',
+  format: winston.format.combine(
+    winston.format.timestamp(),
+    winston.format.json(),
+    winston.format.prettyPrint()
+  ),
+  transports: [
+    new winston.transports.File({ 
+      filename: path.join(__dirname, '../../logs/hotel-processing.log'),
+      level: 'info'
+    }),
+    new winston.transports.Console({
+      format: winston.format.combine(
+        winston.format.colorize(),
+        winston.format.simple()
+      )
+    })
+  ]
+});
+
+// Add specific hotel logging methods
+export const logHotelProcessing = {
+  batchStart: (batchNumber: number, hotelIds: string[]) => {
+    hotelLogger.info('Processing hotel batch', {
+      batch: batchNumber,
+      hotelCount: hotelIds.length,
+      hotelIds
+    });
+  },
+  hotelFound: (hotelData: any) => {
+    hotelLogger.info('Hotel data processed', {
+      hotelId: hotelData.id,
+      name: hotelData.name,
+      offers: hotelData.offers?.length || 0,
+      price: hotelData.offers?.[0]?.price
+    });
+  },
+  batchError: (batchNumber: number, error: any) => {
+    hotelLogger.error('Batch processing error', {
+      batch: batchNumber,
+      error: error.message,
+      details: error.response || error
+    });
+  },
+  searchSummary: (summary: any) => {
+    hotelLogger.info('Hotel search completed', {
+      totalHotels: summary.totalHotelsFound,
+      availableHotels: summary.availableHotels,
+      destinations: summary.destinations,
+      dateRange: summary.dateRange
+    });
   }
 }; 

@@ -83,8 +83,8 @@ interface AmadeusHotelOffer {
 export interface MultiDestinationHotelSearchParams {
   destinations: {
     cityCode: string;
-    checkInDate: string;
-    checkOutDate: string;
+    arrivalDate: string;
+    departureDate: string;
   }[];
   adults?: number;
   roomQuantity?: number;
@@ -143,7 +143,10 @@ export class HotelService {
     today.setHours(0, 0, 0, 0);
     
     const checkIn = new Date(checkInDate);
+    checkIn.setHours(0, 0, 0, 0);
+    
     const checkOut = new Date(checkOutDate);
+    checkOut.setHours(0, 0, 0, 0);
     
     // Log validation details
     logger.info('Validating dates', {
@@ -152,7 +155,12 @@ export class HotelService {
       today: today.toISOString()
     });
 
-    if (checkIn < today) {
+    // Compare dates without time
+    const checkInTime = checkIn.getTime();
+    const todayTime = today.getTime();
+    const checkOutTime = checkOut.getTime();
+
+    if (checkInTime < todayTime) {
       logger.warn('Check-in date is in the past', {
         checkIn: checkIn.toISOString(),
         today: today.toISOString()
@@ -160,7 +168,7 @@ export class HotelService {
       return false;
     }
 
-    if (checkOut <= checkIn) {
+    if (checkOutTime <= checkInTime) {
       logger.warn('Check-out date must be after check-in date', {
         checkIn: checkIn.toISOString(),
         checkOut: checkOut.toISOString()
@@ -173,7 +181,10 @@ export class HotelService {
 
   async searchHotels(params: HotelSearchParams): Promise<AmadeusHotelOffer[]> {
     try {
-      this.validateDates(params.checkInDate, params.checkOutDate);
+      const datesValid = this.validateDates(params.checkInDate, params.checkOutDate);
+      if (!datesValid) {
+        throw new Error('Invalid dates: Check-in date must be at least one day in the future and check-out date must be after check-in date');
+      }
 
       logger.info('Starting hotel search with params:', {
         cityCode: params.cityCode,
@@ -265,7 +276,7 @@ export class HotelService {
                 currency: offer.offers?.[0]?.price?.currency
               });
 
-              if (offer.available !== false) {
+              if (offer.offers && offer.offers.length > 0) {
                 const hotelData = hotels.data.find((h: AmadeusHotel) => h.hotelId === offer.hotel.hotelId);
                 if (hotelData) {
                   hotelOffers.push({
@@ -275,9 +286,11 @@ export class HotelService {
                       ...hotelData
                     }
                   });
+                } else {
+                  hotelOffers.push(offer);
                 }
               } else {
-                logger.info(`Hotel ${offer.hotel.hotelId} (${offer.hotel.name}) is not available for the selected dates`);
+                logger.info(`Hotel ${offer.hotel.hotelId} (${offer.hotel.name}) has no available offers for the selected dates`);
               }
             });
           }
@@ -316,30 +329,34 @@ export class HotelService {
   }
 
   async searchHotelsMultiDestination(params: MultiDestinationHotelSearchParams): Promise<HotelSearchResult[]> {
-    const results: HotelSearchResult[] = [];
     logger.info('Starting multi-destination hotel search', {
       destinations: params.destinations.map(d => ({
         cityCode: d.cityCode,
-        dates: `${d.checkInDate} to ${d.checkOutDate}`
+        dates: `${d.arrivalDate} to ${d.departureDate}`
       })),
       adults: params.adults,
       roomQuantity: params.roomQuantity
     });
 
-    for (const destination of params.destinations) {
-      try {
-        this.validateDates(destination.checkInDate, destination.checkOutDate);
+    const results: HotelSearchResult[] = [];
 
-        logger.info('Searching hotels for destination:', {
-          cityCode: destination.cityCode,
-          checkInDate: destination.checkInDate,
-          checkOutDate: destination.checkOutDate
-        });
+    for (const d of params.destinations) {
+      try {
+        // Validate dates for this destination
+        const datesValid = this.validateDates(d.arrivalDate, d.departureDate);
+        if (!datesValid) {
+          logger.error('Invalid dates for destination', {
+            cityCode: d.cityCode,
+            arrivalDate: d.arrivalDate,
+            departureDate: d.departureDate
+          });
+          continue;
+        }
 
         const hotels = await this.searchHotels({
-          cityCode: destination.cityCode,
-          checkInDate: destination.checkInDate,
-          checkOutDate: destination.checkOutDate,
+          cityCode: d.cityCode,
+          checkInDate: d.arrivalDate,
+          checkOutDate: d.departureDate,
           adults: params.adults,
           roomQuantity: params.roomQuantity,
           radius: params.radius,
@@ -348,39 +365,30 @@ export class HotelService {
           amenities: params.amenities
         });
 
-        logger.info('Search completed for destination', {
-          cityCode: destination.cityCode,
-          hotelsFound: hotels.length,
-          dateRange: `${destination.checkInDate} to ${destination.checkOutDate}`
-        });
-
-        results.push({
-          cityCode: destination.cityCode,
-          checkInDate: destination.checkInDate,
-          checkOutDate: destination.checkOutDate,
-          hotels
-        });
-
-        await new Promise(resolve => setTimeout(resolve, 100));
+        if (hotels.length > 0) {
+          results.push({
+            cityCode: d.cityCode,
+            checkInDate: d.arrivalDate,
+            checkOutDate: d.departureDate,
+            hotels
+          });
+        }
       } catch (error) {
         logger.error('Error searching hotels for destination:', {
-          cityCode: destination.cityCode,
+          cityCode: d.cityCode,
           error: error instanceof Error ? error.message : 'Unknown error',
-          stack: error instanceof Error ? error.stack : undefined,
-          response: (error as any)?.response?.body
+          stack: error instanceof Error ? error.stack : undefined
         });
-        continue;
       }
     }
 
     logger.info('Multi-destination search completed', {
       totalDestinations: params.destinations.length,
       destinationsWithHotels: results.length,
-      totalHotelsFound: results.reduce((sum, r) => sum + r.hotels.length, 0),
-      summary: results.map(r => ({
-        cityCode: r.cityCode,
-        hotelsFound: r.hotels.length,
-        dateRange: `${r.checkInDate} to ${r.checkOutDate}`
+      totalHotelsFound: results.reduce((sum, result) => sum + result.hotels.length, 0),
+      summary: results.map(result => ({
+        cityCode: result.cityCode,
+        hotelCount: result.hotels.length
       }))
     });
 

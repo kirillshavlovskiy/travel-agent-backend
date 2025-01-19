@@ -434,13 +434,13 @@ export class VacationBudgetAgent {
       for (const travelClass of cabinClasses) {
         try {
           const result = await this.flightService.searchFlights({
-            originLocationCode: request.departureLocation.code,
-            destinationLocationCode: request.destinations[0].code,
-            departureDate: request.startDate || '',
-            returnDate: request.endDate || '',
+            segments: [{
+              originLocationCode: request.departureLocation.code,
+              destinationLocationCode: request.destinations[0].code,
+              departureDate: request.startDate || ''
+            }],
             adults: request.travelers,
-            travelClass,
-            currencyCode: request.currency
+            travelClass
           });
           if (result && result.length > 0) {
             flightData.push(...result);

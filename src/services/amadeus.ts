@@ -1,7 +1,6 @@
 import Amadeus from 'amadeus';
 import { 
-  AmadeusFlightOffer, 
-  FlightReference, 
+  AmadeusFlightOffer,
   AmadeusHotelOffer, 
   TransformedHotelOffer,
   HotelSearchParams 
@@ -10,41 +9,26 @@ import { logger } from '../utils/logger.js';
 
 // Add type declaration for amadeus module
 declare module 'amadeus' {
-  interface AmadeusClient {
-    get(params: Record<string, any>): Promise<any>;
-    post(params: Record<string, any>): Promise<any>;
-  }
-
-  interface AmadeusShoppingFlightOffersSearchPricing {
-    post(params: Record<string, any>): Promise<any>;
-  }
-
-  interface AmadeusShoppingFlightOffersSearch {
-    get(params: Record<string, any>): Promise<any>;
-    pricing: AmadeusShoppingFlightOffersSearchPricing;
-  }
-
-  interface AmadeusShoppingHotelOffers {
-    get(params: Record<string, any>): Promise<any>;
-  }
-
-  interface AmadeusShopping {
-    flightOffersSearch: AmadeusShoppingFlightOffersSearch;
-    hotelOffers: AmadeusShoppingHotelOffers;
-  }
-
-  interface AmadeusOptions {
-    clientId: string;
-    clientSecret: string;
-    hostname?: string;
-  }
-
   class Amadeus {
-    constructor(options: AmadeusOptions);
-    shopping: AmadeusShopping;
+    constructor(options: { clientId: string; clientSecret: string; hostname?: string });
+    shopping: {
+      flightOffersSearch: {
+        get(params: any): Promise<any>;
+        post(body: string): Promise<any>;
+        pricing: {
+          post(params: any): Promise<any>;
+        };
+      };
+      hotelOffers: {
+        get(params: any): Promise<any>;
+      };
+    };
+    referenceData: {
+      locations: {
+        get(params: { keyword: string; subType: string; view?: string }): Promise<any>;
+      };
+    };
   }
-
-  export default Amadeus;
 }
 
 const AIRCRAFT_CODES: { [key: string]: string } = {
@@ -90,24 +74,18 @@ const AIRCRAFT_CODES: { [key: string]: string } = {
 };
 
 interface FlightSegment {
-  airline: string;
-  flightNumber: string;
-  aircraft: {
-    code: string;
-    name: string;
-  };
-  departure: {
-    airport: string;
-    terminal?: string;
-    time: string;
-  };
-  arrival: {
-    airport: string;
-    terminal?: string;
-    time: string;
-  };
-  duration: string;
-  cabinClass: string;
+  originLocationCode: string;
+  destinationLocationCode: string;
+  departureDate: string;
+}
+
+interface FlightSearchParams {
+  segments: FlightSegment[];
+  adults: number;
+  travelClass?: 'ECONOMY' | 'PREMIUM_ECONOMY' | 'BUSINESS' | 'FIRST';
+  max?: number;
+  currencyCode?: string;
+  nonStop?: boolean;
 }
 
 interface FlightDetails {
@@ -222,22 +200,32 @@ interface AuthResponse {
   expires_in: number;
 }
 
-interface FlightSearchParams {
-  originLocationCode: string;
-  destinationLocationCode: string;
-  departureDate: string;
-  returnDate?: string;
-  adults: number;
-  travelClass?: 'ECONOMY' | 'PREMIUM_ECONOMY' | 'BUSINESS' | 'FIRST';
-  max?: number;
-  currencyCode?: string;
-  nonStop?: boolean;
-}
-
 interface RetryConfig {
   maxRetries: number;
   baseDelay: number;
   maxDelay: number;
+}
+
+interface AmadeusFlightSearchResponse {
+  body: string;
+  data?: any[];
+  dictionaries?: {
+    locations?: Record<string, { cityCode: string; countryCode: string }>;
+    aircraft?: Record<string, string>;
+    currencies?: Record<string, string>;
+    carriers?: Record<string, string>;
+  };
+}
+
+interface AmadeusLocation {
+  type: string;
+  subType: string;
+  name: string;
+  iataCode: string;
+  address: {
+    cityName: string;
+    countryName: string;
+  };
 }
 
 export class AmadeusService {
@@ -325,36 +313,37 @@ export class AmadeusService {
     if (rating >= 3) return 'comfort';
     return 'budget';
   }
-
   transformHotelOffer(offer: AmadeusHotelOffer): TransformedHotelOffer {
-    const { hotel, offers } = offer;
+    const offers = offer.offers || [];
     const price = offers[0]?.price?.total ? parseFloat(offers[0].price.total) : 0;
-    const rating = hotel.rating ? parseInt(hotel.rating) : 0;
+    const rating = offer.rating ? parseInt(offer.rating) : 0;
 
     return {
-                name: hotel.name,
-      location: hotel.address?.cityName || '',
+      name: offer.name || '',
+      location: offer.cityName || '',
       price: {
         amount: price,
-        currency: 'USD'
+        currency: 'USD',
+        total: price,
+        perNight: price / (offers[0]?.roomQuantity || 1)
       },
       tier: this.determineHotelType(rating),
       type: 'hotel',
-      amenities: hotel.amenities?.join(', ') || '',
+      amenities: offer.description || '',
       rating,
       reviewScore: rating ? rating / 2 : 0,
       reviewCount: 0,
-      images: hotel.media?.map(m => m.uri) || [],
+      images: offer.media || [],
       referenceUrl: '#',
       coordinates: {
-        latitude: hotel.latitude ? parseFloat(hotel.latitude) : 0,
-        longitude: hotel.longitude ? parseFloat(hotel.longitude) : 0
+        latitude: offer.geoCode?.latitude || 0,
+        longitude: offer.geoCode?.longitude || 0
       },
-      features: hotel.amenities || [],
+      features: offer.description ? [offer.description] : [],
       policies: {
         checkIn: '',
         checkOut: '',
-        cancellation: offers[0]?.policies?.cancellation?.description?.text || ''
+        cancellation: offers[0]?.policies?.cancellation?.description || ''
       }
     };
   }
@@ -417,45 +406,127 @@ export class AmadeusService {
     return results;
   }
 
-  async searchFlights(params: FlightSearchParams): Promise<AmadeusFlightOffer[]> {
+  async searchFlights(params: {
+    segments: Array<{
+      originLocationCode: string;
+      destinationLocationCode: string;
+      departureDate: string;
+    }>;
+    travelClass: string;
+    adults: number;
+    max?: number;
+  }) {
     try {
-      logger.info('Starting flight search with params', {
-        ...params,
-        clientId: this.amadeus ? 'set' : 'not set'
+      logger.info('Searching flights with params:', {
+        segments: params.segments,
+        travelClass: params.travelClass,
+        adults: params.adults
       });
 
+      if (!params.segments || !Array.isArray(params.segments) || params.segments.length === 0) {
+        throw new Error('At least one flight segment is required');
+      }
+
+      // Validate all segments
+      params.segments.forEach((segment, index) => {
+        if (!segment.originLocationCode || !segment.destinationLocationCode || !segment.departureDate) {
+          throw new Error(`Invalid segment data at index ${index}: origin, destination, and departure date are required`);
+        }
+      });
+
+      // Format the search parameters according to Amadeus API requirements
       const searchParams = {
-        originLocationCode: this.getCityCode(params.originLocationCode),
-        destinationLocationCode: this.getCityCode(params.destinationLocationCode),
-        departureDate: params.departureDate,
-        returnDate: params.returnDate,
-        adults: params.adults.toString(), // Convert to string as required by API
-        travelClass: params.travelClass || 'ECONOMY',
-        max: (params.max || 25).toString(), // Convert to string
-        currencyCode: params.currencyCode || 'USD',
-        nonStop: params.nonStop || false
+        originDestinations: params.segments.map((segment, index) => ({
+          id: String(index + 1),
+          originLocationCode: segment.originLocationCode,
+          destinationLocationCode: segment.destinationLocationCode,
+          departureDateTimeRange: {
+            date: segment.departureDate
+          }
+        })),
+        travelers: Array.from({ length: params.adults }, (_, i) => ({
+          id: String(i + 1),
+          travelerType: 'ADULT'
+        })),
+        sources: ['GDS'],
+        searchCriteria: {
+          maxFlightOffers: params.max || 100,
+          flightFilters: {
+            cabinRestrictions: [{
+              cabin: params.travelClass,
+              coverage: 'MOST_SEGMENTS',
+              originDestinationIds: params.segments.map((_, i) => String(i + 1))
+            }]
+          }
+        }
       };
 
-      const response = await this.amadeus.shopping.flightOffersSearch.get(searchParams);
-      const flightOffers = JSON.parse(response.body);
+      logger.info('Making Amadeus API call with formatted params:', searchParams);
 
-      // Store dictionaries for later use
-      this.lastFlightSearchDictionaries = flightOffers.dictionaries;
+      try {
+        const response = await this.amadeus.shopping.flightOffersSearch.post(
+          JSON.stringify(searchParams)
+        );
+        
+        if (!response || !response.body) {
+          logger.warn('Empty response from Amadeus API');
+          return [];
+        }
 
-      logger.info('Flight search successful', {
-        flightCount: flightOffers.data?.length || 0,
-        dictionaries: flightOffers.dictionaries
-      });
+        const results = typeof response.body === 'string' ? JSON.parse(response.body) : response.body;
 
-      return flightOffers.data || [];
+        logger.info('Flight search successful', {
+          count: results.data?.length || 0,
+          dictionaries: results.dictionaries,
+          firstResult: results.data?.[0]
+        });
+
+        // Store dictionaries for later use
+        this.lastFlightSearchDictionaries = results.dictionaries || null;
+
+        return results.data || [];
+      } catch (apiError: any) {
+        // Log detailed API error
+        logger.error('Amadeus API error:', {
+          error: {
+            name: apiError.name,
+            message: apiError.message,
+            code: apiError.code,
+            status: apiError.response?.statusCode,
+            statusText: apiError.response?.statusText,
+            data: apiError.response?.result?.errors || apiError.response?.data,
+            request: {
+              method: apiError.response?.request?.method,
+              path: apiError.response?.request?.path,
+              params: searchParams
+            }
+          }
+        });
+        return [];
+      }
     } catch (error) {
-      logger.error('Failed to search for flights', {
-        error: error instanceof Error ? error.message : 'Unknown error',
-        stack: error instanceof Error ? error.stack : undefined,
+      logger.error('Failed to search flights', {
+        error: error instanceof Error ? {
+          name: error.name,
+          message: error.message,
+          stack: error.stack,
+          code: (error as any).code,
+          response: {
+            status: (error as any)?.response?.statusCode,
+            statusText: (error as any)?.response?.statusText,
+            errors: (error as any)?.response?.result?.errors,
+            data: (error as any)?.response?.data,
+            request: {
+              method: (error as any)?.response?.request?.method,
+              path: (error as any)?.response?.request?.path
+            }
+          }
+        } : 'Unknown error',
         params,
-        response: (error as any)?.response?.data || 'No response data'
+        amadeusInitialized: !!this.amadeus,
+        hasShoppingAPI: !!(this.amadeus as any)?.shopping?.flightOffersSearch?.post
       });
-      throw error;
+      return []; // Return empty array instead of throwing
     }
   }
 
@@ -589,6 +660,33 @@ export class AmadeusService {
       logger.error('Error generating booking URL:', { error });
       // Return a fallback URL
       return 'https://www.google.com/travel/flights';
+    }
+  }
+
+  async searchLocations(keyword: string): Promise<AmadeusLocation[]> {
+    try {
+      logger.info('Searching locations with keyword', { keyword });
+
+      const response = await this.amadeus.referenceData.locations.get({
+        keyword,
+        subType: 'CITY,AIRPORT',
+        view: 'LIGHT'
+      });
+
+      const locations = JSON.parse(response.body);
+      
+      logger.info('Location search successful', {
+        count: locations.data?.length || 0
+      });
+
+      return locations.data || [];
+    } catch (error) {
+      logger.error('Failed to search locations', {
+        error: error instanceof Error ? error.message : 'Unknown error',
+        stack: error instanceof Error ? error.stack : undefined,
+        keyword
+      });
+      throw error;
     }
   }
 } 

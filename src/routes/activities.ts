@@ -61,74 +61,31 @@ Format as a JSON object with an activities array. Each activity should include a
     const content = response.choices[0].message.content;
     logger.debug('Raw content from Perplexity API', { content });
     
-    // Log the content before cleaning
-    logger.debug('Content before cleaning:', {
-      firstDayMatch: content.match(/\"day\"\s*:\s*(\d+)/),
-      firstDayNumberMatch: content.match(/\"day_number\"\s*:\s*(\d+)/),
-      firstDayNumberAltMatch: content.match(/\"dayNumber\"\s*:\s*(\d+)/)
-    });
-    
-    // Clean up the content
-    let cleanedContent = content
-      .replace(/```json\n|\n```/g, '')  // Remove markdown code blocks
-      .replace(/(\d+)\s*\([^)]*\)/g, '$1')  // Replace "0 (free entry, but...)" with just the number
-      
-      // Fix unquoted day numbers
-      .replace(/([{,]\s*)(day|day_number|dayNumber)\s*:\s*(\d+)/g, '$1"$2":$3')  // Quote day field names
-      
-      .replace(/\$\d+/g, (match: string) => match.substring(1))  // Remove $ signs from numbers
-      .replace(/https:\/\/[^"\s]+/g, (url: string) => {  // Clean up long URLs
-        // If URL is too long or contains invalid characters or repeated patterns, use a placeholder
-        if (url.length > 100 || /[^\x20-\x7E]/.test(url) || /(\/[^\/]+)\1{10,}/.test(url)) {
-          return "https://placeholder.com/image.jpg";
-        }
-        return url;
-      })
-      .replace(/,(\s*[\]}])/g, '$1')  // Remove trailing commas
-      .trim();
-
-    // Log any unquoted day numbers that might still exist
-    logger.debug('Checking for unquoted day numbers:', {
-      dayMatches: cleanedContent.match(/[{,]\s*(day|day_number|dayNumber)\s*:\s*\d+/g),
-      quotedDayMatches: cleanedContent.match(/[{,]\s*"(day|day_number|dayNumber)"\s*:\s*\d+/g)
-    });
-
-    // Log the content after first cleaning steps
-    logger.debug('Content after initial cleaning:', {
-      firstDayMatch: cleanedContent.match(/\"day\"\s*:\s*(\d+)/),
-      firstDayNumberMatch: cleanedContent.match(/\"day_number\"\s*:\s*(\d+)/),
-      firstDayNumberAltMatch: cleanedContent.match(/\"dayNumber\"\s*:\s*(\d+)/)
-    });
-
-    cleanedContent = cleanedContent
-      .replace(/\$\d+/g, (match: string) => match.substring(1))  // Remove $ signs from numbers
-      .replace(/https:\/\/[^"\s]+/g, (url: string) => {  // Clean up long URLs
-        // If URL is too long or contains invalid characters or repeated patterns, use a placeholder
-        if (url.length > 100 || /[^\x20-\x7E]/.test(url) || /(\/[^\/]+)\1{10,}/.test(url)) {
-          return "https://placeholder.com/image.jpg";
-        }
-        return url;
-      })
-      .replace(/,(\s*[\]}])/g, '$1')  // Remove trailing commas
-      .trim();
-      
-    // Log the content after all cleaning steps
-    logger.debug('Content after all cleaning:', {
-      firstDayMatch: cleanedContent.match(/\"day\"\s*:\s*(\d+)/),
-      firstDayNumberMatch: cleanedContent.match(/\"day_number\"\s*:\s*(\d+)/),
-      firstDayNumberAltMatch: cleanedContent.match(/\"dayNumber\"\s*:\s*(\d+)/)
-    });
-
     // Extract just the JSON object
-    const jsonMatch = cleanedContent.match(/(\{[\s\S]*\})/);
+    const jsonMatch = content.match(/(\{[\s\S]*\})/);
     if (!jsonMatch) {
-      logger.error('Failed to extract JSON from response', { cleanedContent });
+      logger.error('Failed to extract JSON from response', { content });
       throw new Error('No valid JSON object found in response');
     }
     
-    const extractedJson = jsonMatch[1];
+    let extractedJson = jsonMatch[1];
     logger.debug('Extracted JSON', { extractedJson });
     
+    // Clean the JSON more carefully
+    extractedJson = extractedJson
+      .replace(/([{,])\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*:/g, '$1"$2":') // Quote unquoted property names
+      .replace(/:\s*'([^']*)'/g, ':"$1"') // Convert single quotes to double quotes
+      .replace(/,\s*([}\]])/g, '$1') // Remove trailing commas
+      .replace(/https?:\/\/[^"\s,}]+/g, "https://placeholder.com/image.jpg") // Replace long URLs with placeholder
+      .replace(/[^\x20-\x7E]/g, '') // Remove non-printable characters
+      .replace(/\}\s*,\s*\}/g, '}}') // Fix object separators
+      .replace(/\]\s*,\s*\]/g, ']]') // Fix array separators
+      .replace(/\}\s*,\s*\]/g, '}]') // Fix mixed separators
+      .replace(/,+(\s*[}\]])/g, '$1') // Remove multiple trailing commas
+      .replace(/\[\s*,/g, '[') // Remove leading commas in arrays
+      .replace(/,\s*\]/g, ']') // Remove trailing commas in arrays
+      .trim();
+
     // Try to parse the JSON
     let parsedData;
     try {
@@ -140,28 +97,10 @@ Format as a JSON object with an activities array. Each activity should include a
         extractedJson
       });
       
-      // Try to salvage the activities array with more aggressive cleaning
+      // Try to salvage the activities array
       try {
-        // Clean the JSON more carefully to preserve day numbers
-        const cleanedJson = extractedJson
-          .replace(/https:\/\/[^"\s]+/g, "https://placeholder.com/image.jpg")  // Replace all URLs with placeholder
-          .replace(/[^\x20-\x7E]/g, '')  // Remove non-printable characters
-          .replace(/,(\s*[}\]])/g, '$1')  // Remove trailing commas
-          .replace(/\}\s*,\s*\}/g, '}}')  // Fix object separators
-          .replace(/\]\s*,\s*\]/g, ']]')  // Fix array separators
-          .replace(/\}\s*,\s*\]/g, '}]')  // Fix mixed separators
-          .replace(/([{,]\s*)(?!")(day(?:_number|Number)?|name|description|duration|price|category|location|address|key_highlights|keyHighlights|opening_hours|openingHours|rating|number_of_reviews|numReviews|preferred_time_of_day|preferredTimeOfDay|reference_url|referenceUrl|images)\s*:/g, '$1"$2":')  // Quote only specific property names
-          .replace(/:\s*'([^']*?)'/g, ':"$1"')  // Convert single quotes to double quotes
-          .replace(/,+(\s*[}\]])/g, '$1')  // Remove multiple trailing commas
-          .replace(/\[\s*,/g, '[')  // Remove leading commas in arrays
-          .replace(/,\s*\]/g, ']')  // Remove trailing commas in arrays
-          .trim();
-
-        logger.debug('Cleaned JSON before parsing:', { 
-          firstActivity: cleanedJson.substring(0, cleanedJson.indexOf('},') + 2)
-        });
-
-        const activitiesMatch = cleanedJson.match(/"activities"\s*:\s*\[([\s\S]*?)\}\s*(?:\]|}|$)/);
+        // Extract just the activities array
+        const activitiesMatch = extractedJson.match(/"activities"\s*:\s*\[([\s\S]*?)\}\s*(?:\]|}|$)/);
         if (activitiesMatch) {
           const activitiesJson = `{"activities":[${activitiesMatch[1]}}]}`;
           logger.debug('Attempting to salvage activities', { activitiesJson });
