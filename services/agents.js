@@ -130,7 +130,7 @@ class VacationBudgetAgent {
   }
 
   // Normalize tier data
-  normalizeTier(tier, category) {
+  async normalizeTier(tier, category) {
     if (!tier || typeof tier !== 'object') {
       console.log('[Perplexity] Invalid tier data:', tier);
       return {
@@ -142,6 +142,19 @@ class VacationBudgetAgent {
         references: []
       };
     }
+
+    const { isBusinessProposable } = require('./ratings/fetchBusinessRatings');
+    
+    // Filter references to only include businesses with acceptable ratings
+    const filteredReferences = [];
+    for (const ref of references) {
+      const businessName = ref.provider || ref.airline || ref.name;
+      const isAcceptable = await isBusinessProposable(businessName, category);
+      if (isAcceptable) {
+        filteredReferences.push(ref);
+      }
+    }
+
 
     console.log(`[Perplexity] Normalizing ${category} tier:`, JSON.stringify(tier, null, 2));
 
@@ -206,7 +219,7 @@ class VacationBudgetAgent {
       average,
       confidence,
       source: tier.Source || tier.source || 'default',
-      references
+      references: filteredReferences
     };
   }
 
