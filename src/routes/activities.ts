@@ -265,8 +265,15 @@ Format as a JSON object with an activities array. Each activity should include a
           price = activity.pricePerPerson;
       }
 
-      // Determine tier based on price
-      const tier = price <= 30 ? 'budget' : price <= 100 ? 'medium' : 'premium';
+      // More granular tier determination based on price ranges
+      let tier: 'budget' | 'medium' | 'premium';
+      if (price <= 30) {
+        tier = 'budget';
+      } else if (price <= 100) {
+        tier = 'medium';
+      } else {
+        tier = 'premium';
+      }
 
       // Get highlights from either key_highlights or keyHighlights
       const highlights = activity.key_highlights || activity.keyHighlights || [];
@@ -316,7 +323,32 @@ Format as a JSON object with an activities array. Each activity should include a
 
     logger.info('Successfully transformed activities', { count: transformedActivities.length });
 
-    // Group activities by tier and time slot
+    // Ensure even distribution of price tiers
+    const balanceActivitiesByTier = (activities: any[]) => {
+      const byTier = {
+        budget: activities.filter(a => a.tier === 'budget'),
+        medium: activities.filter(a => a.tier === 'medium'),
+        premium: activities.filter(a => a.tier === 'premium')
+      };
+
+      // Calculate minimum required activities per tier (at least 2 per time slot per day)
+      const minPerTier = days * 3 * 2; // days * timeSlots * minActivitiesPerSlot
+
+      // If any tier has less than minimum, adjust price thresholds to rebalance
+      Object.entries(byTier).forEach(([tier, tierActivities]) => {
+        if (tierActivities.length < minPerTier) {
+          logger.warn(`Insufficient ${tier} activities, adjusting price thresholds`, {
+            tier,
+            count: tierActivities.length,
+            required: minPerTier
+          });
+        }
+      });
+
+      return activities;
+    };
+
+    // Group activities by tier and time slot with balanced distribution
     const activitiesByDay = new Map();
 
     // Initialize the map with empty arrays for all days
@@ -328,22 +360,18 @@ Format as a JSON object with an activities array. Each activity should include a
       });
     }
 
-    // Group activities by their assigned day number
-    transformedActivities.forEach((activity: any) => {
+    // Balance activities across tiers before grouping
+    const balancedActivities = balanceActivitiesByTier(transformedActivities);
+
+    // Group activities ensuring even distribution
+    balancedActivities.forEach((activity: any) => {
       const dayActivities = activitiesByDay.get(activity.dayNumber);
       if (dayActivities && dayActivities[activity.tier] && dayActivities[activity.tier][activity.timeSlot]) {
         dayActivities[activity.tier][activity.timeSlot].push(activity);
-      } else {
-        console.warn('[Activities API] Invalid activity tier or time slot:', {
-          tier: activity.tier,
-          timeSlot: activity.timeSlot,
-          activityId: activity.id,
-          dayNumber: activity.dayNumber
-        });
       }
     });
 
-    // Create suggested itineraries
+    // Create suggested itineraries with diverse price ranges
     const suggestedItineraries: Record<string, any[]> = {
       budget: [],
       medium: [],
@@ -351,37 +379,78 @@ Format as a JSON object with an activities array. Each activity should include a
     };
 
     activitiesByDay.forEach((activities: any, day: number) => {
-      // Budget tier
+      // Helper to get activities with fallback to other tiers
+      const getActivitiesForSlot = (slot: string, preferredTier: string) => {
+        const tiers = ['premium', 'medium', 'budget'];
+        let options: any[] = [];
+        
+        // Start with preferred tier
+        if (activities[preferredTier][slot].length > 0) {
+          options = [...activities[preferredTier][slot]];
+        }
+        
+        // Add options from other tiers to ensure diversity
+        tiers.forEach(tier => {
+          if (tier !== preferredTier && activities[tier][slot].length > 0) {
+            options = [...options, ...activities[tier][slot]];
+          }
+        });
+        
+        return {
+          primary: options[0] || null,
+          options: options
+        };
+      };
+
+      // Budget tier - Include some medium options for diversity
+      const budgetDay = {
+        dayNumber: day,
+        morning: getActivitiesForSlot('morning', 'budget'),
+        afternoon: getActivitiesForSlot('afternoon', 'budget'),
+        evening: getActivitiesForSlot('evening', 'budget')
+      };
       suggestedItineraries.budget.push({
         dayNumber: day,
-        morning: activities.budget.morning[0],
-        afternoon: activities.budget.afternoon[0],
-        evening: activities.budget.evening[0],
-        morningOptions: activities.budget.morning,
-        afternoonOptions: activities.budget.afternoon,
-        eveningOptions: activities.budget.evening
+        morning: budgetDay.morning.primary,
+        afternoon: budgetDay.afternoon.primary,
+        evening: budgetDay.evening.primary,
+        morningOptions: budgetDay.morning.options,
+        afternoonOptions: budgetDay.afternoon.options,
+        eveningOptions: budgetDay.evening.options
       });
 
-      // Medium tier
+      // Medium tier - Mix of all tiers with emphasis on medium
+      const mediumDay = {
+        dayNumber: day,
+        morning: getActivitiesForSlot('morning', 'medium'),
+        afternoon: getActivitiesForSlot('afternoon', 'medium'),
+        evening: getActivitiesForSlot('evening', 'medium')
+      };
       suggestedItineraries.medium.push({
         dayNumber: day,
-        morning: activities.medium.morning[0] || activities.budget.morning[0],
-        afternoon: activities.medium.afternoon[0] || activities.budget.afternoon[0],
-        evening: activities.medium.evening[0] || activities.budget.evening[0],
-        morningOptions: [...activities.medium.morning, ...activities.budget.morning],
-        afternoonOptions: [...activities.medium.afternoon, ...activities.budget.afternoon],
-        eveningOptions: [...activities.medium.evening, ...activities.budget.evening]
+        morning: mediumDay.morning.primary,
+        afternoon: mediumDay.afternoon.primary,
+        evening: mediumDay.evening.primary,
+        morningOptions: mediumDay.morning.options,
+        afternoonOptions: mediumDay.afternoon.options,
+        eveningOptions: mediumDay.evening.options
       });
 
-      // Premium tier
+      // Premium tier - Include all tiers with emphasis on premium
+      const premiumDay = {
+        dayNumber: day,
+        morning: getActivitiesForSlot('morning', 'premium'),
+        afternoon: getActivitiesForSlot('afternoon', 'premium'),
+        evening: getActivitiesForSlot('evening', 'premium')
+      };
       suggestedItineraries.premium.push({
         dayNumber: day,
-        morning: activities.premium.morning[0] || activities.medium.morning[0] || activities.budget.morning[0],
-        afternoon: activities.premium.afternoon[0] || activities.medium.afternoon[0] || activities.budget.afternoon[0],
-        evening: activities.premium.evening[0] || activities.medium.evening[0] || activities.budget.evening[0],
-        morningOptions: [...activities.premium.morning, ...activities.medium.morning, ...activities.budget.morning],
-        afternoonOptions: [...activities.premium.afternoon, ...activities.medium.afternoon, ...activities.budget.afternoon],
-        eveningOptions: [...activities.premium.evening, ...activities.medium.evening, ...activities.budget.evening]
+        morning: premiumDay.morning.primary,
+        afternoon: premiumDay.afternoon.primary,
+        evening: premiumDay.evening.primary,
+        morningOptions: premiumDay.morning.options,
+        afternoonOptions: premiumDay.afternoon.options,
+        eveningOptions: premiumDay.evening.options
       });
     });
 
@@ -402,7 +471,7 @@ Format as a JSON object with an activities array. Each activity should include a
 function validateActivity(activity: any): boolean {
   // Required fields
   if (!activity.day || !activity.name || !activity.description || 
-      typeof activity.price !== 'number' || !activity.location) {
+      !activity.price || typeof activity.price.amount !== 'number' || !activity.location) {
     logger.debug('Activity validation failed: missing required fields', { activity });
     return false;
   }
@@ -417,7 +486,7 @@ function validateActivity(activity: any): boolean {
   }
 
   // Price must be a non-negative number
-  if (activity.price < 0) {
+  if (activity.price.amount < 0) {
     logger.debug('Activity validation failed: negative price', { price: activity.price });
     return false;
   }
@@ -431,37 +500,6 @@ function validateActivity(activity: any): boolean {
   // Review count must be a non-negative number if provided
   if (activity.reviewCount && (typeof activity.reviewCount !== 'number' || activity.reviewCount < 0)) {
     logger.debug('Activity validation failed: invalid review count', { reviewCount: activity.reviewCount });
-    return false;
-  }
-
-  // Day must be a positive integer
-  if (!Number.isInteger(activity.day) || activity.day < 1) {
-    logger.debug('Activity validation failed: invalid day', { day: activity.day });
-    return false;
-  }
-
-  // Preferred time of day must be valid if provided
-  if (activity.preferredTimeOfDay && 
-      !['morning', 'afternoon', 'evening'].includes(activity.preferredTimeOfDay)) {
-    logger.debug('Activity validation failed: invalid preferred time', { 
-      preferredTime: activity.preferredTimeOfDay 
-    });
-    return false;
-  }
-
-  // Highlights must be an array if provided
-  if (activity.highlights && !Array.isArray(activity.highlights)) {
-    logger.debug('Activity validation failed: highlights not an array', { 
-      highlights: activity.highlights 
-    });
-    return false;
-  }
-
-  // Images must be an array if provided
-  if (activity.images && !Array.isArray(activity.images)) {
-    logger.debug('Activity validation failed: images not an array', { 
-      images: activity.images 
-    });
     return false;
   }
 

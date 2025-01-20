@@ -1,8 +1,9 @@
-import express from 'express';
+import express, { Request, Response } from 'express';
 import { z } from 'zod';
 import { validateRequest } from '../middleware/validateRequest.js';
 import { HotelService } from '../services/hotels.js';
 import { logger } from '../utils/logger.js';
+import axios from 'axios';
 
 const router = express.Router();
 const hotelService = new HotelService();
@@ -37,6 +38,11 @@ interface Destination {
   cityCode: string;
   arrivalDate: string;
   departureDate: string;
+}
+
+interface HotelImagesRequest {
+  query: string;
+  limit?: number;
 }
 
 router.post('/search', async (req: Request, res: Response) => {
@@ -97,6 +103,39 @@ router.post('/search', async (req: Request, res: Response) => {
       success: false,
       error: 'Failed to search hotels'
     });
+  }
+});
+
+router.post('/images', async (req: Request<{}, {}, HotelImagesRequest>, res: Response) => {
+  try {
+    const { query, limit = 5 } = req.body;
+
+    if (!query) {
+      return res.status(400).json({ error: 'Query is required' });
+    }
+
+    if (!process.env.GOOGLE_SEARCH_API_KEY || !process.env.GOOGLE_SEARCH_ENGINE_ID) {
+      console.warn('Google Search API credentials not configured');
+      return res.status(200).json({ items: [] });
+    }
+
+    const response = await axios.get('https://www.googleapis.com/customsearch/v1', {
+      params: {
+        key: process.env.GOOGLE_SEARCH_API_KEY,
+        cx: process.env.GOOGLE_SEARCH_ENGINE_ID,
+        q: query,
+        searchType: 'image',
+        num: limit,
+        imgType: 'photo',
+        imgSize: 'large',
+        safe: 'active'
+      }
+    });
+
+    res.json(response.data);
+  } catch (error) {
+    console.error('Error fetching hotel images:', error);
+    res.status(500).json({ error: 'Failed to fetch hotel images' });
   }
 });
 

@@ -1,5 +1,5 @@
 import Amadeus from 'amadeus';
-import { logger } from '../utils/logger';
+import { logger, logHotelProcessing } from '../utils/logger';
 
 export interface HotelSearchParams {
   cityCode: string;
@@ -181,41 +181,29 @@ export class HotelService {
 
   async searchHotels(params: HotelSearchParams): Promise<AmadeusHotelOffer[]> {
     try {
-      const datesValid = this.validateDates(params.checkInDate, params.checkOutDate);
-      if (!datesValid) {
-        throw new Error('Invalid dates: Check-in date must be at least one day in the future and check-out date must be after check-in date');
-      }
+      logger.info('Starting hotel search', { params });
 
-      logger.info('Starting hotel search with params:', {
+      // First, get hotels in the city
+      const hotelsResponse = await this.amadeus.client.get('/v1/reference-data/locations/hotels/by-city', {
         cityCode: params.cityCode,
-        checkInDate: params.checkInDate,
-        checkOutDate: params.checkOutDate,
-        adults: params.adults,
-        roomQuantity: params.roomQuantity,
         radius: params.radius || 50,
-        currency: params.currency
+        radiusUnit: 'KM',
+        hotelSource: 'ALL'
       });
 
-      const hotelsResponse = await this.amadeus.client.get(
-        '/v1/reference-data/locations/hotels/by-city',
-        {
-          cityCode: params.cityCode,
-          radius: params.radius || 50,
-          radiusUnit: 'KM',
-          hotelSource: 'ALL'
-        }
-      );
-
       const hotels = JSON.parse(hotelsResponse.body);
+
+      logHotelProcessing.searchSummary({
+        totalHotelsFound: hotels.data?.length || 0,
+        availableHotels: 0, // Will be updated after getting offers
+        destinations: [params.cityCode],
+        dateRange: `${params.checkInDate} to ${params.checkOutDate}`
+      });
+
       if (!hotels.data || hotels.data.length === 0) {
         logger.info('No hotels found in city', { cityCode: params.cityCode });
         return [];
       }
-
-      logger.info(`Found ${hotels.data.length} hotels in ${params.cityCode}`, {
-        firstHotel: hotels.data[0]?.name,
-        lastHotel: hotels.data[hotels.data.length - 1]?.name
-      });
 
       const hotelOffers: AmadeusHotelOffer[] = [];
       const batchSize = 25;
@@ -233,10 +221,7 @@ export class HotelService {
         const hotelIds = batch.map((hotel: AmadeusHotel) => hotel.hotelId);
         const batchNumber = Math.floor(i / batchSize) + 1;
 
-        logger.info(`Processing batch ${batchNumber}/${totalBatches}`, {
-          batchSize: batch.length,
-          hotelIds: hotelIds.join(',')
-        });
+        logHotelProcessing.batchStart(batchNumber, hotelIds);
 
         try {
           const offerResponse = await this.amadeus.client.get('/v3/shopping/hotel-offers', {
@@ -261,22 +246,14 @@ export class HotelService {
           }
 
           if (offers.data) {
-            logger.info(`Processing offers from batch ${batchNumber}`, {
-              totalOffers: offers.data.length,
-              batchSize: batch.length
-            });
-
             offers.data.forEach((offer: AmadeusHotelOffer) => {
-              logger.info('Processing hotel offer:', {
-                hotelId: offer.hotel.hotelId,
-                hotelName: offer.hotel.name,
-                available: offer.available,
-                hasOffers: offer.offers?.length > 0,
-                lowestPrice: offer.offers?.[0]?.price?.total,
-                currency: offer.offers?.[0]?.price?.currency
-              });
+              if (offer.available && offer.offers?.length > 0) {
+                logHotelProcessing.hotelFound({
+                  id: offer.hotel.hotelId,
+                  name: offer.hotel.name,
+                  offers: offer.offers
+                });
 
-              if (offer.offers && offer.offers.length > 0) {
                 const hotelData = hotels.data.find((h: AmadeusHotel) => h.hotelId === offer.hotel.hotelId);
                 if (hotelData) {
                   hotelOffers.push({
@@ -289,12 +266,11 @@ export class HotelService {
                 } else {
                   hotelOffers.push(offer);
                 }
-              } else {
-                logger.info(`Hotel ${offer.hotel.hotelId} (${offer.hotel.name}) has no available offers for the selected dates`);
               }
             });
           }
         } catch (error) {
+          logHotelProcessing.batchError(batchNumber, error);
           logger.error('Error getting hotel offers for batch:', {
             error: error instanceof Error ? error.message : 'Unknown error',
             stack: error instanceof Error ? error.stack : undefined,
@@ -308,10 +284,11 @@ export class HotelService {
         await new Promise(resolve => setTimeout(resolve, 100));
       }
 
-      logger.info('Hotel search completed', {
-        cityCode: params.cityCode,
+      // Update search summary with available hotels count
+      logHotelProcessing.searchSummary({
         totalHotelsFound: hotels.data.length,
         availableHotels: hotelOffers.length,
+        destinations: [params.cityCode],
         dateRange: `${params.checkInDate} to ${params.checkOutDate}`
       });
 
