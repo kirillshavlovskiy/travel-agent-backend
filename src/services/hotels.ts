@@ -372,55 +372,147 @@ export class HotelService {
     return results;
   }
 
-  async confirmHotelOffer(offerId: string) {
+  async confirmHotelOffer(hotelId: string, offerId: string, params: {
+    checkInDate: string;
+    checkOutDate: string;
+    adults: number;
+    roomQuantity: number;
+  }) {
     try {
-      logger.info('Confirming hotel offer', { offerId });
+      logger.info('Confirming hotel offer:', {
+        hotelId,
+        offerId,
+        params
+      });
 
-      const response = await this.amadeus.client.get(`/v3/shopping/hotel-offers/${offerId}`);
-
-      logger.info('Offer confirmation response:', {
-        status: response?.statusCode,
-        body: response?.body
+      // First, get fresh availability for the hotel
+      const response = await this.amadeus.client.get('/v3/shopping/hotel-offers/by-hotel', {
+        hotelId,
+        checkInDate: params.checkInDate,
+        checkOutDate: params.checkOutDate,
+        adults: params.adults.toString(),
+        roomQuantity: params.roomQuantity.toString()
       });
 
       const result = JSON.parse(response.body);
-      return result.data || null;
+
+      if (!result.data?.offers) {
+        logger.error('No offers available for hotel:', {
+          hotelId,
+          response: result
+        });
+        throw new Error('No offers available for this hotel');
+      }
+
+      // Find the matching offer
+      const matchingOffer = result.data.offers.find((offer: any) => offer.id === offerId);
+      if (!matchingOffer) {
+        logger.error('Offer not found in fresh availability:', {
+          hotelId,
+          offerId,
+          availableOffers: result.data.offers.map((o: any) => o.id)
+        });
+        throw new Error('This offer is no longer available');
+      }
+
+      // Now get the specific offer details
+      const offerResponse = await this.amadeus.client.get(`/v3/shopping/hotel-offers/${offerId}`);
+      const offerResult = JSON.parse(offerResponse.body);
+
+      logger.info('Offer confirmation successful:', {
+        hotelId,
+        offerId,
+        offer: offerResult.data
+      });
+
+      return {
+        success: true,
+        data: offerResult.data
+      };
 
     } catch (error) {
       logger.error('Error confirming hotel offer:', {
         error: error instanceof Error ? error.message : 'Unknown error',
         stack: error instanceof Error ? error.stack : undefined,
-        response: (error as any)?.response?.data
+        hotelId,
+        offerId
       });
       throw error;
     }
   }
 
-  async bookHotel(offerId: string, guests: any[], payments: any[]) {
+  async bookHotel(offerId: string, guestInfo: {
+    firstName: string;
+    lastName: string;
+    email: string;
+    phone: string;
+    payment: {
+      cardNumber: string;
+      expiryDate: string;
+      vendorCode: string;
+    }
+  }) {
     try {
-      logger.info('Booking hotel', { offerId, guests, payments });
+      logger.info('Creating hotel booking:', { offerId });
 
-      const response = await this.amadeus.client.post('/v1/booking/hotel-bookings', {
+      const response = await this.amadeus.client.post('/v2/booking/hotel-orders', {
         data: {
-          offerId,
-          guests,
-          payments
+          type: 'hotel-order',
+          guests: [
+            {
+              tid: 1,
+              title: 'MR',
+              firstName: guestInfo.firstName,
+              lastName: guestInfo.lastName,
+              phone: guestInfo.phone,
+              email: guestInfo.email
+            }
+          ],
+          travelAgent: {
+            contact: {
+              email: guestInfo.email
+            }
+          },
+          roomAssociations: [
+            {
+              guestReferences: [
+                {
+                  guestReference: '1'
+                }
+              ],
+              hotelOfferId: offerId
+            }
+          ],
+          payment: {
+            method: 'CREDIT_CARD',
+            paymentCard: {
+              paymentCardInfo: {
+                vendorCode: guestInfo.payment.vendorCode,
+                cardNumber: guestInfo.payment.cardNumber,
+                expiryDate: guestInfo.payment.expiryDate
+              }
+            }
+          }
         }
       });
 
-      logger.info('Booking response:', {
-        status: response?.statusCode,
-        body: response?.body
+      const result = JSON.parse(response.body);
+      
+      logger.info('Hotel booking successful:', {
+        offerId,
+        bookingId: result.data.id
       });
 
-      const result = JSON.parse(response.body);
-      return result.data || null;
+      return {
+        success: true,
+        data: result.data
+      };
 
     } catch (error) {
       logger.error('Error booking hotel:', {
         error: error instanceof Error ? error.message : 'Unknown error',
         stack: error instanceof Error ? error.stack : undefined,
-        response: (error as any)?.response?.data
+        offerId
       });
       throw error;
     }

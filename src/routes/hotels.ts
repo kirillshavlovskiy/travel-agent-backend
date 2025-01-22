@@ -139,4 +139,59 @@ router.post('/images', async (req: Request<{}, {}, HotelImagesRequest>, res: Res
   }
 });
 
+// Confirm hotel offer availability
+router.post('/confirm-offer', async (req, res) => {
+  try {
+    const { data } = req.body;
+    
+    if (!data || !data.roomAssociations?.[0]?.hotelOfferId) {
+      logger.warn('Missing required parameters for offer confirmation:', req.body);
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required parameters'
+      });
+    }
+
+    const offerId = data.roomAssociations[0].hotelOfferId;
+    const hotelId = offerId.split('_')[0]; // Assuming hotelId is part of the offerId
+
+    logger.info('Creating hotel booking:', {
+      hotelId,
+      offerId,
+      guestInfo: data.guests[0]
+    });
+
+    const result = await hotelService.bookHotel(offerId, {
+      firstName: data.guests[0].firstName,
+      lastName: data.guests[0].lastName,
+      email: data.guests[0].email,
+      phone: data.guests[0].phone,
+      payment: {
+        vendorCode: data.payment.paymentCard.paymentCardInfo.vendorCode,
+        cardNumber: data.payment.paymentCard.paymentCardInfo.cardNumber,
+        expiryDate: data.payment.paymentCard.paymentCardInfo.expiryDate
+      }
+    });
+
+    logger.info('Hotel booking successful:', {
+      hotelId,
+      offerId,
+      bookingId: result.data.id
+    });
+
+    return res.json(result);
+  } catch (error) {
+    logger.error('Error confirming hotel offer:', {
+      error: error instanceof Error ? error.message : 'Unknown error',
+      stack: error instanceof Error ? error.stack : undefined,
+      request: req.body
+    });
+
+    return res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : 'Failed to confirm hotel offer'
+    });
+  }
+});
+
 export default router; 
