@@ -187,7 +187,6 @@ export class AmadeusService {
               priceRange: '100-5000',
               currency: params.currency,
               paymentPolicy: 'NONE',
-              bestRateOnly: true,
               view: 'FULL'
             }
           );

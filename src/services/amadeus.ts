@@ -285,7 +285,6 @@ export class AmadeusService {
         ratings: params.ratings || '3,4,5',
         amenities: 'SWIMMING_POOL,SPA,FITNESS_CENTER',
         currency: params.currency || 'USD',
-        bestRateOnly: true,
         view: 'FULL'
       });
 

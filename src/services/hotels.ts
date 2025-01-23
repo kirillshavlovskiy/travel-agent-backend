@@ -230,7 +230,11 @@ export class HotelService {
             checkInDate: params.checkInDate,
             checkOutDate: params.checkOutDate,
             roomQuantity: params.roomQuantity?.toString() || '1',
-            currency: params.currency || 'USD'
+            currency: params.currency || 'USD',
+            view: 'FULL',
+            bestRateOnly: false,
+            includeClosed: true,
+            paymentPolicy: 'NONE'
           });
 
           const offers = JSON.parse(offerResponse.body);
