@@ -1,0 +1,199 @@
+Building your local database – taxonomy
+All our products are categorized under a destination hierarchy. You will use this hierarchy to build your database and effectively catalogue our products.
+\
+/destinations
+✓ Basic-access Affiliates ✓ Full-access Affiliates ✓ Full + Booking access Affiliates ✓ Merchants
+Get details of all destinations
+Every product in the Viator catalogue is categorized according to the destination/locale in which it operates. This endpoint returns a complete list of Viator destinations, including destination names and parent identifiers (for the hierarchy of destinations check the lookupId field).
+This endpoint is used to help define the destinations of products and attractions (i.e. primary and secondary) for the purpose of merchandising products. For example, Disneyland Paris’s primary destination is Paris, even though the actual destination (secondary destination) is Marne-la-Vallee. Travelers are more likely to search for Paris when looking for Disneyland Paris than Marne-la-Valle.
+This endpoint is used to provide navigation on your site, through drilldown lists, combo boxes, or breadcrumbs.
+Fields returned in the response can be used to map a destination to an IATA code (airlines) or language.
+Destination data must be cached. While destinations rarely change, we recommend refreshing the list of destinations weekly.
+ 
+You can also create a catalogue of attractions and merchandize products based on the attraction they are linked to.
+\
+/attractions/search
+✓ Basic-access Affiliates ✓ Full-access Affiliates ✓ Full + Booking access Affiliates ✓ Merchants
+Get all attractions for a destination
+This endpoint returns all attractions within a destination (facilitates mapping destinations to attractions) and is used to help merchandize products by attraction.
+Attractions can be sorted by ALPHABETICAL, DEFAULT & REVIEW_AVG_RATING order.
+Pagination rules apply to this endpoint: no more than 30 products can be requested in a single call (“count”: 30). The first request should be done with “start”: 1, the second request must include the value of the start parameter for the next result you wish to see. For example, if the first request was done with “start”: 1 and “count”: 30, the second request will be done with “start”: 31 and “count”: 30, the third one with “start”: 61 and “count”: 30 etc.
+Attraction details include: destination mapping, Viator attraction URL (Affiliate partners only), number of products + product codes, reviews, images, introduction, overview, details of admission type (free/not free), opening hours, full address.
+When a product is linked to an attraction the relevant attractionId is returned for a product in the response to the product content endpoint. You can map products to attractions using the attractionId extracted from the product content response.
+This is also useful for navigation as well as building out basic attractions pages.
+With this endpoint you can get aggregated product and review count/rating for an attraction.
+Attraction data must be cached and refreshed weekly.
+↑ Back to top
+Managing product content
+There are three product content endpoints that are used to get product data. We highly recommend ingesting all product content into your database. By using a local database, you need only perform a single initial ingestion of data; then, only new and updated product content will be ingested. This will result in faster load times and will overall provide a better experience for travelers. If ingestion is not an option for you, you can request the details of a single product making a real-time call when the customer selects the product on your site.
+Key features of these endpoints
+"
+Ingest over 300,000+ products quickly and efficiently
+R
+Updating product content with fewer, but more frequent requests provides travelers with accurate information
+
+Only ingesting new or modified product information speeds up load times
+f
+Structured data fields make it easier to break out key information and merchandise products
+Ingest products & keep the product catalogue up to date
+\
+/products/modified-since
+⊗ Basic-access Affiliates ✓ Full-access Affiliates ✓ Full + Booking access Affiliates ✓ Merchants
+1a. Perform an initial ingestion of all product data
+Performs an initial ingestion of all product data into a local database. You may filter out any products during the initial ingestion. You may filter out on your end any products based on the response to this endpoint.
+For the initial ingestion of the product catalogue, the first request to /products/modified-since must include only the count parameter in the request body (value not higher than 500). This way you will start ingesting all Viator products from scratch. This is the only time when the cursor or the modified-since parameter should not be used. The nextCursor parameter returned in the response points to the next page of results and must be used the next call to /products/modified-since. This process must be repeated until the nextCursor is not returned in the response – this means that there are no more results.
+1b. Ingest only new or updated product data
+Used to ingest only new or updated product information, as well as to identify deactivated products. Products are considered updated when the supplier makes any changes to the product’s details, excluding pricing and availability changes, which are retrieved from the availability schedule endpoint. This endpoint returns all product details (not only changes) for updated products and all details must be refreshed in your database accordingly.
+We recommend polling this service every 15 minutes to look for updates and to avoid any discrepancies. Updates must be ingested at least hourly.
+Method: Continuously poll all updates using the new nextCursor value until no more updates are left.
+The modified-since parameter should not be used as the standard pagination method; rather, use the cursor parameter to ensure all product updates are captured during ingestion. The valid use case for modified-since parameter is to re-sync data if there was an issue on your side and you need to re-ingest updates from a specific time in the past, i.e. yesterday. In such cases you could re-start the job using the last crawled date as the modified-since date on first request and then continue ingesting updates with the cursor parameter. You should never use both the cursor and the modified-since parameters in the same request.
+For pulling updates, remember to use the cursor parameter set to the value of the most recent nextCursor element returned by a request to the same endpoint. Then continue to make requests with the cursor parameter set to the value of the nextCursor element of the previous request, until a request again does not include a nextCursor value.
+You need to track the last nextCursor you received as this will be used to update the product catalogue during the next ingestion.
+You should never re-ingest the entire product catalogue unless you need to re-initialize your database.
+Important: Only this endpoint can be used to ingest the product catalog. You can read more about supported models for managing the product and availability data in this article: Managing product and availability data.
+Get details of a single product in real-time
+\
+/products/{product-code}
+✓ Basic-access Affiliates ✓ Full-access Affiliates ✓ Full + Booking access Affiliates ✓ Merchants
+2. Pull product data for a single product in real-time
+Pulls info for a single product by providing the corresponding product code.
+Used in real-time to get details of a single product when the customer selects a product from the search results returned with the search endpoint (/products/search or /search/freetext).
+The response can be cached for up to 1 hour but this endpoint must not be used to ingest content for all products.
+This endpoint must not be used if you’re already ingesting products with the /products/modified-since endpoint as both endpoints pull data from the same source. The /products/{product-code} endpoint doesn’t return more accurate data but it’s used in real-time to fetch product information when needed if the product details haven’t been ingested into partner’s database with the /products/modified-since endpoint.
+ 
+Pull details of selected products if needed
+\
+/products/bulk
+⊗ Basic-access Affiliates ✓ Full-access Affiliates ✓ Full + Booking access Affiliates ✓ Merchants
+3. Pull product data for multiple products
+Similar to /products/{product-code}, this endpoint will pull in product information for a specified list of products, up to 500 products per request.
+Special use case: In the case that a product was not correctly ingested via the /products/modified-since endpoint, you can use /products/bulk to reingest those products. This use case applies only to a situation when specific products with known product codes haven’t been ingested correctly on your end, not to a situation when it’s necessary to re-ingest product updates for all products from a specific date in the past – for that you must use the /products/modified-since endpoint.
+This endpoint may be used as part of a regular ingestion process only if you have a small curated product list (<10k) that you want to refresh on schedule or if you need to fix some products on your end. If this doesn’t apply to your implementation and you need to ingest product content for many / all products, you must use the /products/modified-since endpoint for this purpose.
+This should be used only if you have a small curated product list (<10k) that you want to refresh on schedule or if you need to fix some products on your end. If this doesn’t apply to your implementation and you need to ingest product content for many / all products, you must use the /products/modified-since endpoint for this purpose.
+What’s included in the response to product content endpoints?
+These endpoints return all product information, including, but not limited to:
+Titles
+Descriptions
+Ticket types
+Supplier photos*
+Review ratings and counts
+Meeting points
+Traveler pick up details (if applicable)
+Inclusions and exclusions
+Cancellation policy
+Additional information from the supplier
+Booking confirmation settings (e.g. instant confirmation or on-request products)
+Booking requirements (e.g. min or max travelers)
+Booking questions
+Itineraries
+Product options
+Supplier name
+*Viator also allows travelers to upload their own photos. Traveler photos will have to be ingested via /reviews/product.
+Creating the search functionality with search endpoints
+\
+/products/search or /search/freetext
+✓ Basic-access Affiliates ✓ Full-access Affiliates ✓ Full + Booking access Affiliates ✓ Merchants
+Pull product summaries based on search criteria 
+When product summaries are returned, they contain a small amount of crucial product information such as, but not limited to, title, short descriptions, images, pricing, and review ratings and counts.
+You can effectively filter out products returned in the request by specifying search criteria, such as destination IDs, price range, and date range. You also have the option to filter by category using tag IDs and can filter by flags, such as free cancellation or skip-the-line tours.
+The search functionalities help identify high-quality products using tags (applicable only to the /products/search endpoint; see the quality-related tags in this article: Viator tags, explained) or flags (“LIKELY_TO_SELL_OUT” – popular products that routinely sell out)
+The /search/freetext endpoint allows an easy implementation of the search functionality based on the desired search term (supported search types: ATTRACTIONS, DESTINATIONS, PRODUCTS).
+You will specify the format in which you want the response, such as the language and currency and will specify how the response will be sorted. You can apply the “featured” (“DEFAULT”) sort order from Viator to display featured products first in search results. Note: Tours, activities and experiences are ranked using exclusive Viator data that may include product quality, reviews, ratings, photos, popularity, user preferences, price, bookings made through Viator, and payments made by operators.
+These endpoints are ideal for where short product summaries would be needed, such as on search cards on search results pages.
+Pagination rules apply to these endpoints: No more than 50 products can be requested in a single call (“count”: 50). The first request should be done with “start”: 1, the second request must include the value of the start parameter for the next result you wish to see. For example, if the first request was done with “start”: 1 and “count”: 50, the second request will be done with “start”: 51 and “count”: 50, the third one with “start”: 101 and “count”: 50 etc.
+You should paginate through the search results (using the start and the count paremeters) only when the customer wants to move to the next page with search results to see more products. First, you can retrieve and display maximum 50 products and if the customer wants to move to the next page with search results, another request to the search endpoint should be done to request additional products. You shouldn’t pull automatically all products from each destination when the user initiates the search, this would be an incorrect usage of the endpoint and would result in long load times.
+The search endpoints must not be used for ingestion, the /products/modified-since endpoint must be used for that purpose. These endpoints can be used only for real-time searches (results may be cached for up to 1 hour, anything above that would risk stale data).
+ 
+ 
+Displaying location details
+\
+/locations/bulk
+✓ Basic-access Affiliates ✓ Full-access Affiliates ✓ Full + Booking access Affiliates ✓ Merchants
+Get full location details for the requested location references
+Location details returned in /locations/bulk include the name of the location, the street address, and the longitude/latitude coordinates of the location. The locations are not to be confused with destinations retrieved with the /destinations endpoint.
+Locations details can be used to highlight pickup/drop off points or meeting point locations, to build itineraries, or even overlay locations on a map to help provide additional context to what a traveler can expect on the tour.
+This endpoint can be used to provide pickup locations to travelers through a drop-down list. In addition to that, travelers can specify custom pickup info through a plain text field (when a custom pickup location is supported based on the value returned in the “allowCustomTravelerPickup” field).
+There is a lot of location data in the API and it doesn’t change frequently. To avoid too many unnecessary requests to this service, location data must be cached and it should be refreshed monthly. Additionally, the /locations/bulk endpoint should be used on demand for any new location references returned in the product content response.
+structured itinerary
+Example of a structured itinerary with a map overlay
+Categorizing products and promoting high-quality products using tags
+\
+/products/tags
+✓ Basic-access Affiliates ✓ Full-access Affiliates ✓ Full + Booking access Affiliates ✓ Merchants
+1. Ingest tags into a local database with /products/tags
+Tags should be cached and refreshed weekly.
+2. Build a hierarchical structure of categories and subcategories
+Tag taxonomy allows an easy way to classify products into categories and subcategories.
+Each tag can have one or more parents – identified by parentTagId in the API response. This way tags can be organized in a hierarchical way with main categories and subcategories.
+3. Create custom filtering options
+Filtering by tags is available as a pre-built solution in the /products/search endpoint to easily identify and display to customers products from relevant categories or products that meet the desired quality level.
+Tags are the easiest way to identify high-quality products that generate the highest sale. These tags are:
+tagId 21972 – Excellent Quality
+tagId 22143 – Best Conversion
+tagId 22083 – Likely To Sell Out
+tagId 11940 – Once in a Lifetime
+tagId 21074 – Unique experiences
+tagId 6226 – Best Value
+tagId 21971 – Viator Plus
+4. Work on your merchandising strategy
+Tags can be used for product curation and to create custom marketing campaigns such as holiday offerings, to help your product and marketing teams maximise the possibilities coming from the API integration with Viator.
+Read more about tags in this article: Viator tags, explained.
+↑ Back to top
+Managing availability and pricing
+ 
+The Viator Partner API’s schedules endpoints enable you to provide availability and pricing information in real-time. To improve transfer speeds and reduce the amount of data transferred, availability is communicated by providing the overall schedule season and specifying unavailable dates rather than available dates. Special pricing periods are also included allowing you to surface supplier promotions to customers.
+Ingesting and updating availability schedules follows a similar process as ingesting and updating product information. If ingestion is not an option for you, you can request the schedules of a single product making a real-time call when the customer selects the product on your site.
+Key features of these endpoints
+
+Real time availability checks ensure accuracy and create a seamless checkout
+
+Only ingesting new or modified availability schedules speed up load times
+
+Schedules can be used to display future availability
+f
+Structured data allows you to easily build a variety of display and filtering options
+Ingest availability and pricing
+\
+/availability/schedules/modified-since
+⊗ Basic-access Affiliates ✓ Full-access Affiliates ✓ Full + Booking access Affiliates ✓ Merchants
+1a. Perform an initial ingestion of all availability and pricing schedules
+Similar to using the /products/modified-since endpoint, you’ll use the /availability/schedules/modified-since endpoint to get availability for all products. Getting everything at once and updating only new or modified availability schedules will speed up ingestion and ensure availability is not stale.
+You should only ingest schedules for products that are active and supported on your platform (filtering must be done on your end). Therefore, schedules should be ingested after product content is ingested.
+For the initial ingestion of availability and pricing schedules, the first request to /availability/schedules/modified-since must include only the count parameter in the request body (value not higher than 500). This way you will start ingesting schedules for all Viator products from scratch. This is the only time when the cursor or the modified-since parameter should not be used. The nextCursor parameter returned in the response points to the next page of results and must be used the next call to /availability/schedules/modified-since. This process must be repeated until the nextCursor is not returned in the response – this means that there are no more results.
+1b. Make regular calls to check for new or updated availability and pricing schedules
+We recommend polling this service every 15 minutes to look for updates and to avoid any discrepancies. It’s essential to conduct these checks at least every hour to ensure that your travelers see the most up-to-date pricing and availability. A product’s availability is considered modified if a supplier makes changes to pricing or availability.
+Method: Continuously poll all updates using the new nextCursor value until no more updates are left. The modified-since parameter should not be used as the standard pagination method; rather, use the cursor parameter to ensure all schedule updates are captured during ingestion. The valid use case for modified-since parameter is to re-sync data if there was an issue on your side and you need to re-ingest updates from a specific time in the past, i.e. yesterday. In such cases you could re-start the job using the last crawled date as the modified-since date on the first request and then continue ingesting updates with the cursor parameter. You should never use both the cursor and the modified-since parameters in the same request.
+For pulling updates, remember to use the cursor parameter set to the value of the most recent nextCursor element returned by a request to the same endpoint. Then continue to make requests with the cursor parameter set to the value of the nextCursor element of the previous request, until a request again does not include a nextCursor value.
+You need to track the last nextCursor you received as this will be used to update the product catalogue during the next ingestion.
+You should never re-ingest all schedules in full unless you need to re-initialize your database.
+Important: Only this endpoint can be used to ingest the availability and pricing schedules. You can read more about supported models for managing the product and availability data in this article: Managing product and availability data.
+ 
+Get availability and pricing schedules for a single product in real-time
+\
+/availability/schedules/{product-code}
+✓ Basic-access Affiliates ✓ Full-access Affiliates ✓ Full + Booking access Affiliates ✓ Merchants
+2. Pull availability schedules for a single product
+This endpoint can be used in conjunction with /products/{product-code to pull availability for a single product when the customer selects a product from the search results.
+The response can be cached for up to 1 hour but this endpoint must not be used to ingest schedules for all products.
+This endpoint must not be used if you’re already ingesting schedules with the /availability/schedules/modified-since endpoint as both endpoints pull data from the same source. The /availability/schedules/{product-code} endpoint doesn’t return more accurate data but it’s used in real-time to fetch availability and pricing when needed if the schedules haven’t been ingested into partner’s database with the /availability/schedules/modified-since endpoint.
+Pull schedules for multiple products when needed
+\
+/availability/schedules/bulk
+⊗ Basic-access Affiliates ✓ Full-access Affiliates ✓ Full + Booking access Affiliates ✓ Merchants
+3. Pull availability schedules for multiple products
+This endpoint pulls availability for a list of products, up to 500 products per request.
+Special use case: In the case that a product schedules were not correctly ingested via the /availability/schedules/modified-since endpoint, you can use /availability/schedules/bulk to reingest those schedules. This use case applies only to a situation when schedules for specific products with known product codes haven’t been ingested correctly on your end, not to a situation when it’s necessary to re-ingest schedule updates for all products from a specific date in the past – for that you must use the /availability/schedules/modified-since endpoint.
+This endpoint could be used only if you have a small curated product list (<10k) that you want to refresh on schedule or if you need to need to fix some products on your end. If this doesn’t apply to your implementation and you need to ingest schedules for many / all products, you must use the /availability/schedules/modified-since endpoint for this purpose.
+Important: The /schedules endpoints return the rates in the supplier’s currency. You will have to convert the rates to the user’s currency either using the /exchange-rates endpoint or your own conversion rates.
+Verify real-time availability and pricing
+\
+/availability/check
+⊗ Basic-access Affiliates ✓ Full-access Affiliates ✓ Full + Booking access Affiliates ✓ Merchants
+4. Check availability and price in real-time
+This endpoint enables a real-time check and calculation of pricing and availability and should be used throughout the booking path. For example, this endpoint can be used to ensure accuracy when the traveler is starting the checkout process.
+This should not be called until a user inputs dates and passenger mix.
+In case of pricing differences between the previously quoted price and the new price from the /availability/check response, the new price must be applied to the booking (this shouldn’t trigger the booking flow to be canceled, instead the new price should be communicated).
+This endpoint would be used before a booking is made to verify the product is available on the desired date for the desired passenger mix (based on the Viator age bands). Before a booking hold can be requested, you’ll need to use this endpoint to check that it’s still available and make sure the pricing is correct.
+This endpoint should not be called after requesting the hold. When there is a valid availability hold for the booking the response to the /availability/check endpoint could return no availability due to a valid hold. This endpoint could be used again in case the existing hold expires and the booking hasn’t been made yet however in that case it would be best to make a new hold right away (up to 3 times).
+If booking hold is not supported in your implementation, it’s essential to call the /availability/check endpoint again in the booking flow, right before submitting the booking request, to double-check the price and availability (even if this check was done already at an earlier stage). Availability and pricing may change at any time, for example while the customer is providing all details for the booking, that’s why this information must be verified again before making a booking.
+↑ Back to top

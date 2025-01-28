@@ -12,6 +12,38 @@ interface PerplexityResponse {
   error?: string;
 }
 
+interface PerplexityErrorResponse {
+  error: string;
+}
+
+interface ViatorActivity {
+  name: string;
+  description: string;
+  duration: number;
+  price: number;
+  category: string;
+  location: string;
+  address: string;
+  zone: string;
+  keyHighlights: string[];
+  openingHours: string;
+  rating: number;
+  numberOfReviews: number;
+  timeSlot: string;
+  dayNumber: number;
+  referenceUrl: string;
+  images: string[];
+  selected: boolean;
+  bookingInfo: {
+    cancellationPolicy: string;
+    instantConfirmation: boolean;
+    mobileTicket: boolean;
+    languages: string[];
+    minParticipants: number;
+    maxParticipants: number;
+  };
+}
+
 export class PerplexityService {
   private apiKey: string;
   private baseUrl: string;
@@ -21,163 +53,275 @@ export class PerplexityService {
     this.baseUrl = 'https://api.perplexity.ai';
   }
 
-  async chat(query: string) {
+  // For initial activity planning - uses sonar-pro model
+  async chat(query: string, options?: { web_search?: boolean; temperature?: number; max_tokens?: number }) {
     try {
       if (!this.apiKey) {
         throw new Error('Perplexity API key is not configured');
       }
 
-      const response = await axios.post(
-        `${this.baseUrl}/chat/completions`,
-        {
-          model: 'llama-3.1-sonar-small-128k-online',
-          messages: [
-            {
-              role: 'system',
-              content: `You are a helpful assistant that provides detailed information about places and activities in JSON format.
-              CRITICAL: Return ONLY a valid JSON object with no markdown formatting or code blocks.
-              Use ONLY double quotes for strings and property names.
-              Do NOT use single quotes anywhere.
-              Do NOT include any trailing commas.
-              All numbers must be valid JSON numbers (no ranges like "35-40", use average value instead).`
-            },
-            {
-              role: 'user',
-              content: query
-            }
-          ],
-          options: {
-            temperature: 0.1,
-            max_tokens: 4000
-          }
-        },
-        {
-          headers: {
-            'Authorization': `Bearer ${this.apiKey}`,
-            'Content-Type': 'application/json'
-          }
-        }
-      );
+      // Extract destination and days from query
+      const destination = query.match(/in\s+([^,\n]+)/)?.[1] || '';
+      const days = query.match(/(\d+)-day activity plan/)?.[1] || '7';
+      const numDays = parseInt(days, 10);
+      const chunks = Math.ceil(numDays / 3);
+      let allActivities: any[] = [];
 
-      // Clean the response content before returning
-      if (response.data.choices?.[0]?.message?.content) {
-        const content = response.data.choices[0].message.content
-          .replace(/```json\n?|\n?```/g, '') // Remove markdown code blocks
-          .replace(/^\s*\n/gm, '') // Remove empty lines
-          .replace(/\r\n/g, '\n') // Normalize line endings
-          .replace(/\n/g, ' ') // Convert newlines to spaces
-          .replace(/\t/g, ' ') // Convert tabs to spaces
-          .replace(/\s+/g, ' ') // Normalize spaces
+      for (let chunk = 0; chunk < chunks; chunk++) {
+        const startDay = chunk * 3 + 1;
+        const endDay = Math.min(startDay + 2, numDays);
+
+        const chunkQuery = query.replace(
+          /Generate a \d+-day activity plan/,
+          `Generate activities for days ${startDay} to ${endDay}`
+        );
+
+        console.log('[Perplexity] Sending request with model: sonar-pro');
+        const response = await axios.post(
+          `${this.baseUrl}/chat/completions`,
+          {
+            model: 'sonar-pro',
+            messages: [
+              {
+                role: 'system',
+                content: `You are a travel activity expert who helps plan detailed itineraries. Search for activities ONLY on Viator.com.
+
+BUDGET & QUALITY:
+- Respect the daily budget per person
+- Minimum rating: 4.0+ stars on Viator
+- Must have at least 50 reviews
+
+ACTIVITY CATEGORIES:
+- Cultural (museums, churches, historic sites)
+- Outdoor (parks, walking tours, nature)
+- Entertainment (shows, performances)
+- Food & Drink (tastings, dining experiences)
+- Shopping (markets, shopping areas)
+- Adventure (sports, active experiences)
+
+GEOGRAPHIC OPTIMIZATION:
+- Group activities in the same area for each day
+- Consider the main tourist areas and attractions in the destination
+- Plan routes to minimize travel time between activities
+- Use the most popular tourist zones in the destination
+
+TIME SLOTS:
+- Morning (9:00-13:00): Prefer cultural & outdoor activities
+- Afternoon (14:00-18:00): Prefer shopping & adventure activities
+- Evening (19:00-23:00): Prefer food & entertainment activities
+
+BALANCE REQUIREMENTS:
+- Maximum 2 museums or similar attractions per day
+- At least 1 outdoor activity per day
+- Mix food experiences between lunches and dinners
+- Balance activities across different categories
+- Include local specialties and unique experiences for the destination
+- Consider the destination's most popular and highly-rated activities
+
+CRITICAL RULES:
+1. Return ONLY 3-4 activities per request to avoid response truncation
+2. ONLY suggest activities that you can find on Viator.com
+3. ALL URLs must be real, active Viator booking links that you verify
+4. Copy exact prices, descriptions, and details from Viator listings
+5. Do not make up or guess any information - only use what you find on Viator
+6. Ensure activities in the same day are geographically close
+7. Account for travel time between locations
+8. Don't schedule overlapping activities
+9. Consider seasonal/weather appropriate activities
+
+Return ONLY a valid JSON object without any explanatory text or markdown formatting, following this structure:
+{
+  "activities": [
+    {
+      "name": "EXACT name from Viator listing",
+      "description": "EXACT description from Viator",
+      "duration": hours (number),
+      "price": exact price in USD (number),
+      "category": "Cultural|Outdoor|Entertainment|Food & Drink|Shopping|Adventure",
+      "location": "EXACT location name from Viator",
+      "address": "EXACT address from Viator",
+      "zone": "Area name in the destination",
+      "keyHighlights": ["EXACT highlights from Viator listing"],
+      "openingHours": "EXACT operating hours from Viator",
+      "rating": exact Viator rating (number),
+      "numberOfReviews": exact number of Viator reviews (number),
+      "timeSlot": "morning|afternoon|evening",
+      "dayNumber": number,
+      "referenceUrl": "EXACT Viator booking URL",
+      "images": ["EXACT image URLs from Viator"],
+      "selected": false,
+      "bookingInfo": {
+        "cancellationPolicy": "EXACT policy from Viator",
+        "instantConfirmation": true/false,
+        "mobileTicket": true/false,
+        "languages": ["available languages"],
+        "minParticipants": number,
+        "maxParticipants": number
+      }
+    }
+  ]
+}`
+              },
+              {
+                role: 'user',
+                content: chunkQuery
+              }
+            ],
+            temperature: options?.temperature ?? 0.1,
+            max_tokens: options?.max_tokens ?? 2000,
+            web_search: true
+          },
+          {
+            headers: {
+              'Authorization': `Bearer ${this.apiKey}`,
+              'Content-Type': 'application/json'
+            }
+          }
+        );
+
+        console.log('[Perplexity] Raw response:', JSON.stringify(response.data, null, 2));
+        
+        // Extract JSON content from the response
+        const content = response.data.choices[0].message.content;
+        console.log('[Perplexity] Content to parse:', content);
+        
+        try {
+          // First try to parse the content directly
+          let parsedContent;
+          try {
+            parsedContent = JSON.parse(content);
+          } catch (e) {
+            // If direct parsing fails, try to extract JSON from markdown or text
+            const jsonMatch = content.match(/```json\s*([\s\S]*?)\s*```/) || content.match(/\{[\s\S]*\}/);
+            if (!jsonMatch) {
+              console.error('[Perplexity] No JSON content found in response');
+              continue;
+            }
+
+            const jsonContent = jsonMatch[1] || jsonMatch[0];
+            // Clean the JSON string before parsing
+            const cleanedJson = jsonContent
+              .replace(/[\u0000-\u001F]+/g, '') // Remove control characters
+              .replace(/,\s*([}\]])/g, '$1') // Remove trailing commas
+              .replace(/([{,]\s*)(\w+):/g, '$1"$2":') // Ensure property names are quoted
           .trim();
 
-        response.data.choices[0].message.content = content;
+            try {
+              parsedContent = JSON.parse(cleanedJson);
+            } catch (parseError) {
+              console.error('[Perplexity] Failed to parse cleaned JSON:', parseError);
+              continue;
+            }
+          }
+          
+          // Validate the structure
+          if (!parsedContent.activities || !Array.isArray(parsedContent.activities)) {
+            console.error('[Perplexity] Invalid response structure: missing activities array');
+            continue;
+          }
+
+          // Add valid activities to the collection
+          allActivities = [...allActivities, ...parsedContent.activities.map((activity: ViatorActivity) => ({
+            ...activity,
+            selected: false
+          }))];
+        } catch (e) {
+          console.error('[Perplexity] Failed to parse response:', e);
+          continue;
+        }
       }
 
-      return response.data;
-    } catch (error) {
-      console.error('Error in Perplexity chat:', error);
-      if (axios.isAxiosError(error)) {
-        if (error.response?.status === 404) {
-          throw new Error('Perplexity API endpoint not found. Please check the API configuration.');
-        }
-        if (error.response?.status === 401) {
-          throw new Error('Invalid Perplexity API key. Please check your API key configuration.');
-        }
-        if (error.response?.status === 400) {
-          const errorMessage = error.response.data?.error?.message || 'Bad request to Perplexity API';
-          throw new Error(`Perplexity API error: ${errorMessage}`);
-        }
-        throw new Error(`Perplexity API error: ${error.response?.data?.error?.message || error.message}`);
-      }
-      throw error;
+      // Return all collected activities
+      return {
+        activities: allActivities
+      };
+    } catch (error: any) {
+      console.error('[Perplexity] Error calling API:', error.response?.data || error);
+      const errorResponse: PerplexityErrorResponse = {
+        error: 'Failed to call Perplexity API'
+      };
+      throw errorResponse;
     }
   }
 
+  // For individual activity details - uses sonar model
   async getEnrichedDetails(query: string): Promise<PerplexityResponse> {
     try {
       if (!this.apiKey) {
         throw new Error('Perplexity API key is not configured');
       }
 
-      const response = await axios.post(
-        `${this.baseUrl}/chat/completions`,
-        {
-          model: 'llama-3.1-sonar-small-128k-online',
+      const response = await axios.post(`${this.baseUrl}/chat/completions`, {
+        model: 'sonar',
           messages: [
             {
               role: 'system',
-              content: `You are a travel planning assistant that creates detailed, well-structured activity itineraries. 
-              Each activity must be properly categorized by price tier, day number, and time slot.
-              
-              Price tiers must be strictly followed:
-              - Budget: Under $30 per person
-              - Medium: $30-$100 per person
-              - Premium: Over $100 per person
-              
-              Time slots must be evenly distributed:
-              - Morning: 9 AM - 12 PM
-              - Afternoon: 12 PM - 5 PM
-              - Evening: 5 PM - 10 PM`
+            content: `You are a travel activity expert specializing in Viator bookings.
+Your task is to search through Viator's platform to find and recommend REAL, BOOKABLE activities.
+
+SEARCH PROCESS:
+1. Search Viator.com for available activities
+2. Sort activities by rating and popularity
+3. Find multiple activities across different price ranges
+4. Verify each activity exists and is currently bookable
+5. Copy exact details from the Viator listings
+
+CRITICAL RULES:
+1. ONLY suggest activities that you can find on Viator.com
+2. ALL URLs must be real, active Viator booking links that you verify
+3. Include EXACT booking URLs in this format:
+   - https://www.viator.com/tours/[city]/[activity-name]/[product-code]
+4. Copy exact prices, descriptions, and details from Viator listings
+5. Do not make up or guess any information - only use what you find
+6. If you cannot find activities, return a JSON object with an error field
+
+Return ONLY a valid JSON object without any explanatory text or markdown formatting, following this structure:
+{
+  "activities": [
+    {
+      "name": "EXACT name from Viator listing",
+      "provider": "Viator",
+      "price": exact price in USD,
+      "price_category": "budget" or "medium" or "premium",
+      "duration": hours (number),
+      "dayNumber": number,
+      "category": "Cultural" or "Adventure" or "Food" or "Nature" or "Entertainment" or "Shopping" or "Relaxation",
+      "location": "EXACT location name from Viator",
+      "address": "EXACT address from Viator",
+      "keyHighlights": ["EXACT highlights from Viator listing"],
+      "openingHours": "EXACT operating hours from Viator",
+      "rating": exact Viator rating (number),
+      "numberOfReviews": exact number of Viator reviews,
+      "preferredTimeOfDay": "morning" or "afternoon" or "evening",
+      "referenceUrl": "EXACT Viator booking URL",
+      "images": ["EXACT image URLs from Viator"],
+      "bookingInfo": {
+        "provider": "Viator",
+        "cancellationPolicy": "EXACT policy from Viator",
+        "instantConfirmation": true/false,
+        "mobileTicket": true/false,
+        "languages": ["available languages"],
+        "minParticipants": number,
+        "maxParticipants": number
+      }
+    }
+  ]
+}`
             },
             {
               role: 'user',
-              content: `Create a comprehensive ${query} including:
-
-              For EACH DAY of the trip, provide exactly:
-              Morning activities (9 AM - 12 PM):
-              - 1 Budget activity (under $30)
-              - 1 Medium activity ($30-$100)
-              - 1 Premium activity (over $100)
-
-              Afternoon activities (12 PM - 5 PM):
-              - 1 Budget activity (under $30)
-              - 1 Medium activity ($30-$100)
-              - 1 Premium activity (over $100)
-
-              Evening activities (5 PM - 10 PM):
-              - 1 Budget activity (under $30)
-              - 1 Medium activity ($30-$100)
-              - 1 Premium activity (over $100)
-
-              Requirements:
-              - Each activity MUST have a specific day number (1, 2, 3, etc.)
-              - Each activity MUST have a specific time slot (morning, afternoon, evening)
-              - Activities must be appropriate for their time slot (e.g. dinner in evening)
-              - Premium activities must be truly exclusive experiences
-              - Consider local specialties and unique experiences
-              - Respect arrival/departure times
-              
-              For each activity provide:
-              {
-                name: string
-                description: string
-                price: number (exact amount in USD)
-                duration: number (in hours)
-                location: string
-                address: string
-                openingHours: string
-                keyHighlights: string[]
-                rating: number (1-5)
-                numberOfReviews: number
-                category: string
-                dayNumber: number (1, 2, 3, etc.)
-                timeSlot: "morning" | "afternoon" | "evening"
-                referenceUrl: string
-                images: string[]
-                priceCategory: "budget" | "medium" | "premium"
-              }
-
-              Format the response as a JSON object with an activities array containing all activities properly organized by day and time slot.`
+              content: query
             }
-          ]
-        },
-        {
+          ],
+          temperature: 0.1,
+          max_tokens: 4000,
+          web_search: true
+        }, {
           headers: {
             'Authorization': `Bearer ${this.apiKey}`,
             'Content-Type': 'application/json'
           }
-        }
-      );
+      });
 
       // Parse the response text as JSON
       const content = response.data.choices[0].message.content;
@@ -192,20 +336,7 @@ export class PerplexityService {
         };
       }
     } catch (error) {
-      console.error('Error fetching details from Perplexity:', error);
-      if (axios.isAxiosError(error)) {
-        if (error.response?.status === 404) {
-          throw new Error('Perplexity API endpoint not found. Please check the API configuration.');
-        }
-        if (error.response?.status === 401) {
-          throw new Error('Invalid Perplexity API key. Please check your API key configuration.');
-        }
-        if (error.response?.status === 400) {
-          const errorMessage = error.response.data?.error?.message || 'Bad request to Perplexity API';
-          throw new Error(`Perplexity API error: ${errorMessage}`);
-        }
-        throw new Error(`Perplexity API error: ${error.response?.data?.error?.message || error.message}`);
-      }
+      console.error('Error calling Perplexity API:', error);
       throw error;
     }
   }

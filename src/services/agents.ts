@@ -33,7 +33,7 @@ interface TravelRequest {
 interface PerplexitySearchResult {
   title: string;
   url: string;
-  content: string;
+      content: string;
 }
 
 interface PerplexityMessage {
@@ -325,6 +325,38 @@ interface TransformedActivity {
   images: string[];
 }
 
+interface ActivityGenerationParams {
+  destination: string;
+  category?: string;
+  userPreferences?: string;
+}
+
+interface ActivitySearchResult {
+  name: string;
+  provider: 'Viator' | 'GetYourGuide';
+  price: number;
+  price_category: 'budget' | 'medium' | 'premium';
+  duration: number;
+  typical_time: 'morning' | 'afternoon' | 'evening';
+  description: string;
+  highlights: string[];
+  rating: number;
+  review_count: number;
+  booking_url: string;
+  languages: string[];
+  cancellation_policy: string;
+  location: {
+    meeting_point: string;
+    address: string;
+  };
+  booking_info: {
+    instant_confirmation: boolean;
+    mobile_ticket: boolean;
+    min_participants: number;
+    max_participants: number;
+  };
+}
+
 export class VacationBudgetAgent {
   private flightService: FlightService;
   private startTime: number = Date.now();
@@ -561,7 +593,7 @@ export class VacationBudgetAgent {
           const categoryStart = Date.now();
           console.log(`[TIMING][${category}] Starting category processing`);
 
-        const prompt = this.constructPrompt(category, request);
+        const prompt = this.constructPrompt({ category, request });
           console.log(`[TIMING][${category}] Prompt constructed in ${Date.now() - categoryStart}ms`);
 
           const data = await this.queryPerplexity(prompt, category);
@@ -602,83 +634,54 @@ export class VacationBudgetAgent {
     }
   }
 
-  private constructPrompt(category: string, request: TravelRequest): string {
-    const prompt = `Search for and recommend REAL, BOOKABLE activities in ${request.destinations[0].label} for a ${request.days}-day trip.
-Total budget: ${request.budget} ${request.currency}
+  private constructPrompt(params: { category: string; request: TravelRequest }): string {
+    const { category, request } = params;
+    return `Search for available activities in ${request.destinations[0].label} with these requirements:
 
-CRITICAL: Only suggest activities that ACTUALLY EXIST on Viator or GetYourGuide.
+SEARCH PROCESS:
+1. Search both platforms:
+   - Search Viator.com for ${request.destinations[0].label} activities
+   - Search GetYourGuide.com for ${request.destinations[0].label} activities
+2. Sort by: Best Rating
+3. Find at least 3 activities from each platform${request.category ? `\n4. Focus on category: ${request.category}` : ''}
+${request.userPreferences ? `\nAdditional preferences: ${request.userPreferences}` : ''}
 
-For each day (Day 1 to ${request.days}), find activities that match these requirements:
+VALIDATION RULES:
+1. Activities must have valid booking URLs
+2. Copy exact details from the listings
+3. Include activities across different price points
+4. Include activities with different durations and times
 
-MORNING ACTIVITIES (9:00-12:00):
-- 1 budget activity (under $30) from GetYourGuide
-- 1 medium activity ($30-$100) from GetYourGuide
-- 1 premium activity ($100+) from Viator
-
-AFTERNOON ACTIVITIES (14:00-17:00):
-- 1 budget activity (under $30) from GetYourGuide
-- 1 medium activity ($30-$100) from GetYourGuide
-- 1 premium activity ($100+) from Viator
-
-EVENING ACTIVITIES (19:00-22:00):
-- 1 budget activity (under $30) from GetYourGuide
-- 1 medium activity ($30-$100) from GetYourGuide
-- 1 premium activity ($100+) from Viator
-
-CRITICAL URL REQUIREMENTS:
-1. For Viator activities, use EXACT URLs in this format:
-   https://www.viator.com/tours/[city]/[activity-name]/[product-code]
-   Example: https://www.viator.com/tours/Paris/Skip-the-Line-Eiffel-Tower-Tour/d479-3731EIFFEL
-
-2. For GetYourGuide activities, use EXACT URLs in this format:
-   https://www.getyourguide.com/[city]/[activity-code]
-   Example: https://www.getyourguide.com/paris-l16/eiffel-tower-skip-the-line-ticket-summit-access-t288139
-
-3. DO NOT make up or guess URLs - only use real ones you can verify
-4. Each activity MUST have a valid, working booking URL
-5. Premium activities MUST be from Viator
-6. Budget/medium activities MUST be from GetYourGuide
-
-Return a JSON object with this structure for each activity:
+For each activity found, provide details in this JSON format:
 {
-  "day": number,
-  "name": "string (actual activity name from provider)",
-  "description": "string (actual description from provider)",
-  "price": number (exact price from provider),
-  "duration": number (in hours),
-  "location": "string",
-  "address": "string (exact address)",
-  "openingHours": "string",
-  "startTime": "HH:mm",
-  "endTime": "HH:mm",
-  "rating": number (from provider),
-  "number_of_reviews": number (from provider),
-  "key_highlights": ["string (from provider)"],
-  "preferred_time_of_day": "morning" | "afternoon" | "evening",
-  "bookingDetails": {
-    "provider": "Viator" | "GetYourGuide",
-    "referenceUrl": "string (EXACT booking URL)",
-    "cancellationPolicy": "string (from provider)",
-    "instantConfirmation": boolean,
-    "mobileTicket": boolean,
-    "languages": ["string"],
-    "minParticipants": number,
-    "maxParticipants": number,
-    "pickupIncluded": boolean,
-    "pickupLocation": "string",
-    "accessibility": "string",
-    "restrictions": ["string"]
-  }
-}
-
-IMPORTANT:
-- Only include activities that ACTUALLY EXIST on these platforms
-- Use REAL prices, ratings, and review counts from the providers
-- Include EXACT booking details from the actual listings
-- Verify each URL exists before including it
-- DO NOT make up or guess any information`;
-
-    return prompt;
+  "activities": [
+    {
+      "name": "EXACT name from listing",
+      "provider": "Viator" or "GetYourGuide",
+      "price": exact price in USD,
+      "price_category": "budget" (<$30), "medium" ($30-$100), or "premium" (>$100),
+      "duration": hours (number),
+      "typical_time": "morning", "afternoon", or "evening",
+      "description": "EXACT description from listing",
+      "highlights": ["EXACT highlights from listing"],
+      "rating": exact rating (number),
+      "review_count": exact number of reviews,
+      "booking_url": "EXACT URL from listing",
+      "languages": ["available languages"],
+      "cancellation_policy": "EXACT policy from listing",
+      "location": {
+        "meeting_point": "EXACT meeting point",
+        "address": "EXACT address if provided"
+      },
+      "booking_info": {
+        "instant_confirmation": true/false,
+        "mobile_ticket": true/false,
+        "min_participants": number,
+        "max_participants": number
+      }
+    }
+  ]
+}`;
   }
 
   private constructHotelPrompt(request: TravelRequest): string {
@@ -724,8 +727,17 @@ IMPORTANT:
       // Remove any text before the first {
       content = content.substring(content.indexOf('{'));
       
-      // Remove any text after the last }
-      content = content.substring(0, content.lastIndexOf('}') + 1);
+      // Find the last complete activity object by looking for the last complete closing brace
+      const lastCompleteActivity = content.lastIndexOf('}, {');
+      if (lastCompleteActivity !== -1) {
+        content = content.substring(0, lastCompleteActivity + 1) + ']}';
+      } else {
+        // If we can't find a complete activity, try to find the last complete object
+        const lastCompleteBrace = content.lastIndexOf('}');
+        if (lastCompleteBrace !== -1) {
+          content = content.substring(0, lastCompleteBrace + 1);
+        }
+      }
       
       // Quote unquoted property names
       content = content.replace(/(\{|\,)\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*:/g, '$1"$2":');
@@ -739,23 +751,22 @@ IMPORTANT:
       // Convert any remaining duration ranges to single numbers
       content = content.replace(/"duration"\s*:\s*"([0-9.]+)"/g, '"duration": $1');
       
-      // Quote unquoted string values
+      // Quote unquoted boolean values
       content = content.replace(/:\s*(true|false)(\s*[,}])/gi, ':"$1"$2');
       
       // Clean up any malformed URLs
       content = content.replace(/(\/[^\/]+)\1{10,}/g, '/malformed-url-removed');
 
       // Try to parse the cleaned content
-      const parsed = JSON.parse(content);
-      
-      // Convert back to string with proper formatting
-      return JSON.stringify(parsed, null, 2);
-      
+      try {
+        const parsed = JSON.parse(content);
+        return JSON.stringify(parsed, null, 2);
     } catch (error) {
-      logger.error('Failed to clean JSON response:', { error, content });
-      // Return a valid empty activity object as fallback
+        logger.error('Failed to parse cleaned JSON:', { error, content });
+        // Return a valid activities array with a single placeholder activity
       return JSON.stringify({
-        name: "Fallback Activity",
+          activities: [{
+            name: "Placeholder Activity",
         description: "Unable to generate activity details. Please try again.",
         duration: 2,
         price: 0,
@@ -763,40 +774,46 @@ IMPORTANT:
         location: "To be determined",
         exact_address: "",
         opening_hours: "",
-        startTime: "09:00",
-        endTime: "11:00",
+            startTime: "09:00",
+            endTime: "11:00",
         rating: 0,
         number_of_reviews: 0,
         key_highlights: ["Please try generating another activity"],
         preferred_time_of_day: "morning",
-        bookingDetails: {
-          provider: "GetYourGuide",
-          referenceUrl: "",
-          cancellationPolicy: "Free cancellation",
-          instantConfirmation: true,
-          mobileTicket: true,
-          languages: ["English"],
-          minParticipants: 1,
-          maxParticipants: 10,
-          pickupIncluded: false,
-          pickupLocation: "",
-          accessibility: "Standard",
-          restrictions: []
-        },
+            bookingDetails: {
+              provider: "GetYourGuide",
+              referenceUrl: "",
+              cancellationPolicy: "Free cancellation",
+              instantConfirmation: true,
+              mobileTicket: true,
+              languages: ["English"],
+              minParticipants: 1,
+              maxParticipants: 10,
+              pickupIncluded: false,
+              pickupLocation: "",
+              accessibility: "Standard",
+              restrictions: []
+            },
         images: []
-      });
+          }]
+        }, null, 2);
+      }
+    } catch (error) {
+      logger.error('Failed to clean JSON response:', { error, content });
+      // Return a valid empty activities array as fallback
+      return JSON.stringify({
+        activities: []
+      }, null, 2);
     }
   }
 
-  private async querySingleActivity(prompt: string): Promise<string> {
+  private async querySingleActivity(prompt: string): Promise<any> {
+    logger.debug('Starting activity generation with prompt:', prompt);
+    
     try {
-      logger.info('[Perplexity] Starting activity search with prompt', {
-        promptLength: prompt.length,
-        searchEnabled: true,
-        webSearchEnabled: true
-      });
-
-      const response = await this.fetchWithRetry(
+      logger.debug('Generated prompt length:', prompt.length);
+      
+      const result = await this.fetchWithRetry(
         'https://api.perplexity.ai/chat/completions',
         {
           method: 'POST',
@@ -831,15 +848,37 @@ CRITICAL RULES:
 7. Do not make up or guess any information - only use what you find
 8. If you can't find a suitable activity, say so instead of making one up
 
-SEARCH LOGGING:
-For each activity you find, log:
+For each activity you find, include:
 {
-  "searchUrl": "URL you searched",
-  "foundActivity": true/false,
-  "provider": "Viator or GetYourGuide",
-  "activityUrl": "actual booking URL found",
-  "price": "exact price found",
-  "tier": "budget/medium/premium"
+  "name": "EXACT name from provider",
+  "description": "EXACT description from provider",
+  "price": number (exact price in USD),
+  "duration": number (in hours),
+  "location": "Specific venue/location name",
+  "address": "Full street address",
+  "openingHours": "Actual operating hours",
+  "keyHighlights": ["Real highlights from provider"],
+  "rating": number (from provider reviews),
+  "numberOfReviews": number (actual count),
+  "category": "Activity type",
+  "dayNumber": number,
+  "timeSlot": "morning" | "afternoon" | "evening",
+  "referenceUrl": "EXACT booking URL",
+  "images": ["Real image URLs"],
+  "priceCategory": "budget" | "medium" | "premium",
+  "bookingDetails": {
+    "provider": "Viator" | "GetYourGuide",
+    "cancellationPolicy": "Exact policy from listing",
+    "instantConfirmation": boolean,
+    "mobileTicket": boolean,
+    "languages": ["Available languages"],
+    "minParticipants": number,
+    "maxParticipants": number,
+    "pickupIncluded": boolean,
+    "pickupLocation": "If included",
+    "accessibility": "From listing",
+    "restrictions": ["From listing"]
+  }
 }`
               },
               {
@@ -848,7 +887,6 @@ For each activity you find, log:
               }
             ],
             options: {
-              search: true,
               temperature: 0.1,
               max_tokens: 4000,
               web_search: true
@@ -858,40 +896,59 @@ For each activity you find, log:
         3
       );
 
-      if (!response.ok) {
-        throw new Error(`Perplexity API request failed: ${response.status} ${response.statusText}`);
+      if (!result.ok) {
+        throw new Error(`Perplexity API request failed: ${result.status} ${result.statusText}`);
       }
 
-      const result = await response.json() as PerplexityResponse;
+      const data = await result.json();
       
-      // Log the search results
-      const searchResults = result.choices[0].message.search_results || [];
-      logger.info('[Perplexity] Search completed', {
-        contentLength: result.choices[0].message.content.length,
-        hasSearchResults: searchResults.length > 0,
-        searchResultCount: searchResults.length,
-        viatorResults: searchResults.filter(r => r.url.includes('viator.com')).length,
-        getyourguideResults: searchResults.filter(r => r.url.includes('getyourguide.com')).length
+      logger.debug('Received response from Perplexity:', {
+        contentLength: data.choices?.[0]?.message?.content?.length,
+        hasChoices: !!data.choices,
+        firstChoice: data.choices?.[0]?.message,
+        searchResults: data.choices?.[0]?.message?.search_results
       });
 
-      if (searchResults.length > 0) {
-        logger.debug('[Perplexity] Search results', {
-          results: searchResults.map(r => ({
-            title: r.title,
-            url: r.url,
-            isViator: r.url.includes('viator.com'),
-            isGetYourGuide: r.url.includes('getyourguide.com'),
-            content: r.content.substring(0, 100) + '...'
-          }))
-        });
-      } else {
-        logger.warn('[Perplexity] No search results found from Viator or GetYourGuide');
+      if (!data.choices?.[0]?.message?.content) {
+        throw new Error('Invalid response from Perplexity API');
       }
 
-      return result.choices[0].message.content;
-    } catch (error) {
-      logger.error('[Perplexity] API error:', error);
+      const content = data.choices[0].message.content;
+      logger.debug('Raw content from Perplexity API:', content);
+
+      try {
+        // Try to parse the content directly first
+        return JSON.parse(content);
+      } catch (e) {
+        logger.warn('Failed to parse content directly, attempting to clean:', e);
+        
+        // Clean the content and try again
+        let cleanContent = content
+          .replace(/```(?:json)?\s*([\s\S]*?)```/g, '$1') // Remove markdown code blocks
+          .replace(/^[^{]*({[\s\S]*})[^}]*$/, '$1') // Extract just the JSON object
+          .trim();
+
+        logger.debug('Cleaned content:', cleanContent);
+        
+        try {
+          return JSON.parse(cleanContent);
+        } catch (e) {
+          logger.error('Failed to parse cleaned content:', e);
+          throw new Error('Failed to parse activity data');
+        }
+      }
+      } catch (error) {
+      logger.error('Error in querySingleActivity:', error);
       throw error;
+    }
+  }
+
+  private isValidJson(str: string): boolean {
+    try {
+      JSON.parse(str);
+      return true;
+    } catch {
+      return false;
     }
   }
 
@@ -907,159 +964,22 @@ For each activity you find, log:
 
   async generateSingleActivity(params: {
     destination: string;
-    timeOfDay: string;
-    dayNumber: number;
-    budget: number;
-    currency: string;
     category?: string;
-    userPreferences?: any;
-    existingActivities?: any[];
-    flightTimes?: any;
-  }): Promise<SingleActivityResponse> {
-    const categoryStr = params.category ? ` in the ${params.category} category` : '';
-    const preferencesStr = params.userPreferences ? ` that matches these preferences: ${params.userPreferences}` : '';
+    userPreferences?: string;
+  }): Promise<any> {
+    const prompt = this.constructPrompt({
+      destination: params.destination,
+      category: params.category,
+      userPreferences: params.userPreferences
+    });
     
-    // Determine price range based on tier
-    const priceRange = this.getPriceRangeForTier(params.budget, params.currency);
-    const provider = params.budget >= 100 ? 'Viator' : 'GetYourGuide';
+    const result = await this.querySingleActivity(prompt);
     
-    const prompt = `Find a REAL, BOOKABLE ${provider} activity in ${params.destination} during ${params.timeOfDay} on day ${params.dayNumber}${categoryStr}${preferencesStr}.
-
-STRICT PRICE REQUIREMENTS:
-- Activity MUST cost between ${priceRange.min} and ${priceRange.max} ${params.currency}
-- This is a ${params.budget >= 100 ? 'PREMIUM' : params.budget >= 30 ? 'MEDIUM' : 'BUDGET'} tier activity
-- ${provider} activities in this price range include: [list real examples you find]
-
-CRITICAL URL REQUIREMENTS:
-1. MUST be from ${provider} - NO EXCEPTIONS
-2. MUST use this EXACT URL format:
-   ${provider === 'Viator' 
-     ? '- https://www.viator.com/tours/[city]/[activity-name]/d[destination-id]-[activity-id]'
-     : '- https://www.getyourguide.com/[city]/[activity-code]'}
-3. URL must be for a real, active listing
-4. Verify the URL exists before including it
-
-SEARCH INSTRUCTIONS:
-1. Search ${provider}'s website for activities in ${params.destination}
-2. Filter for activities in the ${priceRange.min}-${priceRange.max} ${params.currency} range
-3. Find activities matching the category${categoryStr ? ` (${params.category})` : ''} and time slot (${params.timeOfDay})
-4. Verify the activity exists and is bookable
-5. Include EXACT details from the real listing
-
-Response Format:
-{
-  "name": "EXACT activity name from ${provider}",
-  "description": "EXACT description from the listing",
-  "duration": 2,
-  "price": 150,
-  "category": "${params.category || 'General'}",
-  "location": "Specific venue name",
-  "exact_address": "Full street address",
-  "opening_hours": "Real operating hours",
-  "startTime": "19:00",
-  "endTime": "21:00",
-  "rating": 4.5,
-  "number_of_reviews": 2500,
-  "key_highlights": [
-    "Real highlight 1",
-    "Real highlight 2",
-    "Real highlight 3"
-  ],
-  "preferred_time_of_day": "${params.timeOfDay}",
-  "bookingDetails": {
-    "provider": "${provider}",
-    "referenceUrl": "REAL ${provider} URL HERE",
-    "cancellationPolicy": "Exact policy from listing",
-    "instantConfirmation": true,
-    "mobileTicket": true,
-    "languages": ["English", "Local language"],
-    "minParticipants": 1,
-    "maxParticipants": 8,
-    "pickupIncluded": false,
-    "pickupLocation": "",
-    "accessibility": "From listing",
-    "restrictions": [
-      "From listing"
-    ]
-  },
-  "images": [
-    "Real image URL 1",
-    "Real image URL 2"
-  ]
-}
-
-IMPORTANT:
-- Only return activities that ACTUALLY EXIST on ${provider}
-- Price MUST be between ${priceRange.min} and ${priceRange.max} ${params.currency}
-- All details must be from a real listing
-- Do not make up or guess any information`;
-
-    try {
-      const response = await this.querySingleActivity(prompt);
-      const cleanedResponse = this.cleanJsonResponse(response);
-      const activity = JSON.parse(cleanedResponse);
-
-      // Validate price is within range
-      if (activity.price < priceRange.min || activity.price > priceRange.max) {
-        logger.warn('Activity price out of range, retrying with adjusted prompt', {
-          price: activity.price,
-          min: priceRange.min,
-          max: priceRange.max
-        });
-        
-        // Try one more time with a stronger emphasis on price
-        const retryPrompt = `${prompt}\n\nCRITICAL: The activity MUST cost between ${priceRange.min} and ${priceRange.max} ${params.currency}. DO NOT suggest activities outside this price range.`;
-        const retryResponse = await this.querySingleActivity(retryPrompt);
-        const retryCleanedResponse = this.cleanJsonResponse(retryResponse);
-        const retryActivity = JSON.parse(retryCleanedResponse);
-        
-        if (retryActivity.price < priceRange.min || retryActivity.price > priceRange.max) {
-          throw new Error(`Could not find activity in price range ${priceRange.min}-${priceRange.max} ${params.currency}`);
-        }
-        
-        return retryActivity;
-      }
-
-      // Validate booking details
-      if (!activity.bookingDetails?.provider || !activity.bookingDetails?.referenceUrl) {
-        throw new Error('Missing required booking details');
-      }
-
-      // Validate provider matches tier
-      if (activity.bookingDetails.provider !== provider) {
-        throw new Error(`Invalid provider ${activity.bookingDetails.provider} for tier ${params.budget}, expected ${provider}`);
-      }
-
-      // Validate URL format
-      const urlPattern = provider === 'Viator' 
-        ? /^https:\/\/www\.viator\.com\/tours\/.*\/.*\/d\d+-\w+$/
-        : /^https:\/\/www\.getyourguide\.com\/.*\/.*-\d+$/;
-      
-      if (!urlPattern.test(activity.bookingDetails.referenceUrl)) {
-        throw new Error(`Invalid ${provider} URL format`);
-      }
-
-      return activity;
-    } catch (error) {
-      logger.error('[Activity Generation] Error:', error);
-      
-      // If we've tried with a retry and still failed, return a placeholder
-      const placeholder = this.createPlaceholderActivity(
-        params.dayNumber,
-        params.timeOfDay,
-        params.budget >= 100 ? 'premium' : params.budget >= 30 ? 'medium' : 'budget'
-      );
-      
-      // Customize the placeholder with the specific category and preferences
-      if (params.category) {
-        placeholder.category = params.category;
-      }
-      if (params.userPreferences) {
-        placeholder.description += ` (${params.userPreferences})`;
-      }
-      
-      return placeholder;
+    if (result.error) {
+      return this.createPlaceholderActivity();
     }
+    
+    return result;
   }
 
   private getPriceRangeForTier(budget: number | string, currency: string): { min: number; max: number } {
@@ -1198,7 +1118,7 @@ IMPORTANT:
   }
 
   private hasValidBookingDetails(activity: any): boolean {
-    const isViatorUrl = (url: string) => /^https:\/\/www\.viator\.com\/tours\/[^/]+\/[^/]+\/d\d+-\w+$/.test(url);
+    const isViatorUrl = (url: string) => /^https:\/\/www\.viator\.com\/tours\/[^/]+\/[^/]+\/d\d+-[a-zA-Z0-9]+$/.test(url);
     const isGetYourGuideUrl = (url: string) => /^https:\/\/www\.getyourguide\.com\/[^/]+\/[^/]+-t\d+$/.test(url);
     
     const isValid = activity.bookingDetails &&
@@ -1243,8 +1163,8 @@ IMPORTANT:
   private ensureValidBookingDetails(bookingDetails: any, tier: string): TransformedActivity['bookingDetails'] {
     const provider = tier === 'premium' ? 'Viator' : 'GetYourGuide';
     const baseUrl = provider === 'Viator' ? 'https://www.viator.com' : 'https://www.getyourguide.com';
-    
-    return {
+
+      return {
       provider,
       referenceUrl: bookingDetails?.referenceUrl || `${baseUrl}/error-invalid-url`,
       cancellationPolicy: bookingDetails?.cancellationPolicy || 'Free cancellation up to 24 hours before the activity starts',
@@ -1260,56 +1180,44 @@ IMPORTANT:
     };
   }
 
-  private createPlaceholderActivity(day: number, timeSlot: string, tier: string): TransformedActivity {
-    const timeSlots = {
-      morning: { start: "09:00", end: "12:00" },
-      afternoon: { start: "14:00", end: "17:00" },
-      evening: { start: "19:00", end: "22:00" }
-    };
-    const slot = timeSlots[timeSlot as keyof typeof timeSlots];
-
-    const prices = {
-      budget: 25,
-      medium: 75,
-      premium: 150
-    };
-
-    const provider = tier === 'premium' ? 'Viator' : 'GetYourGuide';
-    const baseUrl = provider === 'Viator' ? 'https://www.viator.com' : 'https://www.getyourguide.com';
-
+  private createPlaceholderActivity(params?: { day?: number; timeSlot?: string; tier?: string }): ActivitySearchResult {
     return {
-      name: `${tier.charAt(0).toUpperCase() + tier.slice(1)} Activity`,
-      description: `A ${tier} activity in ${timeSlot}`,
+      name: "Activity Unavailable",
+      provider: "Viator",
+      price: 0,
+      price_category: params?.tier || "budget",
       duration: 2,
-      price: prices[tier as keyof typeof prices],
-      category: "General",
-      location: "To be determined",
-      exact_address: "",
-      opening_hours: `${slot.start} - ${slot.end}`,
-      startTime: slot.start,
-      endTime: slot.end,
-      rating: 4.5,
-      number_of_reviews: 100,
-      key_highlights: [`${tier.charAt(0).toUpperCase() + tier.slice(1)} experience`],
-      preferred_time_of_day: timeSlot,
-      dayNumber: day,
-      timeSlot,
-      tier,
-      bookingDetails: {
-        provider,
-        referenceUrl: `${baseUrl}/placeholder-${tier}-activity`,
-        cancellationPolicy: "Free cancellation up to 24 hours before the activity starts",
-        instantConfirmation: true,
-        mobileTicket: true,
-        languages: ["English", "German"],
-        minParticipants: 1,
-        maxParticipants: tier === 'premium' ? 8 : 50,
-        pickupIncluded: tier === 'premium',
-        pickupLocation: tier === 'premium' ? "Your hotel" : "",
-        accessibility: "Standard",
-        restrictions: []
+      typical_time: params?.timeSlot || "morning",
+      description: "No matching activity found. Please try different search criteria.",
+      highlights: ["No highlights available"],
+      rating: 0,
+      review_count: 0,
+      booking_url: "",
+      languages: ["English"],
+      cancellation_policy: "N/A",
+      location: {
+        meeting_point: "To be determined",
+        address: ""
       },
-      images: []
+      booking_info: {
+        instant_confirmation: false,
+        mobile_ticket: false,
+        min_participants: 1,
+        max_participants: 1
+      }
     };
+  }
+
+  private determineTimeSlot(startTime: string): 'morning' | 'afternoon' | 'evening' {
+    const hour = parseInt(startTime.split(':')[0]);
+    if (hour >= 5 && hour < 12) return 'morning';
+    if (hour >= 12 && hour < 17) return 'afternoon';
+    return 'evening';
+  }
+
+  private determinePriceCategory(price: number): 'budget' | 'medium' | 'premium' {
+    if (price < 30) return 'budget';
+    if (price <= 100) return 'medium';
+    return 'premium';
   }
 } 
