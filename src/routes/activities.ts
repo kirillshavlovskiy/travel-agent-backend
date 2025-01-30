@@ -87,135 +87,78 @@ router.post('/generate', async (req: Request, res: Response) => {
 
 router.post('/enrich', async (req, res) => {
   try {
-    const { activityId, productCode, name } = req.body;
+    const { activityId, referenceUrl, name } = req.body;
+    
+    if (!referenceUrl && !name) {
+      return res.status(400).json({
+        error: 'Either referenceUrl or activity name is required'
+      });
+    }
 
-    logger.info('[Activities API] Enriching activity:', {
+    // Extract product code from URL or use fallback search
+    const productCode = referenceUrl?.match(/\-([a-zA-Z0-9]+)(?:\?|$)/)?.[1];
+    
+    logger.info('Enriching activity details', {
       activityId,
       productCode,
       name
     });
 
-    if (!productCode) {
-      logger.warn('[Activities API] No product code provided');
-      return res.status(400).json({ error: 'Product code is required' });
-    }
-
     const viatorClient = new ViatorService(process.env.VIATOR_API_KEY || '');
-
+    
     try {
-      // First try to search for the activity
-      const searchResults = await viatorClient.searchActivity(`productCode:${productCode}`);
-      
-      let enrichedActivity;
-      
-      if (!searchResults || searchResults.length === 0) {
-        // If product code search fails, try searching by name
-        logger.warn('[Activities API] Product not found by code, trying name search:', {
-          productCode,
-          name
-        });
-        
-        const nameSearchResults = await viatorClient.searchActivity(name);
-        if (!nameSearchResults || nameSearchResults.length === 0) {
-          throw new Error('Activity not found by code or name');
-        }
+      const enrichedData = await viatorClient.enrichActivityDetails(productCode || '', name);
 
-        // Find the best matching activity from name search
-        const bestMatch = nameSearchResults[0];
-        logger.info('[Activities API] Found activity by name:', {
+      if (enrichedData.error) {
+        logger.warn('Activity enrichment returned with error', {
           activityId,
-          foundName: bestMatch.name,
-          originalName: name
-        });
-
-        // Now enrich with product details
-        enrichedActivity = await viatorClient.enrichActivityDetails({
-          ...bestMatch,
-          name: name || bestMatch.name,
-          referenceUrl: bestMatch.referenceUrl
-        });
-      } else {
-        const basicActivity = searchResults[0];
-        
-        // Now enrich with product details
-        enrichedActivity = await viatorClient.enrichActivityDetails({
-          ...basicActivity,
-          name: name || basicActivity.name,
-          referenceUrl: `https://www.viator.com/tours/${productCode}`
+          error: enrichedData.error
         });
       }
 
-      logger.info('[Activities API] Successfully enriched activity with Viator data:', {
-        activityId,
-        productCode,
-        hasEnrichedData: !!enrichedActivity
+      // Log the structure of enriched data for debugging
+      logger.debug('Enriched activity data structure:', {
+        hasDetails: !!enrichedData.details,
+        detailsStructure: enrichedData.details ? Object.keys(enrichedData.details) : [],
+        hasHighlights: Array.isArray(enrichedData.highlights),
+        highlightsCount: enrichedData.highlights?.length,
+        hasReviews: !!enrichedData.reviews?.items,
+        reviewsCount: enrichedData.reviews?.items?.length,
+        hasItinerary: !!enrichedData.itinerary,
+        itineraryType: enrichedData.itinerary?.itineraryType,
+        location: enrichedData.details?.meetingAndPickup?.meetingPoint
       });
 
-      // Now enrich with Perplexity AI-generated content
-      try {
-        const query = `Please analyze this activity and provide commentary and highlights:
-          Name: ${enrichedActivity.name}
-          Location: ${enrichedActivity.location}
-          Description: ${enrichedActivity.description || ''}
-          Duration: ${enrichedActivity.duration} hours
-          Price: ${enrichedActivity.price?.amount} ${enrichedActivity.price?.currency}
-
-          Please provide:
-          1. A 2-3 sentence commentary explaining why this activity is recommended and what makes it special
-          2. A 1-2 sentence explanation of how this activity fits into a day's itinerary
-          3. A list of key highlights and features`;
-
-        const perplexityResponse = await perplexityClient.getEnrichedDetails(query);
-        
-        if (perplexityResponse && !perplexityResponse.error) {
-          // Extract AI-generated content
-          const {
-            commentary,
-            itineraryHighlight,
-            highlights = [],
-            description
-          } = perplexityResponse;
-          
-          // Merge AI-generated content with Viator data
-          enrichedActivity = {
-            ...enrichedActivity,
-            commentary: commentary || enrichedActivity.commentary,
-            itineraryHighlight: itineraryHighlight || enrichedActivity.itineraryHighlight,
-            description: description || enrichedActivity.description,
-            highlights: highlights.length > 0 ? highlights : (enrichedActivity.highlights || [])
-          };
-          
-          logger.info('[Activities API] Successfully added AI-generated content:', {
-            activityId,
-            hasCommentary: !!commentary,
-            hasItineraryHighlight: !!itineraryHighlight,
-            hasDescription: !!description,
-            highlightsCount: highlights.length
-          });
-        }
-      } catch (perplexityError) {
-        logger.error('[Activities API] Error getting AI-generated content:', {
-          error: perplexityError instanceof Error ? perplexityError.message : 'Unknown error',
-          activityId
-        });
-        // Continue with Viator data only
-      }
-
-      res.json(enrichedActivity);
+      res.json(enrichedData);
     } catch (error) {
-      logger.error('[Activities API] Error getting activity details:', {
+      logger.error('Error getting activity details:', {
         error: error instanceof Error ? error.message : 'Unknown error',
         activityId,
         productCode
       });
-      throw error;
+
+      // Return a structured error response that the frontend can handle
+      res.status(500).json({
+        error: error instanceof Error ? error.message : 'Failed to get activity details',
+        details: {
+          name: name,
+          overview: "Details temporarily unavailable. Please check back later.",
+          whatIncluded: { included: [], excluded: [] },
+          additionalInfo: {}
+        },
+        images: [],
+        highlights: [],
+        timestamp: new Date().toISOString()
+      });
     }
   } catch (error) {
-    logger.error('[Activities API] Error enriching activity:', {
-      error: error instanceof Error ? error.message : 'Unknown error'
+    logger.error('Error enriching activity:', {
+      error: error instanceof Error ? error.message : 'Unknown error',
+      stack: error instanceof Error ? error.stack : undefined
     });
+    
     res.status(500).json({
-      error: error instanceof Error ? error.message : 'Failed to enrich activity',
+      error: error instanceof Error ? error.message : 'An unknown error occurred',
       timestamp: new Date().toISOString()
     });
   }
