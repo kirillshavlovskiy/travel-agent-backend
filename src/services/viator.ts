@@ -98,6 +98,9 @@ interface ViatorProduct {
     minParticipants: number;
     maxParticipants: number;
   };
+  productDetails?: {
+    productOptions?: ViatorProductOption[];
+  };
 }
 
 interface ViatorLocationInfo {
@@ -226,6 +229,12 @@ interface EnrichedActivity extends Omit<ViatorProduct, 'location'> {
   location: ViatorLocationInfo;
   openingHours?: string;
   details?: ViatorProductDetails;
+  itinerary?: ItineraryType;
+  productDetails?: {
+    productOptions?: ViatorProductOption[];
+  };
+  commentary?: string;
+  itineraryHighlight?: string;
 }
 
 interface ViatorReviewBreakdown {
@@ -256,6 +265,23 @@ interface ActivityTimeSlot {
   endTime: string;
   duration: number;
   category: string;
+}
+
+interface ItineraryType {
+  itineraryType: 'STANDARD' | 'ACTIVITY' | 'MULTI_DAY_TOUR' | 'HOP_ON_HOP_OFF' | 'UNSTRUCTURED';
+  skipTheLine: boolean;
+  privateTour: boolean;
+  maxTravelersInSharedTour?: number;
+  duration?: {
+    fixedDurationInMinutes?: number;
+  };
+  itineraryItems?: any[];
+  days?: any[];
+  routes?: any[];
+  pointsOfInterest?: any[];
+  activityInfo?: any;
+  foodMenus?: any[];
+  unstructuredDescription?: string;
 }
 
 interface ViatorItinerary {
@@ -355,6 +381,7 @@ interface ViatorAvailabilitySchedule {
 }
 
 interface Activity {
+  id?: string;
   name: string;
   description: string;
   duration?: number;
@@ -362,6 +389,7 @@ interface Activity {
     amount: number;
     currency: string;
   };
+  tier?: string;
   rating?: number;
   numberOfReviews?: number;
   ratingDisplay?: string;
@@ -376,47 +404,87 @@ interface Activity {
     maxParticipants: number;
   };
   highlights?: string[];
-  location: string;
+  meetingPoint?: {
+    name: string;
+    address: string;
+    details: string;
+  };
+  endPoint?: {
+    name: string;
+    address: string;
+    details: string;
+  };
+  location: {
+    address?: string;
+    coordinates?: {
+      latitude: number;
+      longitude: number;
+    };
+  };
   category: string;
   referenceUrl: string;
+  operatingHours?: string;
+  overview?: string;
+  whatsIncluded?: any;
+  itinerary?: any[];
+  cancellationPolicy?: string;
+}
+
+interface ViatorProductOption {
+  productOptionCode: string;
+  description: string;
+  title: string;
+  languageGuides?: string[];
 }
 
 const ACTIVITY_CATEGORIES: ActivityCategory[] = [
   {
-    name: 'Cultural',
-    keywords: ['museum', 'gallery', 'history', 'art', 'palace', 'cathedral', 'church', 'monument'],
+    name: 'Cultural & Historical',
+    keywords: ['museum', 'gallery', 'history', 'art', 'palace', 'cathedral', 'church', 'monument', 'heritage'],
     preferredTimeOfDay: 'morning',
     typicalDuration: 120
   },
   {
-    name: 'Outdoor',
-    keywords: ['park', 'garden', 'hiking', 'walking', 'beach', 'mountain', 'nature'],
-    preferredTimeOfDay: 'morning',
+    name: 'Cruises & Sailing',
+    keywords: ['cruise', 'boat', 'sailing', 'river', 'yacht', 'dinner cruise', 'lunch cruise', 'night cruise', 'canal'],
+    preferredTimeOfDay: 'afternoon',
     typicalDuration: 180
   },
   {
-    name: 'Entertainment',
-    keywords: ['show', 'concert', 'theater', 'flamenco', 'performance', 'dance'],
-    preferredTimeOfDay: 'evening',
-    typicalDuration: 120
-  },
-  {
-    name: 'Food & Drink',
-    keywords: ['food', 'wine', 'tasting', 'dinner', 'lunch', 'tapas', 'culinary', 'restaurant'],
+    name: 'Food & Dining',
+    keywords: ['food', 'dinner', 'lunch', 'culinary', 'restaurant', 'cooking class', 'wine tasting', 'tapas', 'gourmet'],
     preferredTimeOfDay: 'evening',
     typicalDuration: 150
   },
   {
-    name: 'Shopping',
-    keywords: ['market', 'shopping', 'boutique', 'store', 'mall'],
-    preferredTimeOfDay: 'afternoon',
+    name: 'Shows & Entertainment',
+    keywords: ['show', 'concert', 'theater', 'performance', 'dance', 'musical', 'cabaret', 'circus', 'disney'],
+    preferredTimeOfDay: 'evening',
     typicalDuration: 120
   },
   {
-    name: 'Adventure',
-    keywords: ['bike', 'sailing', 'kayak', 'adventure', 'sport', 'diving'],
+    name: 'Outdoor Activities',
+    keywords: ['hiking', 'walking', 'beach', 'mountain', 'nature', 'park', 'garden', 'bike tour', 'cycling'],
     preferredTimeOfDay: 'morning',
     typicalDuration: 240
+  },
+  {
+    name: 'Adventure & Sports',
+    keywords: ['kayak', 'adventure', 'sport', 'diving', 'climbing', 'rafting', 'zip line', 'bungee'],
+    preferredTimeOfDay: 'morning',
+    typicalDuration: 240
+  },
+  {
+    name: 'Tickets & Passes',
+    keywords: ['ticket', 'pass', 'admission', 'entry', 'skip-the-line', 'fast track', 'priority access'],
+    preferredTimeOfDay: 'morning',
+    typicalDuration: 120
+  },
+  {
+    name: 'Transportation',
+    keywords: ['transfer', 'airport', 'hotel', 'shuttle', 'private driver', 'pickup', 'transport'],
+    preferredTimeOfDay: 'morning',
+    typicalDuration: 60
   }
 ];
 
@@ -887,7 +955,7 @@ export class ViatorService {
           };
 
           // Extract product options
-          const productOptions = productDetails.productOptions?.map(option => ({
+          const productOptions = productDetails.productOptions?.map((option: ViatorProductOption) => ({
             productOptionCode: option.productOptionCode,
             description: option.description,
             title: option.title,
@@ -964,7 +1032,16 @@ export class ViatorService {
       images: product.images?.map((img: any) => {
         const preferredVariant = img.variants?.find((v: any) => v.width === 480 && v.height === 320);
         return preferredVariant?.url || img.variants?.[0]?.url;
-      }),
+      }) || [],
+      bookingInfo: {
+        productCode: product.productCode,
+        cancellationPolicy: product.bookingInfo?.cancellationPolicy || 'Standard cancellation policy',
+        instantConfirmation: true,
+        mobileTicket: true,
+        languages: ['English'],
+        minParticipants: product.bookingInfo?.minParticipants || 1,
+        maxParticipants: product.bookingInfo?.maxParticipants || 999
+      },
       meetingPoint: product.meetingPoint ? {
         name: product.meetingPoint.name,
         address: product.meetingPoint.address,
@@ -988,7 +1065,6 @@ export class ViatorService {
           admissionType: stop.admissionType
         }))
       })),
-      additionalInfo: product.additionalInfo,
       cancellationPolicy: product.cancellationPolicy,
       referenceUrl: product.productUrl || (product.destinations?.[0]?.ref ? 
         `https://www.viator.com/tours/${product.destinations[0].name.split(',')[0]}/${product.title.replace(/[^a-zA-Z0-9]+/g, '-')}/d${product.destinations[0].ref}-${product.productCode}` : 

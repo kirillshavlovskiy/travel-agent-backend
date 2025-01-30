@@ -10,6 +10,7 @@ import hotelRoutes from './src/routes/hotels';
 import perplexityRoutes from './src/routes/perplexity';
 import activitiesRoutes from './src/routes/activities';
 import enrichmentRouter from './src/routes/enrichment';
+import locationsRouter from './src/routes/locations';
 // Load environment variables
 config();
 const app = express();
@@ -100,6 +101,7 @@ authenticatedRouter.use('/api/flights', flightRoutes);
 authenticatedRouter.use('/api/hotels', hotelRoutes);
 authenticatedRouter.use('/api/perplexity', perplexityRoutes);
 authenticatedRouter.use('/api/activities', activitiesRoutes);
+authenticatedRouter.use('/api/locations', locationsRouter);
 // Mount the authenticated router
 app.use(authenticatedRouter);
 // Mount enrichment routes
@@ -169,7 +171,7 @@ app.listen(PORT, '0.0.0.0', () => {
     console.log('Routes mounted:', {
         auth: !!authRoutes,
         budget: !!budgetRoutes,
-        flights: !!flightRoutes
+        flights: !!flightRoutes,
+        locations: !!locationsRouter
     });
 });
-//# sourceMappingURL=server.js.map

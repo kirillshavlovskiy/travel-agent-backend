@@ -1,4 +1,4 @@
-import axios from 'axios';
+import Amadeus from 'amadeus';
 import { logger } from '../utils/logger.js';
 const AIRCRAFT_CODES = {
     '319': 'Airbus A319',
@@ -43,94 +43,289 @@ const AIRCRAFT_CODES = {
 };
 export class AmadeusService {
     constructor() {
-        this.accessToken = null;
-        this.tokenExpiresAt = null;
-        this.commonAirlines = {};
-        this.retryConfig = {
-            maxRetries: 3,
-            baseDelay: 1000, // 1 second
-            maxDelay: 10000 // 10 seconds
-        };
-        this.baseURL = process.env.AMADEUS_API_URL || 'https://test.api.amadeus.com';
-        this.clientId = process.env.AMADEUS_CLIENT_ID || '';
-        this.clientSecret = process.env.AMADEUS_CLIENT_SECRET || '';
-        this.initializeCommonAirlines();
-    }
-    initializeCommonAirlines() {
-        this.commonAirlines = {
-            'AA': 'American Airlines',
-            'UA': 'United Airlines',
-            'DL': 'Delta Air Lines',
-            'LH': 'Lufthansa',
-            'BA': 'British Airways',
-            'AF': 'Air France',
-            'KL': 'KLM Royal Dutch Airlines',
-            'IB': 'Iberia',
-            'EK': 'Emirates',
-            'QR': 'Qatar Airways'
-        };
-    }
-    async getToken() {
-        if (this.accessToken && this.tokenExpiresAt && Date.now() < this.tokenExpiresAt) {
-            return this.accessToken;
+        this.lastFlightSearchDictionaries = null;
+        const clientId = process.env.AMADEUS_CLIENT_ID;
+        const clientSecret = process.env.AMADEUS_CLIENT_SECRET;
+        logger.info('Initializing Amadeus service', {
+            hasClientId: !!clientId,
+            hasClientSecret: !!clientSecret
+        });
+        if (!clientId || !clientSecret) {
+            logger.error('Missing Amadeus API credentials', {
+                clientIdPresent: !!clientId,
+                clientSecretPresent: !!clientSecret
+            });
+            throw new Error('Missing Amadeus API credentials');
         }
         try {
-            console.log('[Amadeus] Requesting new access token');
-            const response = await axios.post(`${this.baseURL}/v1/security/oauth2/token`, new URLSearchParams({
-                grant_type: 'client_credentials',
-                client_id: this.clientId,
-                client_secret: this.clientSecret
-            }), {
-                headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded'
-                }
+            this.amadeus = new Amadeus({
+                clientId,
+                clientSecret,
             });
-            if (!response.data?.access_token) {
-                throw new Error('No access token received from Amadeus');
-            }
-            this.accessToken = response.data.access_token;
-            this.tokenExpiresAt = Date.now() + (response.data.expires_in * 1000);
-            console.log('[Amadeus] Successfully obtained new access token');
-            return this.accessToken;
+            logger.info('Amadeus client initialized successfully');
         }
         catch (error) {
-            console.error('[Amadeus] Failed to get access token:', error);
+            logger.error('Failed to initialize Amadeus client', {
+                error: error instanceof Error ? error.message : 'Unknown error',
+                stack: error instanceof Error ? error.stack : undefined
+            });
             throw error;
         }
+    }
+    async searchHotels(params) {
+        try {
+            logger.info('Searching for hotels in city', { params });
+            // Get hotels with offers
+            const hotelsResponse = await this.amadeus.shopping.hotelOffers.get({
+                cityCode: params.cityCode,
+                checkInDate: params.checkInDate,
+                checkOutDate: params.checkOutDate,
+                adults: params.adults,
+                roomQuantity: params.roomQuantity,
+                radius: params.radius || 5,
+                radiusUnit: 'KM',
+                ratings: params.ratings || '3,4,5',
+                amenities: 'SWIMMING_POOL,SPA,FITNESS_CENTER',
+                currency: params.currency || 'USD',
+                view: 'FULL'
+            });
+            const hotels = JSON.parse(hotelsResponse.body);
+            logger.info('Found hotels', { count: hotels.data?.length || 0 });
+            if (!hotels.data || hotels.data.length === 0) {
+                return [];
+            }
+            // Transform the response
+            return hotels.data;
+        }
+        catch (error) {
+            logger.error('Error searching hotels:', {
+                error: error instanceof Error ? error.message : 'Unknown error',
+                stack: error instanceof Error ? error.stack : undefined,
+                response: error?.response?.data
+            });
+            throw error;
+        }
+    }
+    determineHotelType(rating) {
+        if (rating >= 4)
+            return 'luxury';
+        if (rating >= 3)
+            return 'comfort';
+        return 'budget';
+    }
+    transformHotelOffer(offer) {
+        const offers = offer.offers || [];
+        const price = offers[0]?.price?.total ? parseFloat(offers[0].price.total) : 0;
+        const rating = offer.rating ? parseInt(offer.rating) : 0;
+        return {
+            name: offer.name || '',
+            location: offer.cityName || '',
+            price: {
+                amount: price,
+                currency: 'USD',
+                total: price,
+                perNight: price / (offers[0]?.roomQuantity || 1)
+            },
+            tier: this.determineHotelType(rating),
+            type: 'hotel',
+            amenities: offer.description || '',
+            rating,
+            reviewScore: rating ? rating / 2 : 0,
+            reviewCount: 0,
+            images: offer.media || [],
+            referenceUrl: '#',
+            coordinates: {
+                latitude: offer.geoCode?.latitude || 0,
+                longitude: offer.geoCode?.longitude || 0
+            },
+            features: offer.description ? [offer.description] : [],
+            policies: {
+                checkIn: '',
+                checkOut: '',
+                cancellation: offers[0]?.policies?.cancellation?.description || ''
+            }
+        };
+    }
+    getCityCode(destination) {
+        // Remove country part if present
+        const city = destination.split(',')[0].trim().toUpperCase();
+        // Try to find the city code in the last flight search dictionaries
+        if (this.lastFlightSearchDictionaries?.locations) {
+            const locationEntry = Object.entries(this.lastFlightSearchDictionaries.locations)
+                .find(([_, info]) => info.cityCode === city);
+            if (locationEntry) {
+                return locationEntry[0]; // Return the IATA code
+            }
+        }
+        // If not found, return the city name as is (will be validated by Amadeus)
+        return city;
+    }
+    getAircraftName(code) {
+        return this.lastFlightSearchDictionaries?.aircraft?.[code] || code;
+    }
+    getCarrierName(code) {
+        return this.lastFlightSearchDictionaries?.carriers?.[code] || code;
+    }
+    getCurrencyName(code) {
+        return this.lastFlightSearchDictionaries?.currencies?.[code] || code;
     }
     async getAirlineInfo(airlineCodes) {
         const codes = Array.isArray(airlineCodes) ? airlineCodes : [airlineCodes];
         const results = [];
         try {
-            const token = await this.getToken();
-            await this.retryWithBackoff(async () => {
-                const response = await axios.get(`${this.baseURL}/v1/reference-data/airlines`, {
-                    params: {
-                        airlineCodes: codes.join(',')
-                    },
-                    headers: {
-                        Authorization: `Bearer ${token}`,
-                        'Content-Type': 'application/json'
-                    }
+            for (const code of codes) {
+                const carrierName = this.getCarrierName(code);
+                results.push({
+                    iataCode: code,
+                    commonName: carrierName,
+                    businessName: carrierName
                 });
-                if (response.data?.data) {
-                    results.push(...response.data.data.map((airline) => ({
-                        ...airline,
-                        commonName: airline.commonName || airline.businessName || airline.iataCode
-                    })));
-                }
-            });
+            }
         }
         catch (error) {
-            logger.error('Error fetching airline info', { error });
-            // Fallback to dictionaries and common airlines map
+            logger.error('Error in getAirlineInfo:', {
+                error: error instanceof Error ? error.message : 'Unknown error',
+                codes
+            });
+            // Fallback to using codes as names
             results.push(...codes.map(code => ({
                 iataCode: code,
-                commonName: this.commonAirlines[code] || code,
-                businessName: this.commonAirlines[code]
+                commonName: code,
+                businessName: code
             })));
         }
         return results;
+    }
+    async searchFlights(params) {
+        try {
+            logger.info('Searching flights with params:', {
+                segments: params.segments,
+                travelClass: params.travelClass,
+                adults: params.adults
+            });
+            if (!params.segments || !Array.isArray(params.segments) || params.segments.length === 0) {
+                throw new Error('At least one flight segment is required');
+            }
+            // Validate all segments
+            params.segments.forEach((segment, index) => {
+                if (!segment.originLocationCode || !segment.destinationLocationCode || !segment.departureDate) {
+                    throw new Error(`Invalid segment data at index ${index}: origin, destination, and departure date are required`);
+                }
+            });
+            // Format the search parameters according to Amadeus API requirements
+            const searchParams = {
+                originDestinations: params.segments.map((segment, index) => ({
+                    id: String(index + 1),
+                    originLocationCode: segment.originLocationCode,
+                    destinationLocationCode: segment.destinationLocationCode,
+                    departureDateTimeRange: {
+                        date: segment.departureDate
+                    }
+                })),
+                travelers: Array.from({ length: params.adults }, (_, i) => ({
+                    id: String(i + 1),
+                    travelerType: 'ADULT'
+                })),
+                sources: ['GDS'],
+                searchCriteria: {
+                    maxFlightOffers: params.max || 100,
+                    flightFilters: {
+                        cabinRestrictions: [{
+                                cabin: params.travelClass,
+                                coverage: 'MOST_SEGMENTS',
+                                originDestinationIds: params.segments.map((_, i) => String(i + 1))
+                            }]
+                    }
+                }
+            };
+            logger.info('Making Amadeus API call with formatted params:', searchParams);
+            try {
+                const response = await this.amadeus.shopping.flightOffersSearch.post(JSON.stringify(searchParams));
+                if (!response || !response.body) {
+                    logger.warn('Empty response from Amadeus API');
+                    return [];
+                }
+                const results = typeof response.body === 'string' ? JSON.parse(response.body) : response.body;
+                logger.info('Flight search successful', {
+                    count: results.data?.length || 0,
+                    dictionaries: results.dictionaries,
+                    firstResult: results.data?.[0]
+                });
+                // Store dictionaries for later use
+                this.lastFlightSearchDictionaries = results.dictionaries || null;
+                return results.data || [];
+            }
+            catch (apiError) {
+                // Log detailed API error
+                logger.error('Amadeus API error:', {
+                    error: {
+                        name: apiError.name,
+                        message: apiError.message,
+                        code: apiError.code,
+                        status: apiError.response?.statusCode,
+                        statusText: apiError.response?.statusText,
+                        data: apiError.response?.result?.errors || apiError.response?.data,
+                        request: {
+                            method: apiError.response?.request?.method,
+                            path: apiError.response?.request?.path,
+                            params: searchParams
+                        }
+                    }
+                });
+                return [];
+            }
+        }
+        catch (error) {
+            logger.error('Failed to search flights', {
+                error: error instanceof Error ? {
+                    name: error.name,
+                    message: error.message,
+                    stack: error.stack,
+                    code: error.code,
+                    response: {
+                        status: error?.response?.statusCode,
+                        statusText: error?.response?.statusText,
+                        errors: error?.response?.result?.errors,
+                        data: error?.response?.data,
+                        request: {
+                            method: error?.response?.request?.method,
+                            path: error?.response?.request?.path
+                        }
+                    }
+                } : 'Unknown error',
+                params,
+                amadeusInitialized: !!this.amadeus,
+                hasShoppingAPI: !!this.amadeus?.shopping?.flightOffersSearch?.post
+            });
+            return []; // Return empty array instead of throwing
+        }
+    }
+    async confirmFlightPrice(flightOffer) {
+        try {
+            logger.info('Confirming flight price', {
+                offerId: flightOffer.id,
+                price: flightOffer.price
+            });
+            const response = await this.amadeus.shopping.flightOffersSearch.pricing.post(JSON.stringify({
+                data: {
+                    type: 'flight-offers-pricing',
+                    flightOffers: [flightOffer]
+                }
+            }));
+            const priceConfirmation = JSON.parse(response.body);
+            logger.info('Price confirmation successful', {
+                confirmedPrice: priceConfirmation.data.flightOffers[0].price
+            });
+            return priceConfirmation.data;
+        }
+        catch (error) {
+            logger.error('Failed to confirm flight price', {
+                error: error instanceof Error ? error.message : 'Unknown error',
+                stack: error instanceof Error ? error.stack : undefined,
+                offerId: flightOffer.id
+            });
+            throw error;
+        }
     }
     calculateTotalDuration(segments) {
         let totalMinutes = 0;
@@ -147,247 +342,103 @@ export class AmadeusService {
         const minutes = totalMinutes % 60;
         return `PT${hours}H${minutes}M`;
     }
-    async retryWithBackoff(operation, retryCount = 0) {
+    determineTier(flightOffer) {
         try {
-            return await operation();
-        }
-        catch (error) {
-            if (retryCount >= this.retryConfig.maxRetries) {
-                throw error;
-            }
-            // Calculate delay with exponential backoff
-            const delay = Math.min(this.retryConfig.baseDelay * Math.pow(2, retryCount), this.retryConfig.maxDelay);
-            if (error.response?.status === 429 || error.code === 'ECONNABORTED') {
-                console.log(`[Amadeus] Retrying after ${delay}ms (attempt ${retryCount + 1}/${this.retryConfig.maxRetries})`);
-                await new Promise(resolve => setTimeout(resolve, delay));
-                return this.retryWithBackoff(operation, retryCount + 1);
-            }
-            throw error;
-        }
-    }
-    async searchFlights(params) {
-        return this.retryWithBackoff(async () => {
-            try {
-                console.log('[Amadeus] Starting flight search with params:', {
-                    ...params,
-                    accessToken: '***' // Hide the token in logs
-                });
-                const token = await this.getToken();
-                if (!token) {
-                    throw new Error('Failed to obtain valid token');
-                }
-                const response = await axios.get(`${this.baseURL}/v2/shopping/flight-offers`, {
-                    headers: {
-                        Authorization: `Bearer ${token}`,
-                        'Content-Type': 'application/json'
-                    },
-                    params: {
-                        originLocationCode: params.originLocationCode,
-                        destinationLocationCode: params.destinationLocationCode,
-                        departureDate: params.departureDate,
-                        returnDate: params.returnDate,
-                        adults: params.adults.toString(),
-                        travelClass: params.travelClass || 'ECONOMY',
-                        max: (params.max || 25).toString(),
-                        currencyCode: params.currencyCode || 'USD',
-                        nonStop: params.nonStop || false
-                    },
-                    timeout: 15000 // Reduced timeout to 15 seconds
-                });
-                console.log('[Amadeus] Flight search successful:', {
-                    status: response.status,
-                    flightCount: response.data?.data?.length || 0,
-                    sampleFlight: response.data?.data?.[0] ? {
-                        price: response.data.data[0].price,
-                        itineraries: response.data.data[0].itineraries.map((it) => ({
-                            segments: it.segments.map((seg) => ({
-                                departure: seg.departure,
-                                arrival: seg.arrival,
-                                carrierCode: seg.carrierCode,
-                                aircraft: seg.aircraft
-                            }))
-                        })),
-                        travelerPricings: response.data.data[0].travelerPricings
-                    } : null,
-                    dictionaries: response.data?.dictionaries
-                });
-                return response.data?.data || [];
-            }
-            catch (error) {
-                console.error('[Amadeus] Flight search error:', {
-                    status: error.response?.status,
-                    statusText: error.response?.statusText,
-                    data: error.response?.data,
-                    message: error.message,
-                    errors: error.response?.data?.errors,
-                    stack: error.stack
-                });
-                // Check if we need to refresh the token
-                if (error.response?.status === 401) {
-                    console.log('[Amadeus] Token expired, refreshing...');
-                    this.accessToken = null; // Clear the token to force refresh
-                    await this.getToken();
-                    throw error; // Let retry mechanism handle it
-                }
-                throw error;
-            }
-        });
-    }
-    determineTier(price, cabinClass) {
-        // First, consider cabin class as it's the primary factor
-        if (cabinClass) {
-            const upperCabinClass = cabinClass.toUpperCase();
+            // Get cabin class from first traveler's first segment
+            const cabinClass = flightOffer.travelerPricings?.[0]?.fareDetailsBySegment?.[0]?.cabin || 'ECONOMY';
+            const price = parseFloat(flightOffer.price.total);
+            // Normalize cabin class for comparison
+            const normalizedCabin = cabinClass.toUpperCase();
             // First class is always premium
-            if (upperCabinClass === 'FIRST') {
+            if (normalizedCabin === 'FIRST' || normalizedCabin === 'LA PREMIERE') {
                 return 'premium';
             }
-            // Business class can be premium or medium based on price
-            if (upperCabinClass === 'BUSINESS') {
-                return price > 2000 ? 'premium' : 'medium';
+            // Business class can be medium or premium based on price
+            if (normalizedCabin === 'BUSINESS' || normalizedCabin === 'PREMIUM_BUSINESS') {
+                return price <= 1500 ? 'medium' : 'premium';
             }
-            // Premium economy is medium unless very expensive
-            if (upperCabinClass === 'PREMIUM_ECONOMY') {
-                return price > 2000 ? 'premium' : 'medium';
+            // Premium economy is typically medium, but can be premium if very expensive
+            if (normalizedCabin === 'PREMIUM_ECONOMY' || normalizedCabin === 'PREMIUM') {
+                return price <= 1200 ? 'medium' : 'premium';
+            }
+            // For economy class, use more granular price tiers
+            if (price <= 800) {
+                return 'budget';
+            }
+            else if (price <= 1200) {
+                return 'medium';
+            }
+            else {
+                return 'premium';
             }
         }
-        // For economy class or unspecified cabin class, use price ranges
-        // These thresholds are based on typical market ranges for economy flights
-        if (price <= 800) {
-            return 'budget';
-        }
-        else if (price <= 1500) {
-            return 'medium';
-        }
-        else {
-            return 'premium';
+        catch (error) {
+            logger.error('[AmadeusService] Error determining tier:', error);
+            return 'budget'; // Default to budget if there's an error
         }
     }
     generateBookingUrl(flightOffer) {
         try {
-            const firstSegment = flightOffer.itineraries[0].segments[0];
-            const lastSegment = flightOffer.itineraries[0].segments[flightOffer.itineraries[0].segments.length - 1];
+            const { validatingAirlineCodes, itineraries } = flightOffer;
+            if (!validatingAirlineCodes || validatingAirlineCodes.length === 0 || !itineraries || itineraries.length === 0) {
+                throw new Error('Missing required flight offer data');
+            }
+            const mainAirline = validatingAirlineCodes[0];
+            const firstSegment = itineraries[0].segments[0];
+            const lastSegment = itineraries[0].segments[itineraries[0].segments.length - 1];
+            // Get origin and destination
             const origin = firstSegment.departure.iataCode;
             const destination = lastSegment.arrival.iataCode;
-            const departureDate = firstSegment.departure.at.split('T')[0];
-            const returnDate = flightOffer.itineraries[1]?.segments[0]?.departure.at.split('T')[0];
-            const adults = flightOffer.travelerPricings.length;
-            const cabinClass = flightOffer.travelerPricings[0].fareDetailsBySegment[0].cabin;
-            // Base URL for flight booking
-            const baseUrl = 'https://www.amadeus.com/flights';
-            // Construct query parameters
-            const params = new URLSearchParams({
-                origin,
-                destination,
-                departureDate,
-                adults: adults.toString(),
-                cabinClass: cabinClass.toLowerCase()
-            });
-            if (returnDate) {
-                params.append('returnDate', returnDate);
+            // Format date (YYYY-MM-DD to DDMMYY)
+            const departureDate = firstSegment.departure.at.split('T')[0]
+                .replace(/-/g, '')
+                .slice(2); // Convert to DDMMYY
+            // Generate URL based on airline
+            switch (mainAirline) {
+                case 'LH': // Lufthansa
+                    return `https://www.lufthansa.com/us/en/flight-search?searchType=ONEWAY&adults=1&children=0&infants=0&origin=${origin}&destination=${destination}&departureDate=${departureDate}`;
+                case 'AF': // Air France
+                    return `https://wwws.airfrance.us/search/offer?origin=${origin}&destination=${destination}&outboundDate=${departureDate}&cabinClass=ECONOMY&adults=1&children=0&infants=0`;
+                case 'BA': // British Airways
+                    return `https://www.britishairways.com/travel/book/public/en_us?origin=${origin}&destination=${destination}&outboundDate=${departureDate}&cabinclass=M&adultcount=1&childcount=0&infantcount=0`;
+                case 'UA': // United Airlines
+                    return `https://www.united.com/ual/en/us/flight-search/book-a-flight/results/rev?f=${origin}&t=${destination}&d=${departureDate}&tt=1&sc=7&px=1&taxng=1&idx=1`;
+                case 'AA': // American Airlines
+                    return `https://www.aa.com/booking/find-flights?origin=${origin}&destination=${destination}&departureDate=${departureDate}&passengers=1`;
+                case 'DL': // Delta Airlines
+                    return `https://www.delta.com/flight-search/book-a-flight?origin=${origin}&destination=${destination}&departureDate=${departureDate}&passengers=1`;
+                default:
+                    // Generic booking URL format for other airlines
+                    return `https://www.google.com/travel/flights?q=flights%20${origin}%20to%20${destination}%20${departureDate}`;
             }
-            // Add flight numbers if available
-            const flightNumbers = flightOffer.itineraries.flatMap((itinerary) => itinerary.segments.map((segment) => `${segment.carrierCode}${segment.number}`));
-            if (flightNumbers.length > 0) {
-                params.append('flights', flightNumbers.join(','));
-            }
-            return `${baseUrl}?${params.toString()}`;
         }
         catch (error) {
-            logger.error('Error generating booking URL', { error });
-            // Fallback to a basic URL if there's an error
-            return 'https://www.amadeus.com/flights';
+            logger.error('Error generating booking URL:', { error });
+            // Return a fallback URL
+            return 'https://www.google.com/travel/flights';
         }
     }
-    async searchHotels(params) {
+    async searchLocations(keyword) {
         try {
-            console.log('[Amadeus] Starting hotel search with params:', {
-                ...params,
-                accessToken: '***' // Hide the token in logs
+            logger.info('Searching locations with keyword', { keyword });
+            const response = await this.amadeus.referenceData.locations.get({
+                keyword,
+                subType: 'CITY,AIRPORT',
+                view: 'LIGHT'
             });
-            const token = await this.getToken();
-            if (!token) {
-                throw new Error('Failed to obtain valid token');
-            }
-            const response = await axios.get(`${this.baseURL}/v2/shopping/hotel-offers`, {
-                headers: {
-                    Authorization: `Bearer ${token}`
-                },
-                params: {
-                    cityCode: params.cityCode,
-                    checkInDate: params.checkInDate,
-                    checkOutDate: params.checkOutDate,
-                    adults: params.adults,
-                    radius: params.radius || 50,
-                    radiusUnit: 'KM',
-                    ratings: '1,2,3,4,5',
-                    currency: params.currency || 'USD',
-                    bestRateOnly: true,
-                    view: 'FULL'
-                }
+            const locations = JSON.parse(response.body);
+            logger.info('Location search successful', {
+                count: locations.data?.length || 0
             });
-            console.log('[Amadeus] Hotel search successful:', {
-                status: response.status,
-                hotelCount: response.data?.data?.length || 0
-            });
-            return response.data?.data || [];
+            return locations.data || [];
         }
         catch (error) {
-            console.error('[Amadeus] Hotel search error:', {
-                status: error.response?.status,
-                statusText: error.response?.statusText,
-                data: error.response?.data,
-                message: error.message
+            logger.error('Failed to search locations', {
+                error: error instanceof Error ? error.message : 'Unknown error',
+                stack: error instanceof Error ? error.stack : undefined,
+                keyword
             });
-            // Check if we need to refresh the token
-            if (error.response?.status === 401) {
-                console.log('[Amadeus] Token expired, refreshing...');
-                await this.getToken();
-                // Retry the request once with the new token
-                return this.searchHotels(params);
-            }
-            // For other errors, return empty array to allow fallback to Perplexity
-            return [];
+            throw error;
         }
-    }
-    transformHotelOffer(offer) {
-        const firstOffer = offer.offers[0];
-        const hotelInfo = offer.hotel;
-        return {
-            name: hotelInfo.name,
-            location: hotelInfo.address?.cityName || '',
-            price: {
-                amount: parseFloat(firstOffer.price.total),
-                currency: firstOffer.price.total ? 'USD' : 'USD'
-            },
-            type: this.determineHotelType(hotelInfo.rating),
-            amenities: hotelInfo.amenities?.join(', ') || '',
-            rating: parseInt(hotelInfo.rating || '0'),
-            reviewScore: hotelInfo.rating ? parseFloat(hotelInfo.rating) / 2 : 0,
-            reviewCount: 0, // Not available in Amadeus API
-            images: hotelInfo.media?.map(m => m.uri).filter((uri) => !!uri) || [],
-            referenceUrl: '',
-            coordinates: {
-                latitude: parseFloat(hotelInfo.latitude || '0'),
-                longitude: parseFloat(hotelInfo.longitude || '0')
-            },
-            features: hotelInfo.amenities?.filter((amenity) => !!amenity) || [],
-            policies: {
-                checkIn: '',
-                checkOut: '',
-                cancellation: firstOffer.policies?.cancellation?.description?.text || ''
-            },
-            tier: this.determineTier(parseFloat(firstOffer.price.total))
-        };
-    }
-    determineHotelType(rating) {
-        if (!rating)
-            return 'Hotel';
-        const numericRating = parseInt(rating);
-        if (numericRating >= 4)
-            return 'Luxury Hotel';
-        if (numericRating >= 3)
-            return 'Business Hotel';
-        return 'Budget Hotel';
     }
 }
-//# sourceMappingURL=amadeus.js.map

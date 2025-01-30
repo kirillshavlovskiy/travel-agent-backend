@@ -17,4 +17,3 @@ router.post('/enrich', async (req, res) => {
     }
 });
 export default router;
-//# sourceMappingURL=enrichment.js.map

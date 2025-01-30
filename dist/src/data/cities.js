@@ -20,4 +20,3 @@ export const cities = [
     { value: 'CUN', label: 'Cancun, Mexico' },
     { value: 'YVR', label: 'Vancouver, Canada' }
 ];
-//# sourceMappingURL=cities.js.map

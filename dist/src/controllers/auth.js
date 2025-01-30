@@ -223,4 +223,3 @@ export const handleRedditCallback = async (req, res) => {
         return res.status(500).json({ error: 'Internal server error' });
     }
 };
-//# sourceMappingURL=auth.js.map

@@ -38,4 +38,3 @@ export const airports = [
     // Australia
     { value: 'SYD', label: 'Sydney Kingsford Smith (SYD)' }
 ];
-//# sourceMappingURL=airports.js.map

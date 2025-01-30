@@ -1,4 +1,5 @@
 import fetch from 'node-fetch';
+import { logger } from '../utils/logger.js';
 const SYSTEM_MESSAGE = `You are an AI travel budget expert. Your role is to:
 1. Provide accurate cost estimates for travel expenses
 2. Consider seasonality, location, and number of travelers
@@ -8,6 +9,10 @@ const SYSTEM_MESSAGE = `You are an AI travel budget expert. Your role is to:
 6. Consider local market conditions and currency
 7. Base estimates on real-world data and current market rates`;
 export class VacationBudgetAgent {
+    constructor(flightService) {
+        this.startTime = Date.now();
+        this.flightService = flightService;
+    }
     async fetchWithRetry(url, options, retries = 3) {
         let lastError;
         for (let i = 0; i < retries; i++) {
@@ -22,6 +27,45 @@ export class VacationBudgetAgent {
         }
         throw lastError || new Error('Failed to fetch after retries');
     }
+    async queryPerplexity(prompt, category) {
+        try {
+            logger.info(`[${category.toUpperCase()}] Making Perplexity API request`);
+            const response = await this.fetchWithRetry('https://api.perplexity.ai/chat/completions', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${process.env.PERPLEXITY_API_KEY}`
+                },
+                body: JSON.stringify({
+                    model: 'llama-3.1-sonar-small-128k-online',
+                    messages: [
+                        {
+                            role: 'system',
+                            content: SYSTEM_MESSAGE
+                        },
+                        {
+                            role: 'user',
+                            content: prompt
+                        }
+                    ],
+                    options: {
+                        search: true,
+                        temperature: 0.1,
+                        max_tokens: 4000
+                    }
+                })
+            }, 3);
+            if (!response.ok) {
+                throw new Error(`Perplexity API request failed: ${response.status} ${response.statusText}`);
+            }
+            const result = await response.json();
+            return result.choices[0].message.content;
+        }
+        catch (error) {
+            logger.error(`[${category.toUpperCase()}] Perplexity API error:`, error);
+            return this.getDefaultCategoryData(category);
+        }
+    }
     generateFlightSearchUrl(flight) {
         try {
             const [from, to] = (flight.route || '').split(' to ').map((s) => s.trim());
@@ -34,173 +78,35 @@ export class VacationBudgetAgent {
             return `https://www.kayak.com/flights/${fromCode}-${toCode}/${outDate}/${inDate}`;
         }
         catch (error) {
-            console.error('[Flight URL] Error generating flight URL:', error);
+            logger.error('[Flight URL] Error generating flight URL:', error);
             return '';
         }
     }
-    generateHotelSearchUrl(hotel) {
-        try {
-            const hotelName = encodeURIComponent(hotel.name);
-            const location = encodeURIComponent(hotel.location);
-            return `https://www.booking.com/search.html?ss=${hotelName}+${location}`;
-        }
-        catch {
-            return '';
-        }
-    }
-    async queryPerplexity(prompt, category) {
-        try {
-            const startTime = Date.now();
-            console.log(`[${category.toUpperCase()}] Making Perplexity API request`);
-            const response = await this.fetchWithRetry('https://api.perplexity.ai/chat/completions', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${process.env.PERPLEXITY_API_KEY}`
-                },
-                body: JSON.stringify({
-                    model: 'llama-3.1-sonar-small-128k-online',
-                    messages: [
-                        {
-                            role: 'system',
-                            content: `You are a travel expert who searches real booking websites to find current activities and prices. Always verify information from official sources.
-
-CRITICAL JSON FORMATTING RULES:
-1. Return ONLY a valid JSON object
-2. Do NOT include any text before or after the JSON
-3. Do NOT use markdown formatting or code blocks
-4. Use ONLY double quotes for strings and property names
-5. Do NOT use single quotes anywhere
-6. Do NOT include any comments
-7. Do NOT include any trailing commas
-8. Ensure all strings are properly escaped
-9. Ensure all arrays and objects are properly closed
-10. All numbers must be valid JSON numbers (no ranges like "35-40", use average value instead)
-11. All dates must be valid ISO strings
-12. All URLs must be valid and properly escaped
-13. All property names must be double-quoted
-14. Do NOT escape quotes in the response
-15. For price ranges, use the average value (e.g., for "35-40", use 37.5)`
-                        },
-                        {
-                            role: 'user',
-                            content: prompt
-                        }
-                    ],
-                    options: {
-                        search: true,
-                        system_prompt: "You are a travel expert who searches real booking websites to find current activities and prices. Always verify information from official sources.",
-                        temperature: 0.1,
-                        max_tokens: 4000
-                    }
-                })
-            }, 3);
-            if (!response.ok) {
-                throw new Error(`Perplexity API request failed: ${response.status} ${response.statusText}`);
-            }
-            const result = await response.json();
-            if (!result.choices?.[0]?.message?.content) {
-                throw new Error('Invalid response from Perplexity API');
-            }
-            const content = result.choices[0].message.content;
-            console.log(`[${category.toUpperCase()}] Raw Perplexity API response:`, content);
-            try {
-                // Enhanced JSON cleaning
-                let cleanContent = content;
-                // Step 1: Remove markdown code blocks and any text before/after JSON
-                cleanContent = cleanContent.replace(/```(?:json)?\s*([\s\S]*?)```/g, '$1');
-                cleanContent = cleanContent.replace(/^[^{]*({[\s\S]*})[^}]*$/, '$1');
-                console.log(`[${category.toUpperCase()}] After removing markdown:`, cleanContent);
-                // Step 2: Handle price ranges by converting to average
-                cleanContent = cleanContent.replace(/(\d+)-(\d+)/g, (_, min, max) => {
-                    const average = (parseInt(min) + parseInt(max)) / 2;
-                    return average.toString();
-                });
-                console.log(`[${category.toUpperCase()}] After handling price ranges:`, cleanContent);
-                // Step 3: Fix quotes and escape characters
-                cleanContent = cleanContent
-                    .replace(/[\u2018\u2019]/g, "'") // Replace smart quotes
-                    .replace(/[\u201C\u201D]/g, '"') // Replace smart double quotes
-                    .replace(/\\'/g, "'") // Fix escaped single quotes
-                    .replace(/:\s*'([^']*?)'/g, ':"$1"') // Convert single-quoted values to double-quoted
-                    .replace(/([{,]\s*)(\w+):/g, '$1"$2":') // Ensure property names are quoted
-                    .replace(/\\/g, '\\\\') // Properly escape backslashes
-                    .replace(/\n/g, ' ') // Remove newlines
-                    .replace(/€/g, '') // Remove euro symbol
-                    .replace(/\s+/g, ' '); // Normalize whitespace
-                console.log(`[${category.toUpperCase()}] After fixing quotes:`, cleanContent);
-                // Step 4: Remove trailing commas and fix arrays/objects
-                cleanContent = cleanContent
-                    .replace(/,(\s*[}\]])/g, '$1')
-                    .replace(/\}\s*,\s*\}/g, '}}')
-                    .replace(/\]\s*,\s*\]/g, ']]')
-                    .replace(/\}\s*,\s*\]/g, '}]')
-                    .replace(/,\s*,/g, ',') // Remove duplicate commas
-                    .replace(/\[\s*,/g, '[') // Remove leading commas in arrays
-                    .replace(/,\s*\]/g, ']'); // Remove trailing commas in arrays
-                console.log(`[${category.toUpperCase()}] After fixing commas:`, cleanContent);
-                // Step 5: Fix any remaining issues
-                cleanContent = cleanContent
-                    .replace(/\\\\/g, '\\')
-                    .replace(/\s+/g, ' ')
-                    .replace(/([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:/g, '$1"$2":') // Fix double-quoted property names
-                    .replace(/:\s*"([^"]*?)"/g, (_match, p1) => {
-                    // Escape special characters in string values
-                    const escapeMap = {
-                        '"': '\\"',
-                        '\\': '\\\\',
-                        '\n': '\\n',
-                        '\r': '\\r',
-                        '\t': '\\t'
-                    };
-                    return `:"${p1.replace(/["\\\n\r\t]/g, (char) => escapeMap[char] || char)}"`;
-                })
-                    .trim();
-                console.log(`[${category.toUpperCase()}] Final cleaned content:`, cleanContent);
-                // Attempt to parse the cleaned JSON
-                try {
-                    const parsedData = JSON.parse(cleanContent);
-                    console.log(`[${category.toUpperCase()}] Successfully parsed JSON:`, parsedData);
-                    return parsedData;
-                }
-                catch (parseError) {
-                    const positionMatch = parseError instanceof SyntaxError ?
-                        parseError.message.match(/position (\d+)/) : null;
-                    const position = positionMatch?.[1] ? parseInt(positionMatch[1]) : -1;
-                    console.error(`[${category.toUpperCase()}] JSON parse error:`, {
-                        error: parseError instanceof Error ? parseError.message : 'Unknown error',
-                        position: position >= 0 ? position : 'unknown',
-                        content: cleanContent,
-                        contentLength: cleanContent.length,
-                        contentSubstring: position >= 0
-                            ? cleanContent.substring(Math.max(0, position - 50), Math.min(cleanContent.length, position + 50))
-                            : 'unknown'
-                    });
-                    // Try one more time with a more aggressive cleaning
-                    const lastAttempt = cleanContent
-                        .replace(/[^\x20-\x7E]/g, '') // Remove non-printable characters
-                        .replace(/\s+/g, ' ') // Normalize whitespace
-                        .replace(/([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:/g, '$1"$2":') // Ensure property names are quoted
-                        .replace(/:\s*'([^']*?)'/g, ':"$1"') // Convert remaining single quotes to double quotes
-                        .replace(/,(\s*[}\]])/g, '$1') // Remove trailing commas
-                        .replace(/\}\s*,\s*\}/g, '}}') // Fix object separators
-                        .replace(/\]\s*,\s*\]/g, ']]') // Fix array separators
-                        .replace(/\}\s*,\s*\]/g, '}]') // Fix mixed separators
-                        .replace(/[^{}[\]"':,.\w\s-]/g, '') // Remove any other non-JSON characters
-                        .trim();
-                    console.log(`[${category.toUpperCase()}] Last attempt content:`, lastAttempt);
-                    return JSON.parse(lastAttempt);
-                }
-            }
-            catch (error) {
-                console.error(`[${category.toUpperCase()}] Error processing Perplexity response:`, error);
-                throw new Error(`Failed to process ${category} response: ${error instanceof Error ? error.message : 'Unknown error'}`);
-            }
-        }
-        catch (error) {
-            console.error(`[${category.toUpperCase()}] Perplexity API error:`, error);
-            throw error;
-        }
+    transformAmadeusFlight(flight) {
+        const segments = flight.itineraries[0].segments;
+        const firstSegment = segments[0];
+        const lastSegment = segments[segments.length - 1];
+        const returnSegments = flight.itineraries[1]?.segments || [];
+        const returnFirstSegment = returnSegments[0];
+        const returnLastSegment = returnSegments[returnSegments.length - 1];
+        const route = `${firstSegment.departure.iataCode} to ${lastSegment.arrival.iataCode}`;
+        const flightRef = {
+            airline: firstSegment.carrierCode,
+            route,
+            price: parseFloat(flight.price.total),
+            outbound: firstSegment.departure.at,
+            inbound: returnFirstSegment ? returnFirstSegment.departure.at : '',
+            duration: `${flight.itineraries[0].duration}${returnSegments.length ? ` / ${flight.itineraries[1].duration}` : ''}`,
+            layovers: segments.length - 1 + returnSegments.length - 1,
+            flightNumber: `${firstSegment.carrierCode}${firstSegment.number}`,
+            tier: this.determineFlightTier(flight),
+            referenceUrl: this.generateFlightSearchUrl({
+                route,
+                outbound: firstSegment.departure.at,
+                inbound: returnFirstSegment ? returnFirstSegment.departure.at : '',
+            })
+        };
+        return flightRef;
     }
     getDefaultCategoryData(category) {
         const defaultTier = {
@@ -236,33 +142,9 @@ CRITICAL JSON FORMATTING RULES:
                         premium: defaultTier
                     }
                 };
-            case 'activities':
-                return {
-                    activities: {
-                        budget: defaultTier,
-                        medium: defaultTier,
-                        premium: defaultTier
-                    }
-                };
-            case 'localTransportation':
-                return {
-                    localTransportation: {
-                        budget: defaultTier,
-                        medium: defaultTier,
-                        premium: defaultTier
-                    }
-                };
-            case 'food':
-                return {
-                    food: {
-                        budget: defaultTier,
-                        medium: defaultTier,
-                        premium: defaultTier
-                    }
-                };
             default:
                 return {
-                    food: {
+                    [category]: {
                         budget: defaultTier,
                         medium: defaultTier,
                         premium: defaultTier
@@ -271,90 +153,88 @@ CRITICAL JSON FORMATTING RULES:
         }
     }
     async handleTravelRequest(request) {
-        try {
-            const startTime = Date.now();
-            console.log('[TIMING] Starting budget calculation');
-            const formattedRequest = {
-                ...request,
-                departureLocation: {
-                    ...request.departureLocation,
-                    name: request.departureLocation.label
-                }
-            };
-            // Determine which categories to process with Perplexity
-            const categories = request.flightData ?
-                ['localTransportation', 'food', 'activities'] : // Skip flights if we have Amadeus data
-                ['flights', 'localTransportation', 'food', 'activities'];
-            console.log(`[TIMING] Processing ${categories.length} categories in parallel`);
-            const results = await Promise.all(categories.map(async (category) => {
-                const categoryStart = Date.now();
-                console.log(`[TIMING][${category}] Starting category processing`);
-                const prompt = this.constructPrompt(category, formattedRequest);
-                console.log(`[TIMING][${category}] Prompt constructed in ${Date.now() - categoryStart}ms`);
-                const data = await this.queryPerplexity(prompt, category);
-                console.log(`[TIMING][${category}] Perplexity query completed in ${Date.now() - categoryStart}ms`);
-                return { category, data };
-            }));
-            console.log(`[TIMING] All categories processed in ${Date.now() - startTime}ms`);
-            // Create the response object with request details
-            const response = {
-                requestDetails: {
-                    departureLocation: formattedRequest.departureLocation,
-                    destinations: formattedRequest.destinations,
-                    travelers: formattedRequest.travelers,
-                    startDate: formattedRequest.startDate,
-                    endDate: formattedRequest.endDate,
-                    currency: formattedRequest.currency
-                }
-            };
-            // Add category data to the response
-            results.forEach(({ category, data }) => {
-                response[category] = data[category];
-            });
-            // If we have Amadeus flight data, use it instead of Perplexity data
-            if (request.flightData && request.flightData.length > 0) {
-                // Group flights by tier
-                const groupedFlights = request.flightData.reduce((acc, flight) => {
-                    const tier = this.determineFlightTier(flight);
-                    if (!acc[tier]) {
-                        acc[tier] = {
-                            min: Infinity,
-                            max: -Infinity,
-                            average: 0,
-                            confidence: 0.9, // Higher confidence for real data
-                            source: 'Amadeus',
-                            references: []
-                        };
+        this.startTime = Date.now();
+        logger.info('Starting budget calculation');
+        // Initialize arrays to store flight data
+        let flightData = [];
+        let errors = [];
+        // If we have flight data in the request, use it
+        if (request.flightData && request.flightData.length > 0) {
+            flightData = request.flightData;
+        }
+        else {
+            // Try to get flight data with retries
+            const cabinClasses = ['ECONOMY', 'PREMIUM_ECONOMY', 'BUSINESS', 'FIRST'];
+            // Sequential search with delay between requests
+            for (const travelClass of cabinClasses) {
+                try {
+                    const result = await this.flightService.searchFlights({
+                        segments: [{
+                                originLocationCode: request.departureLocation.code,
+                                destinationLocationCode: request.destinations[0].code,
+                                departureDate: request.startDate || ''
+                            }],
+                        adults: request.travelers,
+                        travelClass
+                    });
+                    if (result && result.length > 0) {
+                        flightData.push(...result);
                     }
-                    const price = parseFloat(flight.price.total);
-                    acc[tier].min = Math.min(acc[tier].min, price);
-                    acc[tier].max = Math.max(acc[tier].max, price);
-                    acc[tier].references.push(this.transformAmadeusFlight(flight));
-                    return acc;
-                }, {});
-                // Calculate averages
-                Object.keys(groupedFlights).forEach(tier => {
-                    const refs = groupedFlights[tier].references;
-                    groupedFlights[tier].average =
-                        refs.reduce((sum, ref) => sum + ref.price, 0) / refs.length;
-                });
-                response.flights = {
-                    budget: groupedFlights.budget || this.getDefaultCategoryData('flights').flights.budget,
-                    medium: groupedFlights.medium || this.getDefaultCategoryData('flights').flights.medium,
-                    premium: groupedFlights.premium || this.getDefaultCategoryData('flights').flights.premium
-                };
+                    // Add delay between requests to avoid rate limiting
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                }
+                catch (error) {
+                    logger.warn(`Failed to fetch flights for ${travelClass}`, { error });
+                    errors.push(error);
+                    // Add longer delay after error
+                    await new Promise(resolve => setTimeout(resolve, 2000));
+                }
             }
-            const totalTime = Date.now() - startTime;
-            console.log(`[TIMING] Total budget calculation completed in ${totalTime}ms`);
-            if (totalTime > 25000) {
-                console.warn(`[TIMING] Warning: Budget calculation took longer than 25 seconds`);
+        }
+        // Only throw error if we have no flight data at all
+        if (flightData.length === 0) {
+            logger.error('No flight data available after all attempts', { errors });
+            throw new Error('No flight data available');
+        }
+        // Process the flight data we have
+        const groupedFlights = this.groupFlightsByTier(flightData);
+        const response = {
+            requestDetails: {
+                departureLocation: request.departureLocation,
+                destinations: request.destinations,
+                travelers: request.travelers,
+                startDate: request.startDate || '',
+                endDate: request.endDate || '',
+                currency: request.currency
+            },
+            flights: {
+                budget: groupedFlights.budget || this.getDefaultCategoryData('flights').flights.budget,
+                medium: groupedFlights.medium || this.getDefaultCategoryData('flights').flights.medium,
+                premium: groupedFlights.premium || this.getDefaultCategoryData('flights').flights.premium
             }
-            return response;
+        };
+        // Process other categories with Perplexity (excluding flights)
+        const categories = ['localTransportation', 'food', 'activities'];
+        console.log(`[TIMING] Processing ${categories.length} categories with Perplexity`);
+        const results = await Promise.all(categories.map(async (category) => {
+            const categoryStart = Date.now();
+            console.log(`[TIMING][${category}] Starting category processing`);
+            const prompt = this.constructPrompt({ category, request });
+            console.log(`[TIMING][${category}] Prompt constructed in ${Date.now() - categoryStart}ms`);
+            const data = await this.queryPerplexity(prompt, category);
+            console.log(`[TIMING][${category}] Perplexity query completed in ${Date.now() - categoryStart}ms`);
+            return { category, data };
+        }));
+        // Add Perplexity category data to the response
+        results.forEach(({ category, data }) => {
+            response[category] = data[category];
+        });
+        const totalTime = Date.now() - this.startTime;
+        console.log(`[TIMING] Total budget calculation completed in ${totalTime}ms`);
+        if (totalTime > 25000) {
+            console.warn(`[TIMING] Warning: Budget calculation took longer than 25 seconds`);
         }
-        catch (error) {
-            console.error('[VacationBudgetAgent] Error:', error);
-            throw error;
-        }
+        return response;
     }
     determineFlightTier(flight) {
         const cabinClass = flight.travelerPricings[0].fareDetailsBySegment[0].cabin;
@@ -375,292 +255,54 @@ CRITICAL JSON FORMATTING RULES:
             return 'premium';
         }
     }
-    transformAmadeusFlight(flight) {
-        const firstSegment = flight.itineraries[0].segments[0];
-        const lastOutboundSegment = flight.itineraries[0].segments[flight.itineraries[0].segments.length - 1];
-        const inboundSegments = flight.itineraries[1]?.segments || [];
-        const lastInboundSegment = inboundSegments[inboundSegments.length - 1];
-        // Calculate total duration in minutes
-        const totalDurationMinutes = flight.itineraries[0].segments.reduce((total, segment) => {
-            const durationStr = segment.duration || '0';
-            const minutes = parseInt(durationStr.replace(/[^0-9]/g, ''), 10) || 0;
-            return total + minutes;
-        }, 0);
-        // Format duration as "X hours Y minutes"
-        const hours = Math.floor(totalDurationMinutes / 60);
-        const minutes = totalDurationMinutes % 60;
-        const formattedDuration = `${hours}h ${minutes}m`;
-        return {
-            airline: flight.validatingAirlineCodes[0],
-            route: `${firstSegment.departure.iataCode} to ${lastOutboundSegment.arrival.iataCode}`,
-            price: parseFloat(flight.price.total),
-            outbound: firstSegment.departure.at,
-            inbound: lastInboundSegment?.arrival.at || lastOutboundSegment.arrival.at,
-            duration: formattedDuration,
-            layovers: flight.itineraries[0].segments.length - 1,
-            flightNumber: `${firstSegment.carrierCode}${firstSegment.number}`,
-            tier: this.determineFlightTier(flight),
-            referenceUrl: this.generateFlightSearchUrl({
-                route: `${firstSegment.departure.iataCode} to ${lastOutboundSegment.arrival.iataCode}`,
-                outbound: firstSegment.departure.at,
-                inbound: lastInboundSegment?.arrival.at || lastOutboundSegment.arrival.at
-            })
-        };
+    constructPrompt(params) {
+        const { category, request } = params;
+        return `Search for available activities in ${request.destinations[0].label} with these requirements:
+
+SEARCH PROCESS:
+1. Search both platforms:
+   - Search Viator.com for ${request.destinations[0].label} activities
+   - Search GetYourGuide.com for ${request.destinations[0].label} activities
+2. Sort by: Best Rating
+3. Find at least 3 activities from each platform${request.category ? `\n4. Focus on category: ${request.category}` : ''}
+${request.userPreferences ? `\nAdditional preferences: ${request.userPreferences}` : ''}
+
+VALIDATION RULES:
+1. Activities must have valid booking URLs
+2. Copy exact details from the listings
+3. Include activities across different price points
+4. Include activities with different durations and times
+
+For each activity found, provide details in this JSON format:
+{
+  "activities": [
+    {
+      "name": "EXACT name from listing",
+      "provider": "Viator" or "GetYourGuide",
+      "price": exact price in USD,
+      "price_category": "budget" (<$30), "medium" ($30-$100), or "premium" (>$100),
+      "duration": hours (number),
+      "typical_time": "morning", "afternoon", or "evening",
+      "description": "EXACT description from listing",
+      "highlights": ["EXACT highlights from listing"],
+      "rating": exact rating (number),
+      "review_count": exact number of reviews,
+      "booking_url": "EXACT URL from listing",
+      "languages": ["available languages"],
+      "cancellation_policy": "EXACT policy from listing",
+      "location": {
+        "meeting_point": "EXACT meeting point",
+        "address": "EXACT address if provided"
+      },
+      "booking_info": {
+        "instant_confirmation": true/false,
+        "mobile_ticket": true/false,
+        "min_participants": number,
+        "max_participants": number
+      }
     }
-    constructPrompt(category, params) {
-        switch (category) {
-            case 'flights':
-                return `Search for current flight prices from ${params.departureLocation?.label} to ${params.country}.
-        Return a JSON object with flight estimates.
-        
-        Consider these details:
-        - Departure: ${params.departureLocation?.label}
-        - Destination: ${params.country}
-        - Type: ${params.departureLocation?.isRoundTrip ? 'round-trip' : 'one-way'} flight
-        - Outbound Date: ${params.departureLocation?.outboundDate}
-        - Inbound Date: ${params.departureLocation?.inboundDate}
-        - Travelers: ${params.travelers}
-        - Currency: ${params.currency}
-
-        Use this exact JSON structure:
-        {
-          "flights": {
-            "budget": {
-              "min": number (lowest price in this tier),
-              "max": number (highest price in this tier),
-              "average": number (average price in this tier),
-              "confidence": number (between 0 and 1),
-              "source": "string (data source)",
-              "references": [
-                {
-                  "airline": "string (airline name)",
-                  "route": "string (e.g., 'LAX to CDG')",
-                  "price": number (exact price),
-                  "outbound": "string (ISO date, e.g., '2024-12-26T10:00:00Z')",
-                  "inbound": "string (ISO date, e.g., '2024-12-31T15:00:00Z')",
-                  "duration": "string (e.g., '10 hours')",
-                  "layovers": number (0 for direct flights),
-                  "flightNumber": "string (e.g., 'AA123')",
-                  "tier": "string (budget, medium, or premium)",
-                  "referenceUrl": "string (booking URL)"
-                }
-              ]
-            },
-            "medium": { same structure as budget },
-            "premium": { same structure as budget }
-          }
-        }
-
-        IMPORTANT FORMATTING RULES:
-        1. All fields are required - do not omit any fields
-        2. Dates must be in ISO format with timezone (e.g., "2024-12-26T10:00:00Z")
-        3. Price must be a number (not a string or range)
-        4. Layovers must be a number (0 for direct flights)
-        5. Each tier must have at least 2 flight references
-        6. Flight numbers should be in standard format (e.g., "AA123", "UA456")
-        7. Include actual booking URLs from major travel sites (Kayak, Google Flights, Skyscanner)
-        8. Ensure all prices are in ${params.currency}
-        9. Route should be in format "AIRPORT_CODE to AIRPORT_CODE" (e.g., "LAX to CDG")
-        10. Do not include any explanatory text, only return the JSON object
-        11. Do not use single quotes, only double quotes
-        12. Do not include any trailing commas
-        13. Ensure all URLs are properly formatted and complete
-        14. Do not wrap the response in markdown code blocks
-        15. Return ONLY the JSON object, no additional text`;
-            case 'hotels':
-                return `Find accommodation options in ${params.country} for ${params.travelers} travelers.
-        Stay details:
-        - Location: ${params.country}
-        - Check-in: ${params.departureLocation.outboundDate}
-        - Check-out: ${params.departureLocation.inboundDate}
-        - Guests: ${params.travelers}
-        ${params.budget ? `- Budget: ${params.budget} ${params.currency}` : ''}
-
-        Return a valid JSON object with this EXACT structure:
-        {
-          "hotels": {
-            "searchDetails": {
-              "location": "${params.country}",
-              "dates": {
-                "checkIn": "${params.departureLocation.outboundDate}",
-                "checkOut": "${params.departureLocation.inboundDate}"
-              },
-              "guests": ${params.travelers}
-            },
-            "budget": {
-              "min": number,
-              "max": number,
-              "average": number,
-              "confidence": number,
-              "source": "string",
-              "references": [
-                {
-                  "name": "string",
-                  "location": "string",
-                  "price": number,
-                  "type": "string",
-                  "amenities": "string",
-                  "rating": number,
-                  "reviewScore": number,
-                  "reviewCount": number,
-                  "images": ["string"],
-                  "referenceUrl": "string",
-                  "coordinates": {
-                    "latitude": number,
-                    "longitude": number
-                  },
-                  "features": ["string"],
-                  "policies": {
-                    "checkIn": "string",
-                    "checkOut": "string",
-                    "cancellation": "string"
-                  }
-                }
-              ]
-            },
-            "medium": {
-              "min": number,
-              "max": number,
-              "average": number,
-              "confidence": number,
-              "source": "string",
-              "references": [/* same structure as budget references */]
-            },
-            "premium": {
-              "min": number,
-              "max": number,
-              "average": number,
-              "confidence": number,
-              "source": "string",
-              "references": [/* same structure as budget references */]
-            }
-          }
-        }
-
-        IMPORTANT RULES:
-        1. Use ONLY double quotes for all strings and property names
-        2. Do NOT use single quotes anywhere
-        3. Do NOT include any trailing commas
-        4. All prices must be numbers (no currency symbols or commas)
-        5. All coordinates must be valid numbers
-        6. All arrays must be properly closed
-        7. All objects must be properly closed
-        8. Include at least 2 references per tier
-        9. All prices must be in ${params.currency}
-        10. All URLs must be valid and properly escaped
-        11. Return ONLY the JSON object, no additional text`;
-            case 'localTransportation':
-                return `Analyze local transportation options in ${params.country} for ${params.travelers} travelers.
-        Details:
-        - Location: ${params.country}
-        - Duration: ${params.departureLocation.outboundDate} to ${params.departureLocation.inboundDate}
-        - Travelers: ${params.travelers}
-        ${params.budget ? `- Budget: ${params.budget} ${params.currency}` : ''}
-
-        Include:
-        - Public transportation (buses, trains, metro)
-        - Taxis and ride-sharing
-        - Car rentals
-        - Airport transfers
-
-        Provide a detailed JSON response with:
-        {
-          "localTransportation": {
-            "budget": {
-              "min": number,
-              "max": number,
-              "average": number,
-              "confidence": number,
-              "source": "string",
-              "references": [
-                {
-                  "type": "string",
-                  "description": "string",
-                  "price": number,
-                  "unit": "string"
-                }
-              ]
-            },
-            "medium": { same structure },
-            "premium": { same structure }
-          }
-        }`;
-            case 'food':
-                return `Estimate daily food costs in ${params.country} for ${params.travelers} travelers.
-        Details:
-        - Location: ${params.country}
-        - Duration: ${params.departureLocation.outboundDate} to ${params.departureLocation.inboundDate}
-        - Travelers: ${params.travelers}
-        ${params.budget ? `- Budget: ${params.budget} ${params.currency}` : ''}
-
-        Include:
-        - Local restaurants
-        - Cafes and street food
-        - Grocery stores
-        - Fine dining
-
-        Provide a detailed JSON response with:
-        {
-          "food": {
-            "budget": {
-              "min": number,
-              "max": number,
-              "average": number,
-              "confidence": number,
-              "source": "string",
-              "references": [
-                {
-                  "type": "string",
-                  "description": "string",
-                  "price": number,
-                  "mealType": "string"
-                }
-              ]
-            },
-            "medium": { same structure },
-            "premium": { same structure }
-          }
-        }`;
-            case 'activities':
-                return `Research tourist activities and attractions in ${params.country} for ${params.travelers} travelers.
-        Details:
-        - Location: ${params.country}
-        - Duration: ${params.departureLocation.outboundDate} to ${params.departureLocation.inboundDate}
-        - Travelers: ${params.travelers}
-        ${params.budget ? `- Budget: ${params.budget} ${params.currency}` : ''}
-
-        Include:
-        - Tourist attractions
-        - Guided tours
-        - Cultural experiences
-        - Entertainment
-        - Adventure activities
-
-        Provide a detailed JSON response with:
-        {
-          "activities": {
-            "budget": {
-              "min": number,
-              "max": number,
-              "average": number,
-              "confidence": number,
-              "source": "string",
-              "references": [
-                {
-                  "name": "string",
-                  "description": "string",
-                  "price": number,
-                  "duration": "string"
-                }
-              ]
-            },
-            "medium": { same structure },
-            "premium": { same structure }
-          }
-        }`;
-            default:
-                throw new Error(`Invalid category: ${category}`);
-        }
+  ]
+}`;
     }
     constructHotelPrompt(request) {
         const destination = request.destinations[0].label;
@@ -682,39 +324,102 @@ CRITICAL JSON FORMATTING RULES:
 7. Include major hotel chains when available in each tier`;
         return prompt;
     }
-    cleanJsonResponse(response) {
+    cleanJsonResponse(content) {
+        logger.debug('Content before cleaning:', content);
         try {
-            // Remove markdown code block markers and any text before/after them
-            let cleaned = response.replace(/^[\s\S]*?```(?:json)?\s*|\s*```[\s\S]*$/g, '');
-            // Find the first '{' and last '}'
-            const startIndex = cleaned.indexOf('{');
-            const endIndex = cleaned.lastIndexOf('}');
-            if (startIndex === -1 || endIndex === -1) {
-                throw new Error('No valid JSON object found in response');
+            // First try to parse it directly in case it's already valid JSON
+            try {
+                JSON.parse(content);
+                return content;
             }
-            // Extract just the JSON object
-            cleaned = cleaned.substring(startIndex, endIndex + 1);
-            // Additional cleaning steps
-            cleaned = cleaned
-                .replace(/[\u0000-\u001F\u007F-\u009F]/g, '') // Remove control characters
-                .replace(/\\[rnt]/g, '') // Remove escaped whitespace
-                .replace(/,(\s*[}\]])/g, '$1') // Remove trailing commas
-                .replace(/([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:/g, '$1"$2":') // Ensure property names are quoted
-                .replace(/:\s*'([^']*?)'/g, ':"$1"') // Convert single quotes to double quotes
-                .replace(/\}\s*,\s*\}/g, '}}') // Fix object separators
-                .replace(/\]\s*,\s*\]/g, ']]') // Fix array separators
-                .replace(/\}\s*,\s*\]/g, '}]') // Fix mixed separators
-                .trim();
-            return cleaned;
+            catch (e) {
+                // If direct parsing fails, proceed with cleaning
+            }
+            // Remove any markdown code block markers
+            content = content.replace(/```json\n?|\n?```/g, '');
+            // Remove any text before the first {
+            content = content.substring(content.indexOf('{'));
+            // Find the last complete activity object by looking for the last complete closing brace
+            const lastCompleteActivity = content.lastIndexOf('}, {');
+            if (lastCompleteActivity !== -1) {
+                content = content.substring(0, lastCompleteActivity + 1) + ']}';
+            }
+            else {
+                // If we can't find a complete activity, try to find the last complete object
+                const lastCompleteBrace = content.lastIndexOf('}');
+                if (lastCompleteBrace !== -1) {
+                    content = content.substring(0, lastCompleteBrace + 1);
+                }
+            }
+            // Quote unquoted property names
+            content = content.replace(/(\{|\,)\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*:/g, '$1"$2":');
+            // Fix duration ranges by taking the average
+            content = content.replace(/"duration"\s*:\s*"?(\d+)-(\d+)"?/g, (match, start, end) => {
+                const avg = (parseInt(start) + parseInt(end)) / 2;
+                return `"duration": ${avg}`;
+            });
+            // Convert any remaining duration ranges to single numbers
+            content = content.replace(/"duration"\s*:\s*"([0-9.]+)"/g, '"duration": $1');
+            // Quote unquoted boolean values
+            content = content.replace(/:\s*(true|false)(\s*[,}])/gi, ':"$1"$2');
+            // Clean up any malformed URLs
+            content = content.replace(/(\/[^\/]+)\1{10,}/g, '/malformed-url-removed');
+            // Try to parse the cleaned content
+            try {
+                const parsed = JSON.parse(content);
+                return JSON.stringify(parsed, null, 2);
+            }
+            catch (error) {
+                logger.error('Failed to parse cleaned JSON:', { error, content });
+                // Return a valid activities array with a single placeholder activity
+                return JSON.stringify({
+                    activities: [{
+                            name: "Placeholder Activity",
+                            description: "Unable to generate activity details. Please try again.",
+                            duration: 2,
+                            price: 0,
+                            category: "General",
+                            location: "To be determined",
+                            exact_address: "",
+                            opening_hours: "",
+                            startTime: "09:00",
+                            endTime: "11:00",
+                            rating: 0,
+                            number_of_reviews: 0,
+                            key_highlights: ["Please try generating another activity"],
+                            preferred_time_of_day: "morning",
+                            bookingDetails: {
+                                provider: "GetYourGuide",
+                                referenceUrl: "",
+                                cancellationPolicy: "Free cancellation",
+                                instantConfirmation: true,
+                                mobileTicket: true,
+                                languages: ["English"],
+                                minParticipants: 1,
+                                maxParticipants: 10,
+                                pickupIncluded: false,
+                                pickupLocation: "",
+                                accessibility: "Standard",
+                                restrictions: []
+                            },
+                            images: []
+                        }]
+                }, null, 2);
+            }
         }
         catch (error) {
-            console.error('[Clean JSON] Error:', error);
-            throw new Error('Failed to clean JSON response');
+            logger.error('Failed to clean JSON response:', { error, content });
+            // Return a valid empty activities array as fallback
+            return JSON.stringify({
+                activities: []
+            }, null, 2);
         }
     }
     async querySingleActivity(prompt) {
+        logger.debug('Starting activity generation with prompt:', prompt);
         try {
-            const response = await this.fetchWithRetry('https://api.perplexity.ai/chat/completions', {
+            logger.debug('Generated prompt length:', prompt.length);
+            const result = await this.fetchWithRetry('https://api.perplexity.ai/chat/completions', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -725,24 +430,60 @@ CRITICAL JSON FORMATTING RULES:
                     messages: [
                         {
                             role: 'system',
-                            content: `You are a travel expert who searches real booking websites to find current activities and prices. Always verify information from official sources.
+                            content: `You are a travel activity expert specializing in Viator and GetYourGuide bookings.
+Your task is to search through Viator and GetYourGuide's platforms to find and recommend REAL, BOOKABLE activities.
 
-CRITICAL JSON FORMATTING RULES:
-1. Return ONLY a valid JSON object
-2. Do NOT include any text before or after the JSON
-3. Do NOT use markdown formatting or code blocks
-4. Use ONLY double quotes for strings and property names
-5. Do NOT use single quotes anywhere
-6. Do NOT include any comments
-7. Do NOT include any trailing commas
-8. Ensure all strings are properly escaped
-9. Ensure all arrays and objects are properly closed
-10. All numbers must be valid JSON numbers (no ranges like "35-40", use average value instead)
-11. All dates must be valid ISO strings
-12. All URLs must be valid and properly escaped
-13. All property names must be double-quoted
-14. Do NOT escape quotes in the response
-15. For price ranges, use the average value (e.g., for "35-40", use 37.5)`
+SEARCH PROCESS:
+1. First search Viator.com for premium activities ($100+)
+2. Then search GetYourGuide.com for budget/medium activities (under $100)
+3. Use the search filters on each platform to find activities matching the requirements
+4. Verify each activity exists and is currently bookable
+5. Copy exact details from the actual listings
+
+CRITICAL RULES:
+1. ONLY suggest activities that you can find on these platforms
+2. ALL URLs must be real, active booking links that you verify
+3. Premium activities ($100+) MUST be from Viator.com
+4. Budget/medium activities (under $100) MUST be from GetYourGuide.com
+5. Include EXACT booking URLs in this format:
+   - Viator: https://www.viator.com/tours/[city]/[activity-name]/[product-code]
+   - GetYourGuide: https://www.getyourguide.com/[city]/[activity-code]
+6. Copy exact prices, descriptions, and details from the listings
+7. Do not make up or guess any information - only use what you find
+8. If you can't find a suitable activity, say so instead of making one up
+
+For each activity you find, include:
+{
+  "name": "EXACT name from provider",
+  "description": "EXACT description from provider",
+  "price": number (exact price in USD),
+  "duration": number (in hours),
+  "location": "Specific venue/location name",
+  "address": "Full street address",
+  "openingHours": "Actual operating hours",
+  "keyHighlights": ["Real highlights from provider"],
+  "rating": number (from provider reviews),
+  "numberOfReviews": number (actual count),
+  "category": "Activity type",
+  "dayNumber": number,
+  "timeSlot": "morning" | "afternoon" | "evening",
+  "referenceUrl": "EXACT booking URL",
+  "images": ["Real image URLs"],
+  "priceCategory": "budget" | "medium" | "premium",
+  "bookingDetails": {
+    "provider": "Viator" | "GetYourGuide",
+    "cancellationPolicy": "Exact policy from listing",
+    "instantConfirmation": boolean,
+    "mobileTicket": boolean,
+    "languages": ["Available languages"],
+    "minParticipants": number,
+    "maxParticipants": number,
+    "pickupIncluded": boolean,
+    "pickupLocation": "If included",
+    "accessibility": "From listing",
+    "restrictions": ["From listing"]
+  }
+}`
                         },
                         {
                             role: 'user',
@@ -750,51 +491,298 @@ CRITICAL JSON FORMATTING RULES:
                         }
                     ],
                     options: {
-                        search: true,
-                        system_prompt: "You are a travel expert who searches real booking websites to find current activities and prices. Always verify information from official sources.",
                         temperature: 0.1,
-                        max_tokens: 4000
+                        max_tokens: 4000,
+                        web_search: true
                     }
                 })
             }, 3);
-            if (!response.ok) {
-                throw new Error(`Perplexity API request failed: ${response.status} ${response.statusText}`);
+            if (!result.ok) {
+                throw new Error(`Perplexity API request failed: ${result.status} ${result.statusText}`);
             }
-            const result = await response.json();
-            if (!result.choices?.[0]?.message?.content) {
+            const data = await result.json();
+            logger.debug('Received response from Perplexity:', {
+                contentLength: data.choices?.[0]?.message?.content?.length,
+                hasChoices: !!data.choices,
+                firstChoice: data.choices?.[0]?.message,
+                searchResults: data.choices?.[0]?.message?.search_results
+            });
+            if (!data.choices?.[0]?.message?.content) {
                 throw new Error('Invalid response from Perplexity API');
             }
-            return result.choices[0].message.content;
+            const content = data.choices[0].message.content;
+            logger.debug('Raw content from Perplexity API:', content);
+            try {
+                // Try to parse the content directly first
+                return JSON.parse(content);
+            }
+            catch (e) {
+                logger.warn('Failed to parse content directly, attempting to clean:', e);
+                // Clean the content and try again
+                let cleanContent = content
+                    .replace(/```(?:json)?\s*([\s\S]*?)```/g, '$1') // Remove markdown code blocks
+                    .replace(/^[^{]*({[\s\S]*})[^}]*$/, '$1') // Extract just the JSON object
+                    .trim();
+                logger.debug('Cleaned content:', cleanContent);
+                try {
+                    return JSON.parse(cleanContent);
+                }
+                catch (e) {
+                    logger.error('Failed to parse cleaned content:', e);
+                    throw new Error('Failed to parse activity data');
+                }
+            }
         }
         catch (error) {
-            console.error('[Single Activity] Perplexity API error:', error);
+            logger.error('Error in querySingleActivity:', error);
             throw error;
         }
     }
-    async generateSingleActivity(params) {
-        const prompt = `Generate a single activity recommendation for ${params.destination} during ${params.timeOfDay} on day ${params.dayNumber} with a budget of ${params.budget} ${params.currency}. The response should be a valid JSON object with the following structure:
-    {
-      "name": "Activity name",
-      "description": "Detailed description",
-      "duration": "Duration in hours (number)",
-      "price": "Price in ${params.currency} (number)",
-      "category": "Category (e.g., Cultural, Adventure, Relaxation)",
-      "location": "Specific location in ${params.destination}",
-      "rating": "Rating out of 5 (number)",
-      "timeOfDay": "${params.timeOfDay}",
-      "referenceUrl": "Optional booking URL",
-      "provider": "Activity provider name",
-      "highlights": ["Array of key highlights"]
-    }`;
+    isValidJson(str) {
         try {
-            const response = await this.querySingleActivity(prompt);
-            const cleanedResponse = this.cleanJsonResponse(response);
-            return JSON.parse(cleanedResponse);
+            JSON.parse(str);
+            return true;
         }
-        catch (error) {
-            console.error('[Activity Generation] Error:', error);
-            throw new Error('Failed to generate activity recommendation');
+        catch {
+            return false;
         }
     }
+    determineActivityTier(price) {
+        if (price <= 30) {
+            return 'budget';
+        }
+        else if (price <= 100) {
+            return 'medium';
+        }
+        else {
+            return 'premium';
+        }
+    }
+    async generateSingleActivity(params) {
+        const prompt = this.constructPrompt({
+            destination: params.destination,
+            category: params.category,
+            userPreferences: params.userPreferences
+        });
+        const result = await this.querySingleActivity(prompt);
+        if (result.error) {
+            return this.createPlaceholderActivity();
+        }
+        return result;
+    }
+    getPriceRangeForTier(budget, currency) {
+        const budgetNum = typeof budget === 'string' ? this.getBudgetAmount(budget) : budget;
+        switch (budget) {
+            case 'budget':
+                return { min: 0, max: 30 };
+            case 'medium':
+                return { min: 30, max: 100 };
+            case 'premium':
+                return { min: 100, max: budgetNum }; // Use the total budget as max for premium
+            default:
+                return { min: 0, max: budgetNum };
+        }
+    }
+    getBudgetAmount(tier) {
+        switch (tier.toLowerCase()) {
+            case 'budget':
+                return 30;
+            case 'medium':
+                return 100;
+            case 'premium':
+                return 500; // Default max for premium tier
+            default:
+                return 100; // Default to medium tier budget
+        }
+    }
+    groupFlightsByTier(flights) {
+        const result = flights.reduce((acc, flight) => {
+            const tier = this.determineFlightTier(flight);
+            if (!acc[tier]) {
+                acc[tier] = {
+                    min: Infinity,
+                    max: -Infinity,
+                    average: 0,
+                    confidence: 0.9, // Higher confidence for real data
+                    source: 'Amadeus',
+                    references: []
+                };
+            }
+            const price = parseFloat(flight.price.total);
+            acc[tier].min = Math.min(acc[tier].min, price);
+            acc[tier].max = Math.max(acc[tier].max, price);
+            acc[tier].references.push(this.transformAmadeusFlight(flight));
+            return acc;
+        }, {});
+        // Calculate averages
+        Object.keys(result).forEach(tier => {
+            const refs = result[tier].references;
+            result[tier].average =
+                refs.reduce((sum, ref) => sum + ref.price, 0) / refs.length;
+        });
+        return result;
+    }
+    async transformActivities(validActivities, days) {
+        logger.debug('Starting activity transformation', {
+            totalActivities: validActivities.length,
+            days
+        });
+        // Group activities by day and time slot
+        const activityGroups = validActivities.reduce((acc, activity) => {
+            // Skip activities without proper booking details
+            if (!this.hasValidBookingDetails(activity)) {
+                logger.warn('Skipping activity without valid booking details', {
+                    name: activity.name,
+                    provider: activity.bookingDetails?.provider
+                });
+                return acc;
+            }
+            const day = activity.day || activity.dayNumber || activity.day_number;
+            const timeSlot = activity.preferred_time_of_day || 'morning';
+            const tier = this.determineActivityTier(activity.price);
+            if (!acc[day]) {
+                acc[day] = {
+                    morning: { budget: [], medium: [], premium: [] },
+                    afternoon: { budget: [], medium: [], premium: [] },
+                    evening: { budget: [], medium: [], premium: [] }
+                };
+            }
+            if (acc[day][timeSlot] && acc[day][timeSlot][tier]) {
+                acc[day][timeSlot][tier].push(activity);
+            }
+            return acc;
+        }, {});
+        // Ensure each day has activities in each time slot and tier
+        const transformedActivities = [];
+        for (let day = 1; day <= days; day++) {
+            const dayActivities = activityGroups[day] || {
+                morning: { budget: [], medium: [], premium: [] },
+                afternoon: { budget: [], medium: [], premium: [] },
+                evening: { budget: [], medium: [], premium: [] }
+            };
+            // Process each time slot
+            ['morning', 'afternoon', 'evening'].forEach((timeSlot) => {
+                // Ensure at least one activity per tier in each time slot
+                ['budget', 'medium', 'premium'].forEach((tier) => {
+                    const activities = dayActivities[timeSlot][tier];
+                    if (activities.length === 0) {
+                        // Create placeholder activity if none exists
+                        const placeholder = this.createPlaceholderActivity(day, timeSlot, tier);
+                        activities.push(placeholder);
+                    }
+                    // Add all activities from this tier and time slot
+                    activities.forEach((activity) => {
+                        transformedActivities.push({
+                            ...activity,
+                            dayNumber: day,
+                            timeSlot,
+                            tier,
+                            bookingDetails: this.ensureValidBookingDetails(activity.bookingDetails, tier)
+                        });
+                    });
+                });
+            });
+        }
+        logger.debug('Activity transformation complete', {
+            transformedCount: transformedActivities.length,
+            daysProcessed: days
+        });
+        return transformedActivities;
+    }
+    hasValidBookingDetails(activity) {
+        const isViatorUrl = (url) => /^https:\/\/www\.viator\.com\/tours\/[^/]+\/[^/]+\/d\d+-[a-zA-Z0-9]+$/.test(url);
+        const isGetYourGuideUrl = (url) => /^https:\/\/www\.getyourguide\.com\/[^/]+\/[^/]+-t\d+$/.test(url);
+        const isValid = activity.bookingDetails &&
+            (activity.bookingDetails.provider === 'Viator' || activity.bookingDetails.provider === 'GetYourGuide') &&
+            activity.bookingDetails.referenceUrl &&
+            activity.bookingDetails.referenceUrl.length > 0 &&
+            ((activity.bookingDetails.provider === 'Viator' && isViatorUrl(activity.bookingDetails.referenceUrl)) ||
+                (activity.bookingDetails.provider === 'GetYourGuide' && isGetYourGuideUrl(activity.bookingDetails.referenceUrl)));
+        // Log validation details
+        logger.debug('[Activity Validation]', {
+            name: activity.name,
+            provider: activity.bookingDetails?.provider,
+            url: activity.bookingDetails?.referenceUrl,
+            isValid,
+            price: activity.price,
+            tier: this.determineActivityTier(activity.price),
+            isViatorUrl: activity.bookingDetails?.referenceUrl ? isViatorUrl(activity.bookingDetails.referenceUrl) : false,
+            isGetYourGuideUrl: activity.bookingDetails?.referenceUrl ? isGetYourGuideUrl(activity.bookingDetails.referenceUrl) : false
+        });
+        if (!isValid) {
+            logger.warn('[Activity Validation] Invalid booking details', {
+                name: activity.name,
+                provider: activity.bookingDetails?.provider,
+                url: activity.bookingDetails?.referenceUrl,
+                price: activity.price,
+                missingProvider: !activity.bookingDetails?.provider,
+                missingUrl: !activity.bookingDetails?.referenceUrl,
+                invalidProvider: activity.bookingDetails?.provider !== 'Viator' && activity.bookingDetails?.provider !== 'GetYourGuide',
+                invalidUrlFormat: activity.bookingDetails?.referenceUrl ?
+                    !isViatorUrl(activity.bookingDetails.referenceUrl) && !isGetYourGuideUrl(activity.bookingDetails.referenceUrl) :
+                    true
+            });
+        }
+        return isValid;
+    }
+    ensureValidBookingDetails(bookingDetails, tier) {
+        const provider = tier === 'premium' ? 'Viator' : 'GetYourGuide';
+        const baseUrl = provider === 'Viator' ? 'https://www.viator.com' : 'https://www.getyourguide.com';
+        return {
+            provider,
+            referenceUrl: bookingDetails?.referenceUrl || `${baseUrl}/error-invalid-url`,
+            cancellationPolicy: bookingDetails?.cancellationPolicy || 'Free cancellation up to 24 hours before the activity starts',
+            instantConfirmation: bookingDetails?.instantConfirmation ?? true,
+            mobileTicket: bookingDetails?.mobileTicket ?? true,
+            languages: bookingDetails?.languages || ['English'],
+            minParticipants: bookingDetails?.minParticipants || 1,
+            maxParticipants: bookingDetails?.maxParticipants || (tier === 'premium' ? 8 : 50),
+            pickupIncluded: bookingDetails?.pickupIncluded ?? (tier === 'premium'),
+            pickupLocation: bookingDetails?.pickupLocation || (tier === 'premium' ? 'Your hotel' : ''),
+            accessibility: bookingDetails?.accessibility || 'Standard',
+            restrictions: bookingDetails?.restrictions || []
+        };
+    }
+    createPlaceholderActivity(params) {
+        return {
+            name: "Activity Unavailable",
+            provider: "Viator",
+            price: 0,
+            price_category: params?.tier || "budget",
+            duration: 2,
+            typical_time: params?.timeSlot || "morning",
+            description: "No matching activity found. Please try different search criteria.",
+            highlights: ["No highlights available"],
+            rating: 0,
+            review_count: 0,
+            booking_url: "",
+            languages: ["English"],
+            cancellation_policy: "N/A",
+            location: {
+                meeting_point: "To be determined",
+                address: ""
+            },
+            booking_info: {
+                instant_confirmation: false,
+                mobile_ticket: false,
+                min_participants: 1,
+                max_participants: 1
+            }
+        };
+    }
+    determineTimeSlot(startTime) {
+        const hour = parseInt(startTime.split(':')[0]);
+        if (hour >= 5 && hour < 12)
+            return 'morning';
+        if (hour >= 12 && hour < 17)
+            return 'afternoon';
+        return 'evening';
+    }
+    determinePriceCategory(price) {
+        if (price < 30)
+            return 'budget';
+        if (price <= 100)
+            return 'medium';
+        return 'premium';
+    }
 }
-//# sourceMappingURL=agents.js.map

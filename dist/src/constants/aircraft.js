@@ -28,4 +28,3 @@ export const AIRCRAFT_CODES = {
     'E90': 'Embraer E190',
     'E95': 'Embraer E195',
 };
-//# sourceMappingURL=aircraft.js.map
