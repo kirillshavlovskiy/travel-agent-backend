@@ -469,7 +469,9 @@ export class ViatorService {
                         productDetails: {
                             ...activity.productDetails,
                             productOptions
-                        }
+                        },
+                        commentary: activity.commentary,
+                        itineraryHighlight: activity.itineraryHighlight
                     };
                 }
             }

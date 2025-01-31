@@ -114,21 +114,80 @@ Return ONLY a valid JSON array of activities.`;
             .filter(result => result !== null)
             .flat()
             .filter((activity, index, self) => index === self.findIndex(a => a?.bookingInfo?.productCode === activity?.bookingInfo?.productCode));
-        if (validActivities.length === 0) {
-            logger.warn('No valid activities found');
+        // Helper function to calculate similarity between activities
+        const calculateSimilarity = (activity1, activity2) => {
+            const name1 = activity1.name.toLowerCase();
+            const name2 = activity2.name.toLowerCase();
+            const desc1 = activity1.description?.toLowerCase() || '';
+            const desc2 = activity2.description?.toLowerCase() || '';
+            // Calculate name similarity
+            const nameSimilarity = name1 === name2 ? 1 :
+                name1.includes(name2) || name2.includes(name1) ? 0.8 :
+                    0;
+            // Calculate description similarity if both exist
+            const descSimilarity = desc1 && desc2 ?
+                (desc1 === desc2 ? 1 :
+                    desc1.includes(desc2) || desc2.includes(desc1) ? 0.7 :
+                        0) : 0;
+            // Calculate location similarity
+            const locationSimilarity = activity1.location === activity2.location ? 1 : 0;
+            // Weighted average
+            return (nameSimilarity * 0.5) + (descSimilarity * 0.3) + (locationSimilarity * 0.2);
+        };
+        // Deduplicate and balance activities
+        const deduplicateAndBalanceActivities = (activities, days) => {
+            // First, remove exact duplicates by productCode
+            const uniqueByCode = activities.filter((activity, index, self) => index === self.findIndex(a => a?.bookingInfo?.productCode === activity?.bookingInfo?.productCode));
+            // Then, remove similar activities
+            const uniqueActivities = [];
+            const seenCategories = new Set();
+            const categoryCount = {};
+            uniqueByCode.forEach(activity => {
+                // Check if we already have a very similar activity
+                const hasSimilar = uniqueActivities.some(existingActivity => calculateSimilarity(activity, existingActivity) > 0.7);
+                if (!hasSimilar) {
+                    const category = activity.category || 'Uncategorized';
+                    categoryCount[category] = (categoryCount[category] || 0) + 1;
+                    seenCategories.add(category);
+                }
+            });
+            // Calculate target activities per category
+            const totalTimeSlots = days * 3; // 3 slots per day
+            const targetPerCategory = Math.ceil(totalTimeSlots / seenCategories.size);
+            // Balance categories
+            uniqueByCode.forEach(activity => {
+                const category = activity.category || 'Uncategorized';
+                // Check similarity with existing activities
+                const hasSimilar = uniqueActivities.some(existingActivity => calculateSimilarity(activity, existingActivity) > 0.7);
+                // Add activity if:
+                // 1. No similar activity exists
+                // 2. Category hasn't reached its target count
+                // 3. We need more activities to fill the days
+                if (!hasSimilar &&
+                    (categoryCount[category] || 0) < targetPerCategory &&
+                    uniqueActivities.length < totalTimeSlots) {
+                    uniqueActivities.push(activity);
+                    categoryCount[category] = (categoryCount[category] || 0) + 1;
+                }
+            });
+            // Log category distribution
+            console.log('Category distribution after balancing:', categoryCount);
+            return uniqueActivities;
+        };
+        // Apply deduplication and balancing
+        const balancedActivities = deduplicateAndBalanceActivities(validActivities, days);
+        if (balancedActivities.length === 0) {
+            logger.warn('No valid activities found after deduplication and balancing');
             return res.status(200).json({
                 activities: [],
-                message: "Could not find valid activities on Viator. Please try again.",
+                message: "Could not find valid activities. Please try again.",
                 error: true
             });
         }
-        // Calculate activities per day and time slot
-        const totalTimeSlots = days * 3; // 3 time slots per day
-        const activitiesPerTimeSlot = Math.ceil(validActivities.length / totalTimeSlots);
-        // Transform activities with proper day and time slot distribution
-        const transformedActivities = validActivities.map((activity, index) => {
+        // Transform the balanced activities
+        const transformedActivities = balancedActivities.map((activity, index) => {
             // Calculate day number and time slot based on index
-            const timeSlotIndex = Math.floor(index / activitiesPerTimeSlot);
+            const timeSlotIndex = Math.floor(index / balancedActivities.length);
             const dayNumber = Math.floor(timeSlotIndex / 3) + 1;
             const timeSlot = ['morning', 'afternoon', 'evening'][timeSlotIndex % 3];
             // Get price value
@@ -273,6 +332,7 @@ router.post('/enrich', async (req, res) => {
         try {
             // First try to search for the activity
             const searchResults = await viatorClient.searchActivity(`productCode:${productCode}`);
+            let enrichedActivity;
             if (!searchResults || searchResults.length === 0) {
                 // If product code search fails, try searching by name
                 logger.warn('[Activities API] Product not found by code, trying name search:', {
@@ -291,30 +351,67 @@ router.post('/enrich', async (req, res) => {
                     originalName: name
                 });
                 // Now enrich with product details
-                const enrichedActivity = await viatorClient.enrichActivityDetails({
+                enrichedActivity = await viatorClient.enrichActivityDetails({
                     ...bestMatch,
                     name: name || bestMatch.name,
                     referenceUrl: bestMatch.referenceUrl
                 });
-                logger.info('[Activities API] Successfully enriched activity:', {
-                    activityId,
-                    productCode: bestMatch.bookingInfo?.productCode,
-                    hasEnrichedData: !!enrichedActivity
-                });
-                return res.json(enrichedActivity);
             }
-            const basicActivity = searchResults[0];
-            // Now enrich with product details
-            const enrichedActivity = await viatorClient.enrichActivityDetails({
-                ...basicActivity,
-                name: name || basicActivity.name,
-                referenceUrl: `https://www.viator.com/tours/${productCode}`
-            });
-            logger.info('[Activities API] Successfully enriched activity:', {
+            else {
+                const basicActivity = searchResults[0];
+                // Now enrich with product details
+                enrichedActivity = await viatorClient.enrichActivityDetails({
+                    ...basicActivity,
+                    name: name || basicActivity.name,
+                    referenceUrl: `https://www.viator.com/tours/${productCode}`
+                });
+            }
+            logger.info('[Activities API] Successfully enriched activity with Viator data:', {
                 activityId,
                 productCode,
                 hasEnrichedData: !!enrichedActivity
             });
+            // Now enrich with Perplexity AI-generated content
+            try {
+                const query = `Please analyze this activity and provide commentary and highlights:
+          Name: ${enrichedActivity.name}
+          Location: ${enrichedActivity.location}
+          Description: ${enrichedActivity.description || ''}
+          Duration: ${enrichedActivity.duration} hours
+          Price: ${enrichedActivity.price?.amount} ${enrichedActivity.price?.currency}
+
+          Please provide:
+          1. A 2-3 sentence commentary explaining why this activity is recommended and what makes it special
+          2. A 1-2 sentence explanation of how this activity fits into a day's itinerary
+          3. A list of key highlights and features`;
+                const perplexityResponse = await perplexityClient.getEnrichedDetails(query);
+                if (perplexityResponse && !perplexityResponse.error) {
+                    // Extract AI-generated content
+                    const { commentary, itineraryHighlight, highlights = [], description } = perplexityResponse;
+                    // Merge AI-generated content with Viator data
+                    enrichedActivity = {
+                        ...enrichedActivity,
+                        commentary: commentary || enrichedActivity.commentary,
+                        itineraryHighlight: itineraryHighlight || enrichedActivity.itineraryHighlight,
+                        description: description || enrichedActivity.description,
+                        highlights: highlights.length > 0 ? highlights : (enrichedActivity.highlights || [])
+                    };
+                    logger.info('[Activities API] Successfully added AI-generated content:', {
+                        activityId,
+                        hasCommentary: !!commentary,
+                        hasItineraryHighlight: !!itineraryHighlight,
+                        hasDescription: !!description,
+                        highlightsCount: highlights.length
+                    });
+                }
+            }
+            catch (perplexityError) {
+                logger.error('[Activities API] Error getting AI-generated content:', {
+                    error: perplexityError instanceof Error ? perplexityError.message : 'Unknown error',
+                    activityId
+                });
+                // Continue with Viator data only
+            }
             res.json(enrichedActivity);
         }
         catch (error) {

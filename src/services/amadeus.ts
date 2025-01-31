@@ -237,6 +237,25 @@ export class AmadeusService {
     carriers?: Record<string, string>;
   } | null = null;
 
+  private readonly rateLimits = {
+    requestsPerSecond: 10,
+    requestsPer5Minutes: 100,
+    requestsPerHour: 1000
+  };
+
+  private requestQueue: Array<{
+    resolve: (value: any) => void;
+    reject: (error: any) => void;
+    request: () => Promise<any>;
+  }> = [];
+
+  private requestCounts = {
+    lastSecond: 0,
+    last5Minutes: 0,
+    lastHour: 0,
+    lastRequestTime: Date.now()
+  };
+
   constructor() {
     const clientId = process.env.AMADEUS_CLIENT_ID;
     const clientSecret = process.env.AMADEUS_CLIENT_SECRET;
@@ -405,6 +424,99 @@ export class AmadeusService {
     return results;
   }
 
+  private async executeWithRateLimit<T>(request: () => Promise<T>): Promise<T> {
+    return new Promise((resolve, reject) => {
+      this.requestQueue.push({ resolve, reject, request });
+      this.processQueue();
+    });
+  }
+
+  private async processQueue() {
+    if (this.requestQueue.length === 0) return;
+
+    const now = Date.now();
+    const secondAgo = now - 1000;
+    const fiveMinutesAgo = now - 5 * 60 * 1000;
+    const hourAgo = now - 60 * 60 * 1000;
+
+    // Reset counters if enough time has passed
+    if (now - this.requestCounts.lastRequestTime > 1000) {
+      this.requestCounts.lastSecond = 0;
+    }
+    if (now - this.requestCounts.lastRequestTime > 5 * 60 * 1000) {
+      this.requestCounts.last5Minutes = 0;
+    }
+    if (now - this.requestCounts.lastRequestTime > 60 * 60 * 1000) {
+      this.requestCounts.lastHour = 0;
+    }
+
+    // Check if we can make a request
+    if (
+      this.requestCounts.lastSecond < this.rateLimits.requestsPerSecond &&
+      this.requestCounts.last5Minutes < this.rateLimits.requestsPer5Minutes &&
+      this.requestCounts.lastHour < this.rateLimits.requestsPerHour
+    ) {
+      const { resolve, reject, request } = this.requestQueue.shift()!;
+
+      // Update counters
+      this.requestCounts.lastSecond++;
+      this.requestCounts.last5Minutes++;
+      this.requestCounts.lastHour++;
+      this.requestCounts.lastRequestTime = now;
+
+      try {
+        const result = await this.retryWithBackoff(request);
+        resolve(result);
+      } catch (error) {
+        reject(error);
+      }
+
+      // Schedule next request processing
+      setTimeout(() => this.processQueue(), 100);
+    } else {
+      // If we can't make a request now, wait and try again
+      const waitTime = Math.max(
+        this.requestCounts.lastSecond >= this.rateLimits.requestsPerSecond ? 1000 : 0,
+        this.requestCounts.last5Minutes >= this.rateLimits.requestsPer5Minutes ? 5 * 60 * 1000 : 0,
+        this.requestCounts.lastHour >= this.rateLimits.requestsPerHour ? 60 * 60 * 1000 : 0
+      );
+
+      setTimeout(() => this.processQueue(), waitTime);
+    }
+  }
+
+  private async retryWithBackoff(request: () => Promise<any>, attempt = 1): Promise<any> {
+    const maxRetries = 3;
+    const baseDelay = 1000;
+    const maxDelay = 10000;
+
+    try {
+      return await request();
+    } catch (error: any) {
+      if (
+        attempt <= maxRetries &&
+        (error?.response?.status === 429 || // Too Many Requests
+         error?.response?.status >= 500)    // Server errors
+      ) {
+        const delay = Math.min(
+          Math.pow(2, attempt - 1) * baseDelay + Math.random() * 1000,
+          maxDelay
+        );
+
+        logger.info('Rate limit exceeded, retrying request', {
+          attempt,
+          delay,
+          error: error?.response?.status
+        });
+
+        await new Promise(resolve => setTimeout(resolve, delay));
+        return this.retryWithBackoff(request, attempt + 1);
+      }
+
+      throw error;
+    }
+  }
+
   async searchFlights(params: {
     segments: Array<{
       originLocationCode: string;
@@ -415,54 +527,54 @@ export class AmadeusService {
     adults: number;
     max?: number;
   }) {
-    try {
-      logger.info('Searching flights with params:', {
-        segments: params.segments,
-        travelClass: params.travelClass,
-        adults: params.adults
-      });
-
-      if (!params.segments || !Array.isArray(params.segments) || params.segments.length === 0) {
-        throw new Error('At least one flight segment is required');
-      }
-
-      // Validate all segments
-      params.segments.forEach((segment, index) => {
-        if (!segment.originLocationCode || !segment.destinationLocationCode || !segment.departureDate) {
-          throw new Error(`Invalid segment data at index ${index}: origin, destination, and departure date are required`);
-        }
-      });
-
-      // Format the search parameters according to Amadeus API requirements
-      const searchParams = {
-        originDestinations: params.segments.map((segment, index) => ({
-          id: String(index + 1),
-          originLocationCode: segment.originLocationCode,
-          destinationLocationCode: segment.destinationLocationCode,
-          departureDateTimeRange: {
-            date: segment.departureDate
-          }
-        })),
-        travelers: Array.from({ length: params.adults }, (_, i) => ({
-          id: String(i + 1),
-          travelerType: 'ADULT'
-        })),
-        sources: ['GDS'],
-        searchCriteria: {
-          maxFlightOffers: params.max || 100,
-          flightFilters: {
-            cabinRestrictions: [{
-              cabin: params.travelClass,
-              coverage: 'MOST_SEGMENTS',
-              originDestinationIds: params.segments.map((_, i) => String(i + 1))
-            }]
-          }
-        }
-      };
-
-      logger.info('Making Amadeus API call with formatted params:', searchParams);
-
+    return this.executeWithRateLimit(async () => {
       try {
+        logger.info('Searching flights with params:', {
+          segments: params.segments,
+          travelClass: params.travelClass,
+          adults: params.adults
+        });
+
+        if (!params.segments || !Array.isArray(params.segments) || params.segments.length === 0) {
+          throw new Error('At least one flight segment is required');
+        }
+
+        // Validate all segments
+        params.segments.forEach((segment, index) => {
+          if (!segment.originLocationCode || !segment.destinationLocationCode || !segment.departureDate) {
+            throw new Error(`Invalid segment data at index ${index}: origin, destination, and departure date are required`);
+          }
+        });
+
+        // Format the search parameters according to Amadeus API requirements
+        const searchParams = {
+          originDestinations: params.segments.map((segment, index) => ({
+            id: String(index + 1),
+            originLocationCode: segment.originLocationCode,
+            destinationLocationCode: segment.destinationLocationCode,
+            departureDateTimeRange: {
+              date: segment.departureDate
+            }
+          })),
+          travelers: Array.from({ length: params.adults }, (_, i) => ({
+            id: String(i + 1),
+            travelerType: 'ADULT'
+          })),
+          sources: ['GDS'],
+          searchCriteria: {
+            maxFlightOffers: params.max || 100,
+            flightFilters: {
+              cabinRestrictions: [{
+                cabin: params.travelClass,
+                coverage: 'MOST_SEGMENTS',
+                originDestinationIds: params.segments.map((_, i) => String(i + 1))
+              }]
+            }
+          }
+        };
+
+        logger.info('Making Amadeus API call with formatted params:', searchParams);
+
         const response = await this.amadeus.shopping.flightOffersSearch.post(
           JSON.stringify(searchParams)
         );
@@ -484,49 +596,31 @@ export class AmadeusService {
         this.lastFlightSearchDictionaries = results.dictionaries || null;
 
         return results.data || [];
-      } catch (apiError: any) {
-        // Log detailed API error
-        logger.error('Amadeus API error:', {
-          error: {
-            name: apiError.name,
-            message: apiError.message,
-            code: apiError.code,
-            status: apiError.response?.statusCode,
-            statusText: apiError.response?.statusText,
-            data: apiError.response?.result?.errors || apiError.response?.data,
-            request: {
-              method: apiError.response?.request?.method,
-              path: apiError.response?.request?.path,
-              params: searchParams
+      } catch (error) {
+        logger.error('Failed to search flights', {
+          error: error instanceof Error ? {
+            name: error.name,
+            message: error.message,
+            stack: error.stack,
+            code: (error as any).code,
+            response: {
+              status: (error as any)?.response?.statusCode,
+              statusText: (error as any)?.response?.statusText,
+              errors: (error as any)?.response?.result?.errors,
+              data: (error as any)?.response?.data,
+              request: {
+                method: (error as any)?.response?.request?.method,
+                path: (error as any)?.response?.request?.path
+              }
             }
-          }
+          } : 'Unknown error',
+          params,
+          amadeusInitialized: !!this.amadeus,
+          hasShoppingAPI: !!(this.amadeus as any)?.shopping?.flightOffersSearch?.post
         });
-        return [];
+        return []; // Return empty array instead of throwing
       }
-    } catch (error) {
-      logger.error('Failed to search flights', {
-        error: error instanceof Error ? {
-          name: error.name,
-          message: error.message,
-          stack: error.stack,
-          code: (error as any).code,
-          response: {
-            status: (error as any)?.response?.statusCode,
-            statusText: (error as any)?.response?.statusText,
-            errors: (error as any)?.response?.result?.errors,
-            data: (error as any)?.response?.data,
-            request: {
-              method: (error as any)?.response?.request?.method,
-              path: (error as any)?.response?.request?.path
-            }
-          }
-        } : 'Unknown error',
-        params,
-        amadeusInitialized: !!this.amadeus,
-        hasShoppingAPI: !!(this.amadeus as any)?.shopping?.flightOffersSearch?.post
-      });
-      return []; // Return empty array instead of throwing
-    }
+    });
   }
 
   async confirmFlightPrice(flightOffer: AmadeusFlightOffer): Promise<any> {

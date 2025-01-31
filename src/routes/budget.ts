@@ -7,6 +7,7 @@ import { AmadeusService } from '../services/amadeus.js';
 import { AirlineInfo } from '../types.js';
 import { AmadeusSegment, AmadeusFare, AmadeusFareDetail, AmadeusFlightOffer } from '../types/amadeus.js';
 import { AIRCRAFT_CODES as AIRCRAFT_CODE_MAP } from '../constants/aircraft.js';
+import { normalizeCategory } from '../constants/categories.js';
 
 const router = Router();
 const amadeusService = new AmadeusService();
@@ -811,13 +812,19 @@ router.post('/generate-activity', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Missing required parameters' });
     }
 
-    console.log('[Budget API] Calling VacationBudgetAgent to generate activity...');
+    const mappedCategory = normalizeCategory(category || '');
+
+    console.log('[Budget API] Calling VacationBudgetAgent to generate activity with mapped category:', {
+      originalCategory: category,
+      mappedCategory
+    });
+
     const activity = await agent.generateSingleActivity({
       destination,
       dayNumber,
       timeOfDay: timeSlot,
       budget: tier,
-      category,
+      category: mappedCategory,
       userPreferences,
       existingActivities,
       flightTimes,

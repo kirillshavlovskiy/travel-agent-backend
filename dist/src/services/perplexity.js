@@ -1,55 +1,284 @@
 import axios from 'axios';
 import { calculateStringSimilarity } from '../utils/string';
 import { logger } from '../utils/logger';
-export function cleanSimilarActivities(activities) {
-    const similarityThreshold = 0.7; // Adjust this value to control sensitivity
-    const result = [];
-    const processed = new Set();
-    for (let i = 0; i < activities.length; i++) {
-        if (processed.has(i))
-            continue;
-        let bestActivity = activities[i];
-        let similarIndices = [i];
-        // Find similar activities
-        for (let j = i + 1; j < activities.length; j++) {
-            if (processed.has(j))
-                continue;
-            const activity1 = activities[i];
-            const activity2 = activities[j];
-            // Check if activities are similar
-            const nameSimilarity = calculateStringSimilarity(activity1.name, activity2.name);
-            const sameDayAndTime = activity1.dayNumber === activity2.dayNumber &&
-                activity1.timeSlot === activity2.timeSlot;
-            const sameLocation = activity1.location === activity2.location;
-            const sameCategory = activity1.category === activity2.category;
-            if ((nameSimilarity > similarityThreshold || (sameLocation && sameCategory)) && sameDayAndTime) {
-                similarIndices.push(j);
-                // Update best activity based on rating, reviews, and price
-                if (shouldPreferActivity(activity2, bestActivity)) {
-                    bestActivity = activity2;
+const ACTIVITY_CATEGORIES = [
+    'Cultural & Historical',
+    'Nature & Adventure',
+    'Food & Entertainment',
+    'Lifestyle & Local'
+];
+const PRICE_TIERS = ['budget', 'medium', 'premium'];
+function determinePriceTier(price) {
+    if (price <= 50)
+        return 'budget';
+    if (price <= 150)
+        return 'medium';
+    return 'premium';
+}
+function calculateDistribution(activities) {
+    const distribution = {};
+    const totalActivities = activities.length;
+    // Initialize distribution object
+    ACTIVITY_CATEGORIES.forEach(category => {
+        distribution[category] = {
+            count: 0,
+            percentage: 0,
+            byTier: {
+                budget: 0,
+                medium: 0,
+                premium: 0
+            }
+        };
+    });
+    // Count activities by category and tier
+    activities.forEach(activity => {
+        const category = activity.category;
+        const tier = determinePriceTier(activity.price);
+        if (distribution[category]) {
+            distribution[category].count++;
+            distribution[category].byTier[tier]++;
+            distribution[category].percentage = (distribution[category].count / totalActivities) * 100;
+        }
+    });
+    return distribution;
+}
+function balanceActivities(activities) {
+    const totalActivities = activities.length;
+    const targetPerCategory = Math.ceil(totalActivities / ACTIVITY_CATEGORIES.length);
+    const targetPerTier = Math.ceil(totalActivities / PRICE_TIERS.length);
+    logger.info('[Activity Balancing] Starting activity balancing', {
+        totalActivities,
+        targetPerCategory,
+        targetPerTier
+    });
+    // First, clean similar activities
+    let cleanedActivities = cleanSimilarActivities(activities);
+    // Calculate current distribution
+    const distribution = calculateDistribution(cleanedActivities);
+    logger.info('[Activity Balancing] Current distribution', { distribution });
+    // Group activities by category and tier
+    const groupedActivities = cleanedActivities.reduce((acc, activity) => {
+        const category = activity.category;
+        const tier = determinePriceTier(activity.price);
+        if (!acc[category]) {
+            acc[category] = { budget: [], medium: [], premium: [] };
+        }
+        acc[category][tier].push(activity);
+        return acc;
+    }, {});
+    // Balance activities
+    const balancedActivities = [];
+    // First pass: ensure minimum representation for each category
+    ACTIVITY_CATEGORIES.forEach(category => {
+        const categoryActivities = groupedActivities[category] || { budget: [], medium: [], premium: [] };
+        const totalInCategory = Object.values(categoryActivities).flat().length;
+        if (totalInCategory > targetPerCategory) {
+            // Remove excess activities, preferring to keep higher rated ones
+            const allCategoryActivities = Object.values(categoryActivities).flat()
+                .sort((a, b) => (b.rating || 0) - (a.rating || 0));
+            balancedActivities.push(...allCategoryActivities.slice(0, targetPerCategory));
+        }
+        else {
+            // Keep all activities in this category
+            balancedActivities.push(...Object.values(categoryActivities).flat());
+        }
+    });
+    // Second pass: balance price tiers within each category
+    const finalActivities = balancedActivities.reduce((acc, activity) => {
+        const category = activity.category;
+        const tier = determinePriceTier(activity.price);
+        if (!acc[category]) {
+            acc[category] = { budget: [], medium: [], premium: [] };
+        }
+        // Only add if we haven't exceeded target for this tier
+        if (acc[category][tier].length < Math.ceil(targetPerCategory / 3)) {
+            acc[category][tier].push(activity);
+        }
+        return acc;
+    }, {});
+    // Flatten and sort by rating within each category
+    const result = Object.values(finalActivities)
+        .flatMap(tierGroups => Object.values(tierGroups)
+        .flat()
+        .sort((a, b) => (b.rating || 0) - (a.rating || 0)));
+    const finalDistribution = calculateDistribution(result);
+    logger.info('[Activity Balancing] Final distribution after balancing', {
+        originalCount: activities.length,
+        cleanedCount: cleanedActivities.length,
+        finalCount: result.length,
+        distribution: finalDistribution
+    });
+    return result;
+}
+const cleanSimilarActivities = (activities) => {
+    logger.info('[Duplicate Cleaning] Starting process', {
+        totalActivities: activities.length
+    });
+    const duplicateGroups = new Map();
+    // Enhanced normalization for activity names
+    const normalizeTitle = (title) => {
+        return title
+            .toLowerCase()
+            // Remove common variations and filler words
+            .replace(/tickets?|tours?|guided|exclusive|semi-private|private|direct|entry|access|skip.*line|priority|admission|experience|visit/gi, '')
+            .replace(/\([^)]*\)/g, '') // Remove text in parentheses
+            .replace(/with.*$/i, '') // Remove "with..." suffixes
+            .replace(/\b(the|to|at|in|for|from|by|and|or)\b/gi, '') // Remove common prepositions and conjunctions
+            // Remove special characters and extra spaces
+            .replace(/[^\w\s]/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+    };
+    // Group similar activities
+    for (const activity of activities) {
+        let foundMatch = false;
+        const normalizedName = normalizeTitle(activity.name);
+        // First check for exact matches after normalization
+        for (const [key, group] of duplicateGroups) {
+            const baseActivity = group[0];
+            const normalizedBaseName = normalizeTitle(baseActivity.name);
+            // Check for exact matches after normalization
+            if (normalizedName === normalizedBaseName) {
+                group.push(activity);
+                foundMatch = true;
+                logger.debug('[Duplicate Cleaning] Found exact normalized match', {
+                    original: baseActivity.name,
+                    duplicate: activity.name
+                });
+                break;
+            }
+            // If not exact match, check string similarity with higher threshold
+            const similarity = calculateStringSimilarity(normalizedName, normalizedBaseName);
+            // Use stricter similarity threshold (0.6) but with additional checks
+            if (similarity > 0.6) {
+                // Additional verification checks
+                const durationMatch = !activity.duration || !baseActivity.duration ||
+                    Math.abs(activity.duration - baseActivity.duration) <= 30; // Allow 30 min difference
+                const locationMatch = !activity.location || !baseActivity.location ||
+                    calculateStringSimilarity(activity.location.toLowerCase(), baseActivity.location.toLowerCase()) > 0.8;
+                const categoryMatch = !activity.category || !baseActivity.category ||
+                    activity.category === baseActivity.category;
+                const timeMatch = !activity.timeSlot || !baseActivity.timeSlot ||
+                    activity.timeSlot === baseActivity.timeSlot;
+                // Consider activities similar if they have high name similarity AND
+                // match on at least location or duration, plus category
+                if ((durationMatch || locationMatch) && categoryMatch && timeMatch) {
+                    group.push(activity);
+                    foundMatch = true;
+                    logger.debug('[Duplicate Cleaning] Found similar activity', {
+                        original: baseActivity.name,
+                        duplicate: activity.name,
+                        similarity,
+                        duration: activity.duration,
+                        location: activity.location,
+                        durationMatch,
+                        locationMatch,
+                        categoryMatch
+                    });
+                    break;
                 }
             }
         }
-        // Mark all similar activities as processed
-        similarIndices.forEach(idx => processed.add(idx));
-        result.push(bestActivity);
+        if (!foundMatch) {
+            const activityId = activity.id || `activity-${Math.random().toString(36).substr(2, 9)}`;
+            duplicateGroups.set(activityId, [activity]);
+        }
     }
-    return result;
+    // Select best activity from each group
+    const cleanedActivities = [];
+    for (const [groupId, group] of duplicateGroups) {
+        if (group.length > 1) {
+            logger.info('[Duplicate Cleaning] Processing group', {
+                groupId,
+                count: group.length,
+                activities: group.map(a => ({
+                    name: a.name,
+                    rating: a.rating,
+                    reviews: a.numberOfReviews,
+                    price: a.price
+                }))
+            });
+            // Enhanced selection criteria
+            const bestActivity = group.reduce((best, current) => {
+                // If one has a rating and the other doesn't, prefer the rated one
+                if ((best.rating || 0) === 0 && (current.rating || 0) > 0)
+                    return current;
+                if ((current.rating || 0) === 0 && (best.rating || 0) > 0)
+                    return best;
+                // If both have ratings, use the shouldPreferActivity function
+                return shouldPreferActivity(current, best) ? current : best;
+            });
+            logger.info('[Duplicate Cleaning] Selected best activity', {
+                groupId,
+                selected: {
+                    name: bestActivity.name,
+                    rating: bestActivity.rating,
+                    reviews: bestActivity.numberOfReviews,
+                    price: bestActivity.price
+                }
+            });
+            cleanedActivities.push(bestActivity);
+        }
+        else {
+            cleanedActivities.push(group[0]);
+        }
+    }
+    logger.info('[Duplicate Cleaning] Completed', {
+        originalCount: activities.length,
+        cleanedCount: cleanedActivities.length,
+        duplicatesRemoved: activities.length - cleanedActivities.length
+    });
+    return cleanedActivities;
+};
+function getTimeSlotValue(timeSlot) {
+    switch (timeSlot.toLowerCase()) {
+        case 'morning': return 0;
+        case 'afternoon': return 1;
+        case 'evening': return 2;
+        default: return -1;
+    }
 }
 function shouldPreferActivity(activity1, activity2) {
-    // Prefer activities with significantly better ratings
-    if (activity1.rating - activity2.rating > 0.3)
-        return true;
-    if (activity2.rating - activity1.rating > 0.3)
-        return false;
-    // If ratings are similar, prefer activities with more reviews
-    if (activity1.numberOfReviews > activity2.numberOfReviews * 1.5)
-        return true;
-    if (activity2.numberOfReviews > activity1.numberOfReviews * 1.5)
-        return false;
-    // If both rating and reviews are similar, prefer the cheaper option
-    return activity1.price < activity2.price;
+    // Always prefer activities with higher ratings
+    if ((activity1.rating || 0) !== (activity2.rating || 0)) {
+        return (activity1.rating || 0) > (activity2.rating || 0);
+    }
+    // If ratings are equal, prefer activities with more reviews
+    if ((activity1.numberOfReviews || 0) !== (activity2.numberOfReviews || 0)) {
+        return (activity1.numberOfReviews || 0) > (activity2.numberOfReviews || 0);
+    }
+    // If both rating and reviews are equal, prefer the cheaper option
+    return (activity1.price || 0) < (activity2.price || 0);
 }
+function countCategories(activities) {
+    return activities.reduce((acc, activity) => {
+        acc[activity.category] = (acc[activity.category] || 0) + 1;
+        return acc;
+    }, {});
+}
+// Add default durations by category and time slot
+const DEFAULT_DURATIONS = {
+    'Cultural & Historical': {
+        morning: 3,
+        afternoon: 3,
+        evening: 2
+    },
+    'Nature & Adventure': {
+        morning: 4,
+        afternoon: 3,
+        evening: 2
+    },
+    'Food & Entertainment': {
+        morning: 2,
+        afternoon: 3,
+        evening: 3
+    },
+    'Lifestyle & Local': {
+        morning: 2,
+        afternoon: 3,
+        evening: 2
+    }
+};
 export class PerplexityService {
     constructor() {
         this.apiKey = process.env.PERPLEXITY_API_KEY || '';
@@ -59,116 +288,436 @@ export class PerplexityService {
         }
     }
     buildActivityQuery(params) {
-        return `Create a ${params.days}-day activity plan for ${params.destination} with the following requirements:
+        return `Find ${params.days} days of real, bookable activities in ${params.destination} on Viator.com.
 
-BUDGET & QUALITY:
-- Daily budget: ${params.budget} ${params.currency} per person
-- Minimum rating: 4.0+ stars on Viator
-- Must have at least 50 reviews
+Key Requirements:
+- Daily budget: ${params.budget} ${params.currency}
+- Activities must be currently bookable on Viator
+- Mix of morning, afternoon, and evening activities
+- Geographically sensible routing each day
+- Balance between cultural, adventure, food, and local experiences
 
-ACTIVITY CATEGORIES:
-- Cultural (museums, churches, historic sites)
-- Outdoor (parks, walking tours, nature)
-- Entertainment (shows, performances)
-- Food & Drink (tastings, dining experiences)
-- Shopping (markets, shopping areas)
-- Adventure (sports, active experiences)
-
-GEOGRAPHIC OPTIMIZATION:
-- Group activities in the same area for each day
-- Plan routes to minimize travel time between activities
-- Consider main tourist areas and attractions
-- Include both central locations and notable surrounding areas
-- Account for public transportation and walking distances
-
-TIME SLOTS:
-- Morning (9:00-13:00): Prefer cultural & outdoor activities
-- Afternoon (14:00-18:00): Prefer shopping & adventure activities
-- Evening (19:00-23:00): Prefer food & entertainment activities
-
-BALANCE REQUIREMENTS:
-- Maximum 2 museums or similar attractions per day
-- At least 1 outdoor activity per day
-- Mix food experiences between lunches and dinners
-- Include at least:
-  * 2 walking tours to explore different areas
-  * 2 food/culinary experiences
-  * 1 cultural performance or show
-  * 1 iconic landmark or attraction visit
-  * 1 local experience (cooking class, workshop, or similar)
-
-OUTPUT FORMAT:
-Return a JSON array of activities, each with:
+Return a JSON array of activities:
 {
-  "name": "EXACT Viator activity name",
-  "timeSlot": "morning|afternoon|evening",
-  "category": "Cultural|Outdoor|Entertainment|Food & Drink|Shopping|Adventure",
-  "dayNumber": 1-${params.days},
-  "expectedDuration": "in minutes",
-  "selected": false
-}
-
-CRITICAL RULES:
-1. ONLY suggest activities that exist on Viator.com
-2. Use EXACT names from Viator listings
-3. Ensure activities in the same day are geographically close
-4. Account for travel time between locations
-5. Don't schedule overlapping activities
-6. Consider seasonal/weather appropriate activities
-7. Set selected to false for all activities
-
-Return ONLY a valid JSON array of activities.`;
+  "activities": [
+    {
+      "name": "Exact Viator activity name",
+      "description": "Brief activity description",
+      "duration": number (hours),
+      "price": number,
+      "category": "Cultural & Historical|Nature & Adventure|Food & Entertainment|Lifestyle & Local",
+      "location": "Area in ${params.destination}",
+      "timeSlot": "morning|afternoon|evening",
+      "dayNumber": 1-${params.days},
+      "commentary": "Why this activity is special",
+      "itineraryHighlight": "How it fits the day's plan"
     }
-    async generateActivities(params) {
+  ]
+}`;
+    }
+    async makePerplexityRequests(query) {
         try {
-            logger.info('Received activity generation request', params);
-            const query = this.buildActivityQuery(params);
-            logger.debug('Sending query to Perplexity API', { query });
+            // Split the request into smaller chunks to avoid token limits
             const response = await axios.post(this.baseUrl, {
-                model: 'sonar-pro',
+                model: 'mixtral-8x7b-instruct', // Use more capable model
                 messages: [
                     {
                         role: 'system',
-                        content: 'You are a helpful travel planning assistant specialized in creating detailed activity itineraries using Viator activities.'
+                        content: 'You are a travel expert specializing in Viator activities. Return only valid JSON arrays containing real, bookable activities.'
                     },
                     {
                         role: 'user',
                         content: query
                     }
                 ],
-                temperature: 0.1,
-                max_tokens: 4000
+                temperature: 0.1, // Lower temperature for more consistent output
+                max_tokens: 4000, // Increase token limit
+                web_search: true, // Enable web search
+                stream: false // Disable streaming for better reliability
             }, {
                 headers: {
                     'Authorization': `Bearer ${this.apiKey}`,
                     'Content-Type': 'application/json'
-                }
+                },
+                timeout: 60000 // Increase timeout to 60 seconds
             });
-            if (!response.data || !response.data.choices || !response.data.choices[0]?.message?.content) {
-                logger.error('Invalid response from Perplexity API', response.data);
-                throw new Error('Invalid response format from Perplexity API');
+            const content = response.data.choices[0]?.message?.content;
+            if (!content) {
+                logger.error('[Activity Generation] Empty response from API');
+                throw new Error('No content in Perplexity response');
             }
-            const content = response.data.choices[0].message.content;
+            logger.debug('[Activity Generation] Received response', { contentLength: content.length });
             try {
-                const parsed = JSON.parse(content);
-                return Array.isArray(parsed) ? parsed : parsed.activities || [];
+                // First try to parse the content directly
+                let parsedContent;
+                try {
+                    parsedContent = JSON.parse(content);
+                }
+                catch (e) {
+                    // If direct parsing fails, try to extract JSON array
+                    const jsonMatch = content.match(/\[\s*\{[\s\S]*\}\s*\]/);
+                    if (!jsonMatch) {
+                        logger.error('[Activity Generation] No JSON array found in response');
+                        throw new Error('No JSON array found in response');
+                    }
+                    const jsonContent = jsonMatch[0];
+                    // Enhanced JSON cleaning
+                    const cleanedJson = jsonContent
+                        .replace(/[\u0000-\u001F]+/g, '') // Remove control characters
+                        .replace(/,(\s*[}\]])/g, '$1') // Fix trailing commas
+                        .replace(/([{,]\s*)(\w+):/g, '$1"$2":') // Quote unquoted keys
+                        .replace(/\\/g, '\\\\') // Escape backslashes
+                        .replace(/"/g, '\\"') // Escape quotes
+                        .replace(/`/g, '"') // Replace backticks with quotes
+                        .trim();
+                    logger.debug('[Activity Generation] Attempting to parse cleaned JSON');
+                    parsedContent = {
+                        activities: JSON.parse(cleanedJson),
+                        dailySummaries: [] // Initialize empty dailySummaries array
+                    };
+                }
+                // Validate the structure and content
+                if (!parsedContent.activities || !Array.isArray(parsedContent.activities)) {
+                    logger.error('[Activity Generation] Invalid response structure');
+                    throw new Error('Invalid response structure: missing activities array');
+                }
+                // Log successful parsing
+                logger.info('[Activity Generation] Successfully parsed response', {
+                    activityCount: parsedContent.activities.length
+                });
+                return {
+                    activities: parsedContent.activities,
+                    dailySummaries: parsedContent.dailySummaries || []
+                };
             }
             catch (error) {
-                logger.error('Failed to parse Perplexity response', { content, error });
+                logger.error('[Activity Generation] Failed to parse response', {
+                    error: error instanceof Error ? error.message : 'Unknown error',
+                    content
+                });
                 throw new Error('Invalid JSON response from Perplexity');
             }
         }
         catch (error) {
-            logger.error('Failed to generate activities', error);
             if (axios.isAxiosError(error)) {
-                logger.error('Axios error details:', {
+                logger.error('[Activity Generation] Axios error', {
                     status: error.response?.status,
-                    statusText: error.response?.statusText,
-                    url: error.config?.url,
-                    method: error.config?.method
+                    data: error.response?.data,
+                    message: error.message
                 });
-                throw new Error(`API request failed: ${error.response?.status} ${error.response?.statusText}`);
             }
+            else {
+                logger.error('[Activity Generation] Unknown error', {
+                    error: error instanceof Error ? error.message : 'Unknown error'
+                });
+            }
+            throw error;
+        }
+    }
+    async generateDailyHighlights(activities) {
+        logger.info('[Daily Highlights] Starting to generate daily summaries');
+        // Group activities by day
+        const activitiesByDay = activities.reduce((acc, activity) => {
+            acc[activity.dayNumber] = acc[activity.dayNumber] || [];
+            acc[activity.dayNumber].push(activity);
+            return acc;
+        }, {});
+        const dailySummaries = [];
+        for (const [dayNumber, dayActivities] of Object.entries(activitiesByDay)) {
+            try {
+                // Sort activities by time slot
+                const sortedActivities = dayActivities.sort((a, b) => getTimeSlotValue(a.timeSlot) - getTimeSlotValue(b.timeSlot));
+                const query = `Generate a natural, flowing summary of this day's itinerary:
+
+Day ${dayNumber} Activities:
+${sortedActivities.map(a => `- ${a.name} (${a.timeSlot}): ${a.description}`).join('\n')}
+
+Requirements:
+1. Write a flowing paragraph that naturally connects all activities
+2. Highlight the progression through the day (morning to evening)
+3. Mention key highlights and transitions between activities
+4. Include practical details like "after breakfast" or "in the evening"
+5. Keep it concise but informative (max 4-5 sentences)
+
+Return ONLY the summary paragraph, no additional formatting or explanation.`;
+                logger.info('[Daily Highlights] Requesting summary for day', {
+                    dayNumber,
+                    activityCount: sortedActivities.length
+                });
+                const response = await axios.post(this.baseUrl, {
+                    model: 'sonar',
+                    messages: [
+                        {
+                            role: 'system',
+                            content: 'You are a travel itinerary expert. Create natural, flowing summaries that connect activities logically.'
+                        },
+                        {
+                            role: 'user',
+                            content: query
+                        }
+                    ],
+                    temperature: 0.7,
+                    max_tokens: 500
+                }, {
+                    headers: {
+                        'Authorization': `Bearer ${this.apiKey}`,
+                        'Content-Type': 'application/json'
+                    }
+                });
+                const summary = response.data.choices[0].message.content.trim();
+                logger.info('[Daily Highlights] Generated summary for day', {
+                    dayNumber,
+                    summaryLength: summary.length
+                });
+                dailySummaries.push({
+                    dayNumber: parseInt(dayNumber),
+                    summary,
+                    activities: sortedActivities
+                });
+            }
+            catch (error) {
+                logger.error('[Daily Highlights] Failed to generate summary for day', {
+                    dayNumber,
+                    error: error instanceof Error ? error.message : 'Unknown error'
+                });
+                // Add a basic summary if generation fails
+                dailySummaries.push({
+                    dayNumber: parseInt(dayNumber),
+                    summary: `Day ${dayNumber} includes ${dayActivities.length} activities: ${dayActivities.map(a => a.name).join(', ')}.`,
+                    activities: dayActivities
+                });
+            }
+        }
+        // Sort summaries by day number
+        dailySummaries.sort((a, b) => a.dayNumber - b.dayNumber);
+        logger.info('[Daily Highlights] Completed generating daily summaries', {
+            totalDays: dailySummaries.length,
+            averageSummaryLength: dailySummaries.reduce((acc, day) => acc + day.summary.length, 0) / dailySummaries.length
+        });
+        return dailySummaries;
+    }
+    async generateActivities(params) {
+        try {
+            logger.info('Received activity generation request', params);
+            // 1. Generate activities with essential data and insights
+            const query = `Create a ${params.days}-day activity plan for ${params.destination} with the following requirements:
+
+CRITICAL RULES:
+1. Return ONLY a valid JSON object - NO explanatory text
+2. Focus on finding REAL activities that exist on Viator.com
+3. Ensure activities in the same day are geographically close
+4. Account for travel time between locations
+5. Maintain category distribution (25% each)
+
+BUDGET & CATEGORIES:
+- Daily budget: ${params.budget} ${params.currency}
+- Categories (25% each):
+  * Cultural & Historical
+  * Nature & Adventure
+  * Food & Entertainment
+  * Lifestyle & Local
+
+TIME SLOTS:
+- Morning (9:00-13:00)
+- Afternoon (14:00-18:00)
+- Evening (19:00-23:00)
+
+REQUIRED FIELDS FOR EACH ACTIVITY:
+1. name: Activity name as found on Viator
+2. location: General area/neighborhood
+3. category: One of the four main categories
+4. timeSlot: morning|afternoon|evening
+5. dayNumber: 1-${params.days}
+6. duration: Approximate duration in hours (number)
+7. commentary: 2-3 sentences on why this activity is recommended for the traveler
+8. itineraryHighlight: How this activity fits into the day's flow
+
+DAILY INSIGHTS:
+For each day, provide:
+1. summary: Natural flowing paragraph connecting the day's activities
+2. dayHighlight: Main theme or highlight of the day
+3. practicalTips: Local transportation and timing advice
+
+Return a JSON object with:
+{
+  "activities": [
+    {
+      "name": string,
+      "location": string,
+      "category": string,
+      "timeSlot": string,
+      "dayNumber": number,
+      "duration": number,
+      "commentary": string,
+      "itineraryHighlight": string
+    }
+  ],
+  "dailySummaries": [
+    {
+      "dayNumber": number,
+      "summary": string,
+      "dayHighlight": string,
+      "practicalTips": string
+    }
+  ]
+}`;
+            logger.debug('Sending query to Perplexity API', { query });
+            const response = await this.makePerplexityRequests(query);
+            // Add default durations if missing
+            const activitiesWithDuration = response.activities.map(activity => ({
+                ...activity,
+                duration: activity.duration || DEFAULT_DURATIONS[activity.category]?.[activity.timeSlot] || 2
+            }));
+            // 2. Clean and balance activities
+            const balancedActivities = balanceActivities(activitiesWithDuration);
+            logger.info('Successfully balanced activities', {
+                originalCount: activitiesWithDuration.length,
+                balancedCount: balancedActivities.length
+            });
+            // 3. Enrich with Viator data
+            const enrichedActivities = await Promise.all(balancedActivities.map(async (activity) => {
+                try {
+                    // Search Viator for exact activity details
+                    const enrichedData = await this.getEnrichedDetails(`Find this exact activity on Viator in ${params.destination}: ${activity.name}`);
+                    // Ensure we have valid enriched data
+                    const enriched = enrichedData.activities?.[0];
+                    if (!enriched) {
+                        logger.warn('No enriched data found for activity', { name: activity.name });
+                        // Return activity with default values
+                        return {
+                            ...activity,
+                            rating: 4.0,
+                            numberOfReviews: 50,
+                            images: [{
+                                    source: 'placeholder',
+                                    url: `https://placehold.co/600x400?text=${encodeURIComponent(activity.name)}`
+                                }],
+                            description: activity.commentary || '',
+                            keyHighlights: [],
+                            openingHours: '',
+                            referenceUrl: '',
+                            bookingInfo: {
+                                cancellationPolicy: 'Free cancellation available',
+                                instantConfirmation: true,
+                                mobileTicket: true,
+                                languages: ['English']
+                            }
+                        };
+                    }
+                    // Handle price data
+                    let price = {
+                        amount: 0,
+                        currency: params.currency
+                    };
+                    if (typeof enriched.price === 'number') {
+                        price = {
+                            amount: enriched.price,
+                            currency: params.currency
+                        };
+                    }
+                    else if (enriched.price && typeof enriched.price.amount === 'number') {
+                        price = enriched.price;
+                    }
+                    // Handle images data with proper validation
+                    const images = enriched.images?.length ?
+                        enriched.images.map(img => {
+                            // Ensure we have a valid URL string
+                            let imageUrl;
+                            if (typeof img === 'string') {
+                                imageUrl = img;
+                            }
+                            else if (typeof img === 'object' && img !== null && 'url' in img) {
+                                imageUrl = img.url;
+                            }
+                            else {
+                                // Default to placeholder if invalid image data
+                                imageUrl = `https://placehold.co/600x400?text=${encodeURIComponent(activity.name)}`;
+                            }
+                            // Validate URL
+                            try {
+                                new URL(imageUrl); // This will throw if URL is invalid
+                                return {
+                                    source: 'viator',
+                                    url: imageUrl
+                                };
+                            }
+                            catch {
+                                // If URL is invalid, use placeholder
+                                return {
+                                    source: 'placeholder',
+                                    url: `https://placehold.co/600x400?text=${encodeURIComponent(activity.name)}`
+                                };
+                            }
+                        }) : [{
+                            source: 'placeholder',
+                            url: `https://placehold.co/600x400?text=${encodeURIComponent(activity.name)}`
+                        }];
+                    // Ensure all required fields are present and properly typed
+                    return {
+                        ...activity,
+                        name: enriched.name || activity.name,
+                        description: enriched.description || activity.commentary || '',
+                        duration: activity.duration, // Keep original duration
+                        price,
+                        rating: parseFloat(enriched.rating?.toString() || '4.0'),
+                        numberOfReviews: parseInt(enriched.numberOfReviews?.toString() || '50'),
+                        images,
+                        location: enriched.location || activity.location,
+                        address: enriched.address || activity.location,
+                        keyHighlights: enriched.keyHighlights || [],
+                        openingHours: enriched.openingHours || '',
+                        referenceUrl: enriched.referenceUrl || '',
+                        // Preserve our generated insights
+                        commentary: activity.commentary,
+                        itineraryHighlight: activity.itineraryHighlight,
+                        bookingInfo: {
+                            cancellationPolicy: enriched.bookingInfo?.cancellationPolicy || 'Free cancellation available',
+                            instantConfirmation: enriched.bookingInfo?.instantConfirmation || true,
+                            mobileTicket: enriched.bookingInfo?.mobileTicket || true,
+                            languages: enriched.bookingInfo?.languages || ['English']
+                        }
+                    };
+                }
+                catch (error) {
+                    logger.warn('Failed to enrich activity', {
+                        name: activity.name,
+                        error: error instanceof Error ? error.message : 'Unknown error'
+                    });
+                    // Return activity with default values on error
+                    return {
+                        ...activity,
+                        rating: 4.0,
+                        numberOfReviews: 50,
+                        images: [{
+                                source: 'placeholder',
+                                url: `https://placehold.co/600x400?text=${encodeURIComponent(activity.name)}`
+                            }],
+                        description: activity.commentary || '',
+                        keyHighlights: [],
+                        openingHours: '',
+                        referenceUrl: '',
+                        bookingInfo: {
+                            cancellationPolicy: 'Free cancellation available',
+                            instantConfirmation: true,
+                            mobileTicket: true,
+                            languages: ['English']
+                        }
+                    };
+                }
+            }));
+            return {
+                activities: enrichedActivities,
+                dailySummaries: response.dailySummaries || [],
+                metadata: {
+                    originalCount: response.activities.length,
+                    finalCount: enrichedActivities.length,
+                    daysPlanned: params.days,
+                    destination: params.destination
+                }
+            };
+        }
+        catch (error) {
+            logger.error('Failed to generate activities', error);
             throw error;
         }
     }
@@ -178,65 +727,61 @@ Return ONLY a valid JSON array of activities.`;
             if (!this.apiKey) {
                 throw new Error('Perplexity API key is not configured');
             }
-            // Extract destination and days from query
-            const destination = query.match(/in\s+([^,\n]+)/)?.[1] || '';
-            const days = query.match(/(\d+)-day activity plan/)?.[1] || '7';
-            const numDays = parseInt(days, 10);
-            const chunks = Math.ceil(numDays / 3);
+            const chunks = Math.ceil(7 / 3); // Process 3 days at a time
             let allActivities = [];
             for (let chunk = 0; chunk < chunks; chunk++) {
-                const startDay = chunk * 3 + 1;
-                const endDay = Math.min(startDay + 2, numDays);
-                const chunkQuery = query.replace(/Generate a \d+-day activity plan/, `Generate activities for days ${startDay} to ${endDay}`);
                 console.log('[Perplexity] Sending request with model: sonar-pro');
-                const response = await axios.post(`${this.baseUrl}/chat/completions`, {
+                const response = await axios.post(this.baseUrl, {
                     model: 'sonar-pro',
                     messages: [
                         {
                             role: 'system',
-                            content: `You are a travel activity expert who helps plan detailed itineraries. Search for activities ONLY on Viator.com.
+                            content: `You are a travel activity expert specializing in Viator bookings.
 
-BUDGET & QUALITY:
-- Respect the daily budget per person
-- Minimum rating: 4.0+ stars on Viator
-- Must have at least 50 reviews
+ACTIVITY CATEGORIES (MUST be evenly distributed):
+1. Cultural & Historical (25% of activities):
+   - Museums, palaces, monuments
+   - Historical tours, archaeological sites
+   - Architecture walks
 
-ACTIVITY CATEGORIES:
-- Cultural & Historical (museums, palaces, monuments, archaeological sites, historical tours)
-- Arts & Entertainment (theaters, concerts, shows, galleries, performances, cinema)
-- Food & Culinary (food tours, cooking classes, wine tastings, gourmet experiences)
-- Nature & Wildlife (national parks, gardens, wildlife tours, bird watching, safaris)
-- Adventure & Sports (hiking, biking, kayaking, climbing, skiing, surfing)
-- Water Activities (cruises, boat tours, snorkeling, diving, beach activities)
-- Wellness & Relaxation (spa treatments, yoga classes, thermal baths, meditation)
-- Photography & Art (photo tours, art walks, workshops, studio visits)
-- Local Experiences (traditional crafts, local markets, community visits)
-- Family & Kids (theme parks, interactive museums, family-friendly tours)
-- Nightlife & Evening (pub crawls, night tours, sunset cruises, evening shows)
-- Religious & Spiritual (temples, churches, spiritual sites, pilgrimages)
-- Shopping & Fashion (boutique tours, fashion districts, artisan markets)
-- Educational & Workshop (language classes, craft workshops, educational tours)
-- Seasonal & Festival (holiday events, cultural festivals, seasonal activities)
+2. Nature & Adventure (25% of activities):
+   - Parks and gardens
+   - Hiking and biking tours
+   - Adventure sports
+   - Wildlife experiences
+   - Water activities
+
+3. Food & Entertainment (25% of activities):
+   - Food tours and tastings
+   - Cooking classes
+   - Shows and performances
+   - Evening entertainment
+   - Local dining experiences
+
+4. Lifestyle & Local (25% of activities):
+   - Shopping tours
+   - Local markets
+   - Wellness activities
+   - Photography spots
+   - Artisan workshops
 
 GEOGRAPHIC OPTIMIZATION:
 - Group activities in the same area for each day
+- Consider the main tourist areas and attractions in the destination
 - Plan routes to minimize travel time between activities
-- Consider main tourist areas and attractions
-- Include both central locations and notable surrounding areas
-- Account for public transportation and walking distances
+- Use the most popular tourist zones in the destination
 
 TIME SLOTS:
-- Morning (9:00-13:00): Prefer cultural & outdoor activities
-- Afternoon (14:00-18:00): Prefer shopping & adventure activities
-- Evening (19:00-23:00): Prefer food & entertainment activities
+- Morning (9:00-13:00): Cultural & Nature activities
+- Afternoon (14:00-18:00): Adventure & Shopping activities
+- Evening (19:00-23:00): Food & Entertainment activities
 
 BALANCE REQUIREMENTS:
-- Maximum 2 museums or similar attractions per day
-- At least 1 outdoor activity per day
-- Mix food experiences between lunches and dinners
+- Maximum 1 museum/historical site per day
+- At least 1 outdoor/nature activity per day
+- One unique food experience per day
 - Balance activities across different categories
-- Include local specialties and unique experiences for the destination
-- Consider the destination's most popular and highly-rated activities
+- Include local specialties and unique experiences
 
 CRITICAL RULES:
 1. Return ONLY 3-4 activities per request to avoid response truncation
@@ -248,6 +793,7 @@ CRITICAL RULES:
 7. Account for travel time between locations
 8. Don't schedule overlapping activities
 9. Consider seasonal/weather appropriate activities
+10. Maintain STRICT category distribution (25% each)
 
 Return ONLY a valid JSON object without any explanatory text or markdown formatting, following this structure:
 {
@@ -257,7 +803,7 @@ Return ONLY a valid JSON object without any explanatory text or markdown formatt
       "description": "EXACT description from Viator",
       "duration": hours (number),
       "price": exact price in USD (number),
-      "category": "Cultural|Outdoor|Entertainment|Food & Drink|Shopping|Adventure",
+      "category": "Cultural & Historical|Nature & Adventure|Food & Entertainment|Lifestyle & Local",
       "location": "EXACT location name from Viator",
       "address": "EXACT address from Viator",
       "zone": "Area name in the destination",
@@ -270,6 +816,8 @@ Return ONLY a valid JSON object without any explanatory text or markdown formatt
       "referenceUrl": "EXACT Viator booking URL",
       "images": ["EXACT image URLs from Viator"],
       "selected": false,
+      "commentary": "2-3 sentences explaining why this activity is recommended and what makes it special",
+      "itineraryHighlight": "1-2 sentences explaining how this activity fits into the day's flow",
       "bookingInfo": {
         "cancellationPolicy": "EXACT policy from Viator",
         "instantConfirmation": true/false,
@@ -284,7 +832,7 @@ Return ONLY a valid JSON object without any explanatory text or markdown formatt
                         },
                         {
                             role: 'user',
-                            content: chunkQuery
+                            content: query
                         }
                     ],
                     temperature: options?.temperature ?? 0.1,
@@ -363,7 +911,8 @@ Return ONLY a valid JSON object without any explanatory text or markdown formatt
             if (!this.apiKey) {
                 throw new Error('Perplexity API key is not configured');
             }
-            const response = await axios.post(`${this.baseUrl}/chat/completions`, {
+            logger.info('[Enrichment] Starting activity enrichment', { query });
+            const response = await axios.post(this.baseUrl, {
                 model: 'sonar',
                 messages: [
                     {
@@ -387,6 +936,17 @@ CRITICAL RULES:
 5. Do not make up or guess any information - only use what you find
 6. If you cannot find activities, return a JSON object with an error field
 
+COMMENTARY REQUIREMENTS:
+1. For each activity, provide:
+   - A 2-3 sentence commentary explaining why this activity is recommended
+   - A 1-2 sentence explanation of how it fits into an itinerary
+2. Focus on:
+   - Unique selling points
+   - Historical or cultural significance
+   - Special experiences or access
+   - Local insights
+   - Practical benefits (skip-the-line, guided tour, etc.)
+
 Return ONLY a valid JSON object without any explanatory text or markdown formatting, following this structure:
 {
   "activities": [
@@ -397,7 +957,7 @@ Return ONLY a valid JSON object without any explanatory text or markdown formatt
       "price_category": "budget" or "medium" or "premium",
       "duration": hours (number),
       "dayNumber": number,
-      "category": "Cultural" or "Adventure" or "Food" or "Nature" or "Entertainment" or "Shopping" or "Relaxation",
+      "category": "Cultural & Historical|Nature & Adventure|Food & Entertainment|Lifestyle & Local",
       "location": "EXACT location name from Viator",
       "address": "EXACT address from Viator",
       "keyHighlights": ["EXACT highlights from Viator listing"],
@@ -407,6 +967,8 @@ Return ONLY a valid JSON object without any explanatory text or markdown formatt
       "preferredTimeOfDay": "morning" or "afternoon" or "evening",
       "referenceUrl": "EXACT Viator booking URL",
       "images": ["EXACT image URLs from Viator"],
+      "commentary": "2-3 sentences explaining why this activity is recommended and what makes it special",
+      "itineraryHighlight": "1-2 sentences explaining how this activity fits into the day's flow",
       "bookingInfo": {
         "provider": "Viator",
         "cancellationPolicy": "EXACT policy from Viator",
@@ -434,14 +996,74 @@ Return ONLY a valid JSON object without any explanatory text or markdown formatt
                     'Content-Type': 'application/json'
                 }
             });
-            // Parse the response text as JSON
             const content = response.data.choices[0].message.content;
+            logger.debug('[Enrichment] Raw content received:', { contentLength: content.length });
             try {
-                return JSON.parse(content);
+                // First try to parse the content directly
+                let enrichedData;
+                try {
+                    enrichedData = JSON.parse(content);
+                }
+                catch (e) {
+                    // If direct parsing fails, try to extract JSON from markdown or text
+                    const jsonMatch = content.match(/```json\s*([\s\S]*?)\s*```/) || content.match(/\{[\s\S]*\}/);
+                    if (!jsonMatch) {
+                        logger.error('[Enrichment] No JSON content found in response');
+                        throw new Error('No JSON content found in response');
+                    }
+                    const jsonContent = jsonMatch[1] || jsonMatch[0];
+                    // Clean the JSON string before parsing
+                    const cleanedJson = jsonContent
+                        .replace(/[\u0000-\u001F]+/g, '') // Remove control characters
+                        .replace(/,\s*([}\]])/g, '$1') // Remove trailing commas
+                        .replace(/([{,]\s*)(\w+):/g, '$1"$2":') // Ensure property names are quoted
+                        .trim();
+                    logger.debug('[Enrichment] Attempting to parse cleaned JSON:', { cleanedJson });
+                    enrichedData = JSON.parse(cleanedJson);
+                }
+                // Validate and clean up activity data
+                if (enrichedData.activities) {
+                    enrichedData.activities = enrichedData.activities.map((activity) => {
+                        // Ensure price is a valid number
+                        if (!activity.price || activity.price <= 0) {
+                            logger.warn('[Enrichment] Invalid price detected, activity will be filtered', {
+                                name: activity.name,
+                                price: activity.price
+                            });
+                            return null;
+                        }
+                        // Ensure price_category is valid
+                        if (!activity.price_category || !['budget', 'medium', 'premium'].includes(activity.price_category)) {
+                            activity.price_category = determinePriceTier(activity.price);
+                            logger.info('[Enrichment] Fixed price category', {
+                                name: activity.name,
+                                price: activity.price,
+                                category: activity.price_category
+                            });
+                        }
+                        return activity;
+                    }).filter(Boolean); // Remove null entries
+                }
+                // Log enrichment details
+                if (enrichedData.activities) {
+                    logger.info('[Enrichment] Enrichment summary', {
+                        totalActivities: enrichedData.activities.length,
+                        activitiesWithCommentary: enrichedData.activities.filter((a) => a.commentary).length,
+                        activitiesWithHighlights: enrichedData.activities.filter((a) => a.itineraryHighlight).length,
+                        categoryCounts: enrichedData.activities.reduce((acc, a) => {
+                            acc[a.category] = (acc[a.category] || 0) + 1;
+                            return acc;
+                        }, {})
+                    });
+                }
+                return enrichedData;
             }
             catch (e) {
-                console.error('Failed to parse Perplexity response:', e);
-                // If parsing fails, return a structured response with just the text
+                logger.error('[Enrichment] Failed to parse enriched data', {
+                    error: e instanceof Error ? e.message : 'Unknown error',
+                    contentLength: content.length,
+                    rawContent: content
+                });
                 return {
                     text: content,
                     error: 'Failed to parse activity data'
@@ -449,7 +1071,9 @@ Return ONLY a valid JSON object without any explanatory text or markdown formatt
             }
         }
         catch (error) {
-            console.error('Error calling Perplexity API:', error);
+            logger.error('[Enrichment] Error during enrichment', {
+                error: error instanceof Error ? error.message : 'Unknown error'
+            });
             throw error;
         }
     }

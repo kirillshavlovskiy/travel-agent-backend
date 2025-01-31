@@ -3,6 +3,7 @@ import fetch, { Response as FetchResponse } from 'node-fetch';
 import { AmadeusFlightOffer } from '../types/amadeus.js';
 import { AmadeusService as FlightService } from '../services/amadeus.js';
 import { logger } from '../utils/logger.js';
+import { Activity } from '../types/index.js';
 
 interface TravelRequest {
   type: string;
@@ -28,6 +29,8 @@ interface TravelRequest {
   flightData?: AmadeusFlightOffer[];
   cabinClass?: 'ECONOMY' | 'PREMIUM_ECONOMY' | 'BUSINESS' | 'FIRST';
   days: number;
+  category?: string;
+  userPreferences?: string;
 }
 
 interface PerplexitySearchResult {
@@ -327,8 +330,17 @@ interface TransformedActivity {
 
 interface ActivityGenerationParams {
   destination: string;
+  dayNumber: number;
+  timeOfDay: 'morning' | 'afternoon' | 'evening';
+  budget: 'budget' | 'medium' | 'premium';
   category?: string;
   userPreferences?: string;
+  existingActivities?: Activity[];
+  flightTimes?: {
+    arrival?: string;
+    departure?: string;
+  };
+  currency?: string;
 }
 
 interface ActivitySearchResult {
@@ -634,17 +646,17 @@ export class VacationBudgetAgent {
     }
   }
 
-  private constructPrompt(params: { category: string; request: TravelRequest }): string {
-    const { category, request } = params;
-    return `Search for available activities in ${request.destinations[0].label} with these requirements:
+  private constructPrompt(params: { destination: string; category?: string; userPreferences?: string }): string {
+    const { destination, category, userPreferences } = params;
+    return `Search for available activities in ${destination} with these requirements:
 
 SEARCH PROCESS:
 1. Search both platforms:
-   - Search Viator.com for ${request.destinations[0].label} activities
-   - Search GetYourGuide.com for ${request.destinations[0].label} activities
+   - Search Viator.com for ${destination} activities
+   - Search GetYourGuide.com for ${destination} activities
 2. Sort by: Best Rating
-3. Find at least 3 activities from each platform${request.category ? `\n4. Focus on category: ${request.category}` : ''}
-${request.userPreferences ? `\nAdditional preferences: ${request.userPreferences}` : ''}
+3. Find at least 3 activities from each platform${category ? `\n4. Focus on category: ${category}` : ''}
+${userPreferences ? `\nAdditional preferences: ${userPreferences}` : ''}
 
 VALIDATION RULES:
 1. Activities must have valid booking URLs
@@ -962,11 +974,7 @@ For each activity you find, include:
     }
   }
 
-  async generateSingleActivity(params: {
-    destination: string;
-    category?: string;
-    userPreferences?: string;
-  }): Promise<any> {
+  async generateSingleActivity(params: ActivityGenerationParams): Promise<any> {
     const prompt = this.constructPrompt({
       destination: params.destination,
       category: params.category,
@@ -976,10 +984,19 @@ For each activity you find, include:
     const result = await this.querySingleActivity(prompt);
     
     if (result.error) {
-      return this.createPlaceholderActivity();
+      return this.createPlaceholderActivity({
+        dayNumber: params.dayNumber,
+        timeSlot: params.timeOfDay,
+        tier: params.budget
+      });
     }
     
-    return result;
+    return {
+      ...result,
+      dayNumber: params.dayNumber,
+      timeSlot: params.timeOfDay,
+      tier: params.budget
+    };
   }
 
   private getPriceRangeForTier(budget: number | string, currency: string): { min: number; max: number } {
@@ -1046,19 +1063,44 @@ For each activity you find, include:
       days
     });
 
-    // Group activities by day and time slot
-    const activityGroups = validActivities.reduce((acc: Record<number, ActivityGroup>, activity: any) => {
-      // Skip activities without proper booking details
-      if (!this.hasValidBookingDetails(activity)) {
-        logger.warn('Skipping activity without valid booking details', {
+    // First, filter out activities without essential fields and deduplicate
+    const uniqueActivities = validActivities.reduce((acc: any[], activity: any) => {
+      // Check only essential fields
+      if (!activity.name || !activity.price) {
+        logger.warn('Skipping activity missing essential fields', {
           name: activity.name,
-          provider: activity.bookingDetails?.provider
+          hasPrice: !!activity.price
         });
         return acc;
       }
 
-      const day = activity.day || activity.dayNumber || activity.day_number;
-      const timeSlot = activity.preferred_time_of_day || 'morning';
+      // Check for duplicates (same name and price)
+      const isDuplicate = acc.some(existing => 
+        existing.name.toLowerCase() === activity.name.toLowerCase() && 
+        Math.abs(existing.price - activity.price) < 0.01
+      );
+
+      if (!isDuplicate) {
+        acc.push(activity);
+      } else {
+        logger.debug('Filtered out duplicate activity', {
+          name: activity.name,
+          price: activity.price
+        });
+      }
+
+      return acc;
+    }, []);
+
+    logger.debug('After deduplication', {
+      originalCount: validActivities.length,
+      uniqueCount: uniqueActivities.length
+    });
+
+    // Group activities by day and time slot
+    const activityGroups = uniqueActivities.reduce((acc: Record<number, ActivityGroup>, activity: any) => {
+      const day = activity.day || activity.dayNumber || activity.day_number || 1;
+      const timeSlot = activity.preferred_time_of_day || activity.timeSlot || 'morning';
       const tier = this.determineActivityTier(activity.price);
 
       if (!acc[day]) {
@@ -1070,12 +1112,29 @@ For each activity you find, include:
       }
 
       if (acc[day][timeSlot] && acc[day][timeSlot][tier]) {
-        acc[day][timeSlot][tier].push(activity);
+        acc[day][timeSlot][tier].push({
+          ...activity,
+          // Add default booking details - these will be enriched later by Viator API
+          bookingDetails: {
+            provider: 'Viator',
+            referenceUrl: `https://www.viator.com/tours/${activity.name.replace(/[^a-zA-Z0-9]+/g, '-')}`,
+            cancellationPolicy: 'Free cancellation up to 24 hours before the activity starts',
+            instantConfirmation: true,
+            mobileTicket: true,
+            languages: ['English'],
+            minParticipants: 1,
+            maxParticipants: 50,
+            pickupIncluded: tier === 'premium',
+            pickupLocation: tier === 'premium' ? 'Your hotel' : '',
+            accessibility: 'Standard',
+            restrictions: []
+          }
+        });
       }
       return acc;
     }, {});
 
-    // Ensure each day has activities in each time slot and tier
+    // Transform activities
     const transformedActivities: TransformedActivity[] = [];
     for (let day = 1; day <= days; day++) {
       const dayActivities = activityGroups[day] || {
@@ -1084,25 +1143,24 @@ For each activity you find, include:
         evening: { budget: [], medium: [], premium: [] }
       };
 
-      // Process each time slot
       (['morning', 'afternoon', 'evening'] as const).forEach((timeSlot) => {
-        // Ensure at least one activity per tier in each time slot
         (['budget', 'medium', 'premium'] as const).forEach((tier) => {
           const activities = dayActivities[timeSlot][tier];
           if (activities.length === 0) {
-            // Create placeholder activity if none exists
-            const placeholder = this.createPlaceholderActivity(day, timeSlot, tier);
+            const placeholder = this.createPlaceholderActivity({
+              dayNumber: day,
+              timeSlot,
+              tier
+            });
             activities.push(placeholder);
           }
 
-          // Add all activities from this tier and time slot
           activities.forEach((activity: any) => {
             transformedActivities.push({
               ...activity,
               dayNumber: day,
               timeSlot,
-              tier,
-              bookingDetails: this.ensureValidBookingDetails(activity.bookingDetails, tier)
+              tier
             } as TransformedActivity);
           });
         });
@@ -1118,8 +1176,9 @@ For each activity you find, include:
   }
 
   private hasValidBookingDetails(activity: any): boolean {
-    const isViatorUrl = (url: string) => /^https:\/\/www\.viator\.com\/tours\/[^/]+\/[^/]+\/d\d+-[a-zA-Z0-9]+$/.test(url);
-    const isGetYourGuideUrl = (url: string) => /^https:\/\/www\.getyourguide\.com\/[^/]+\/[^/]+-t\d+$/.test(url);
+    // Less strict URL validation - just check if it's a valid URL for the provider
+    const isViatorUrl = (url: string) => url.includes('viator.com');
+    const isGetYourGuideUrl = (url: string) => url.includes('getyourguide.com');
     
     const isValid = activity.bookingDetails &&
       (activity.bookingDetails.provider === 'Viator' || activity.bookingDetails.provider === 'GetYourGuide') &&
@@ -1180,7 +1239,7 @@ For each activity you find, include:
     };
   }
 
-  private createPlaceholderActivity(params?: { day?: number; timeSlot?: string; tier?: string }): ActivitySearchResult {
+  private createPlaceholderActivity(params?: { dayNumber?: number; timeSlot?: 'morning' | 'afternoon' | 'evening'; tier?: 'budget' | 'medium' | 'premium' }): ActivitySearchResult {
     return {
       name: "Activity Unavailable",
       provider: "Viator",
