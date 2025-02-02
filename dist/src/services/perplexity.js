@@ -721,7 +721,7 @@ Return a JSON object with:
             throw error;
         }
     }
-    // For initial activity planning - uses sonar-pro model
+    // For initial activity planning - uses sonar model
     async chat(query, options) {
         try {
             if (!this.apiKey) {
@@ -730,9 +730,9 @@ Return a JSON object with:
             const chunks = Math.ceil(7 / 3); // Process 3 days at a time
             let allActivities = [];
             for (let chunk = 0; chunk < chunks; chunk++) {
-                console.log('[Perplexity] Sending request with model: sonar-pro');
+                console.log('[Perplexity] Sending request with model: sonar');
                 const response = await axios.post(this.baseUrl, {
-                    model: 'sonar-pro',
+                    model: 'sonar',
                     messages: [
                         {
                             role: 'system',
