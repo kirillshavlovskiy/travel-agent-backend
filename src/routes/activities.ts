@@ -194,32 +194,18 @@ router.post('/generate', async (req: Request, res: Response) => {
     });
 
     // Get initial activity suggestions from Perplexity
-    const query = `Create a ${days}-day activity plan for ${destination} with the following requirements:
+    const query = `List popular activities in ${destination} with:
+- Name and location
+- Time slot (morning/afternoon/evening)
+- Basic category
 
-BUDGET & QUALITY:
-- Daily budget: ${budget} ${currency} per person
-- Minimum rating: 4.0+ stars
-- Must have at least 50 reviews
-
-ACTIVITY CATEGORIES:
-- Cultural & Historical: museums, historic sites, monuments
-- Nature & Adventure: parks, tours, outdoor activities
-- Food & Entertainment: dining, shows, experiences
-- Shopping & Local Life: markets, neighborhoods, local culture
-
-TIME SLOTS:
-- Morning (9:00-13:00): Prefer cultural & historical
-- Afternoon (14:00-18:00): Prefer nature & adventure
-- Evening (19:00-23:00): Prefer food & entertainment
-
-CRITICAL RULES:
-1. Only include activities that take 1 day or less
-2. Group activities by area to minimize travel time
-3. Mix different types of activities each day
-4. Consider opening hours and seasonal factors
-5. Include variety in each day's schedule
-
-Return ONLY valid JSON with schedule array.`;
+Return JSON array:
+[{
+  "name": "activity name",
+  "location": "area name",
+  "timeSlot": "morning|afternoon|evening",
+  "category": "Cultural|Nature|Food|Local"
+}]`;
 
     logger.debug('Sending query to Perplexity API', { query });
     const response = await perplexityClient.chat(query);

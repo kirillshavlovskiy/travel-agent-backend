@@ -11,12 +11,17 @@ interface CategoryDetermination {
     amount: number;
     currency: string;
   };
+  title?: string;
+  categories?: Array<{
+    id: string;
+    name: string;
+    level: number;
+  }>;
+  tags?: string[];
 }
 
 interface ViatorSearchResponse {
-  products?: {
-    totalCount: number;
-    results: Array<{
+  products: Array<{
       productCode: string;
       title: string;
       description: string;
@@ -31,8 +36,8 @@ interface ViatorSearchResponse {
       };
       rating?: number;
       reviews?: {
-        totalReviews: number;
-        combinedAverageRating: number;
+      rating: number;
+      reviewCount: number;
       };
       images?: Array<{
         variants: Array<{
@@ -60,7 +65,6 @@ interface ViatorSearchResponse {
         level: number;
       }>;
     }>;
-  };
 }
 
 interface ViatorImage {
@@ -388,48 +392,17 @@ interface ViatorItineraryRoute {
 
 interface ViatorAvailabilitySchedule {
   productCode: string;
-  bookableItems: Array<{
-    productOptionCode: string;
-    seasons: Array<{
-      startDate: string;
-      endDate?: string;
-      pricingRecords: Array<{
-        daysOfWeek: string[];
-        timedEntries: Array<{
-          startTime: string;
-          unavailableDates: Array<{
+  schedules: Array<{
             date: string;
-            reason: string;
-          }>;
-        }>;
-        pricingDetails: Array<{
-          pricingPackageType: string;
-          minTravelers: number;
-          ageBand: string;
-          price: {
-            original: {
-              recommendedRetailPrice: number;
-              partnerNetPrice: number;
-              bookingFee: number;
-              partnerTotalPrice: number;
-            };
-            special?: {
-              recommendedRetailPrice: number;
-              partnerNetPrice: number;
-              bookingFee: number;
-              partnerTotalPrice: number;
-              offerStartDate: string;
-              offerEndDate: string;
-            };
-          };
-        }>;
-      }>;
-    }>;
-  }>;
-  currency: string;
-  summary: {
+    available: boolean;
+    startTime?: string;
+    endTime?: string;
+    pricing?: {
     fromPrice: number;
+      currency: string;
   };
+    vacancies?: number;
+  }>;
 }
 
 interface Activity {
@@ -512,50 +485,314 @@ const VIATOR_CATEGORY_MAP: Record<string, string> = {
   'Museum Tickets & Passes': 'Tickets & Passes'
 };
 
+// Rate limiting configuration
+const RATE_LIMIT = {
+  requestsPerSecond: 1, // Reduced from 2 to 1 for better stability
+  lastRequestTime: 0,
+  minDelay: 1000, // Minimum 1 second between requests
+  queue: [] as { resolve: Function, reject: Function }[]
+};
+
+interface ViatorError extends Error {
+  response?: {
+    status: number;
+    data: any;
+    headers?: {
+      'retry-after'?: string;
+    };
+  };
+  code?: string;
+  isAxiosError?: boolean;
+}
+
+interface GenerateActivitiesParams {
+  destination: string;
+  days: number;
+  budget: number;
+  currency: string;
+  preferences: {
+    travelStyle: string;
+    pacePreference: string;
+    interests: string[];
+    accessibility: string[];
+    dietaryRestrictions: string[];
+  };
+}
+
+interface Break {
+    startTime: string;
+    endTime: string;
+    duration: number;
+    suggestion: string;
+}
+
+interface DayPlan {
+    theme: string;
+    activities: Array<{
+        name: string;
+        timeSlot: string;
+        startTime: string;
+        endTime: string;
+        order: number;
+        category: string;
+        location: {
+            address: string;
+            coordinates?: { lat: number; lng: number; };
+        };
+        price: {
+            amount: number;
+            currency: string;
+        };
+        duration: number;
+        rating?: number;
+    }>;
+    dayPlanning: {
+        suggestedStartTime: string;
+        breakTimes: Break[];
+        travelTips: Array<{
+            type: string;
+            tip: string;
+        }>;
+        mealSuggestions: Array<{
+            type: string;
+            timeSlot: string;
+            suggestion: string;
+        }>;
+    };
+    highlights: {
+        mainAttraction: string | null;
+        culturalHighlight: string | null;
+        uniqueExperience: string | null;
+    };
+    locationCluster: { lat: number; lng: number; } | null;
+}
+
+// Add these interfaces at the top of the file with other interfaces
+interface TimeSlotConfig {
+    start: string;
+    end: string;
+    maxDuration: number;
+}
+
+interface TimingConstraints {
+    firstDay: {
+        startAfter: Date;
+        availableTimeSlots: string[];
+    };
+    lastDay: {
+        endBefore: Date;
+        availableTimeSlots: string[];
+    };
+}
+
+interface DayTiming {
+    isFirstDay: boolean;
+    isLastDay: boolean;
+    timingConstraints: {
+      firstDay: {
+        startAfter: Date;
+        availableTimeSlots: string[];
+      };
+      lastDay: {
+        endBefore: Date;
+        availableTimeSlots: string[];
+      };
+    };
+}
+
+type TimeSlots = Record<string, TimeSlotConfig>;
+
+interface LocationInfo {
+    area: string;
+    address: string;
+    zone: string;
+    coordinates: {
+        lat: number;
+        lng: number;
+    };
+}
+
+interface ViatorCategory {
+    name: string;
+    id?: string;
+    level?: number;
+}
+
+interface ViatorDestinationResponse {
+    destinations: Array<{
+        ref: string;
+        parentId: string;
+        name: string;
+        destinationType: string;
+        lookupId: string;
+        timeZone: string;
+        iataCode?: string;
+        coordinates?: {
+            latitude: number;
+            longitude: number;
+        };
+    }>;
+    totalCount: number;
+}
+
+interface ViatorSearchResult {
+    productCode: string;
+    title: string;
+    description: string;
+    duration?: {
+        fixedDurationInMinutes: number;
+    };
+    pricing?: {
+        summary: {
+            fromPrice: number;
+        };
+        currency: string;
+    };
+    reviews?: {
+        rating: number;
+        reviewCount: number;
+    };
+    images?: Array<{
+        variants?: Array<{
+            url?: string;
+            width?: number;
+            height?: number;
+        }>;
+    }>;
+    bookingInfo?: {
+        cancellationPolicy?: string;
+        languages?: string[];
+        minParticipants?: number;
+        maxParticipants?: number;
+    };
+    highlights?: string[];
+    location?: {
+        address?: string;
+    };
+    categories?: Array<{
+        id: string;
+        name: string;
+        level: number;
+    }>;
+    tags?: string[];
+    productUrl?: string;
+}
+
+interface ImageVariant {
+  url: string;
+  width?: number;
+  height?: number;
+}
+
+interface ActivityIdentifier {
+  name: string;
+  productCode?: string;
+}
+
 export class ViatorService {
-  private readonly baseUrl: string;
-  private readonly apiKey: string;
+  private baseUrl: string;
+  private apiKey: string;
 
   constructor(apiKey: string) {
     this.baseUrl = 'https://api.viator.com/partner';
     this.apiKey = apiKey;
   }
 
-  private async getDestinations(): Promise<any> {
-    try {
-      const response = await axios.get(`${this.baseUrl}/destinations`, {
+  private async rateLimit(): Promise<void> {
+    const now = Date.now();
+    const timeSinceLastRequest = now - RATE_LIMIT.lastRequestTime;
+    
+    if (timeSinceLastRequest < RATE_LIMIT.minDelay) {
+        const waitTime = RATE_LIMIT.minDelay - timeSinceLastRequest;
+        await new Promise(resolve => setTimeout(resolve, waitTime));
+    }
+    
+    RATE_LIMIT.lastRequestTime = Date.now();
+  }
+
+  private async makeRequest(method: string, endpoint: string, data?: any): Promise<any> {
+    const maxRetries = 3;
+    const baseDelay = 2000;
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+            await this.rateLimit();
+            
+            const response = await axios({
+                method,
+                url: `${this.baseUrl}${endpoint}`,
+                data,
         headers: {
           'Accept': 'application/json;version=2.0',
           'Accept-Language': 'en-US',
           'exp-api-key': this.apiKey
-        }
+                },
+                timeout: 30000
       });
-      
-      logger.info('Destinations response:', response.data);
-      return response.data.destinations;
+            return response;
     } catch (error) {
-      logger.error('Error fetching destinations:', error);
-      throw error;
+            const viatorError = error as ViatorError;
+            const isRetryable = viatorError?.response?.status === 429 || 
+                               viatorError?.response?.status === 503 ||
+                               viatorError?.code === 'ECONNABORTED';
+            
+            if (!isRetryable || attempt === maxRetries) {
+                throw viatorError;
+            }
+
+            const retryAfter = viatorError?.response?.status === 429 
+                ? parseInt(viatorError.response?.headers?.['retry-after'] || '5') * 1000
+                : Math.min(baseDelay * Math.pow(2, attempt - 1), 8000);
+
+            await new Promise(resolve => setTimeout(resolve, retryAfter));
+        }
+    }
+    throw new Error('Max retries exceeded');
+  }
+
+  private async getDestinations(): Promise<ViatorDestinationResponse> {
+    try {
+        const response = await this.makeRequest('GET', '/destinations', undefined);
+        logger.debug('Destinations fetched successfully');
+        return response.data;
+    } catch (err) {
+        const viatorError = err as ViatorError;
+        logger.error('Destinations fetch failed', {
+            status: viatorError.response?.status,
+            code: viatorError.code
+        });
+        throw viatorError;
     }
   }
 
   async getDestinationId(cityName: string): Promise<string> {
     try {
-      const destinations = await this.getDestinations();
-      const destination = destinations.find((dest: any) => 
+        const response = await this.getDestinations();
+        const destination = response.destinations.find((dest) => 
         dest.name.toLowerCase() === cityName.toLowerCase()
       );
 
       if (!destination) {
-        logger.error(`Destination not found: ${cityName}`);
+            const partialMatch = response.destinations.find((dest) =>
+                dest.name.toLowerCase().includes(cityName.toLowerCase())
+            );
+
+            if (partialMatch) {
+                logger.debug(`Using partial match for ${cityName}: ${partialMatch.name}`);
+                return partialMatch.ref;
+            }
+
         throw new Error(`Could not find destination ID for ${cityName}`);
       }
 
-      logger.info(`Found destination ID for ${cityName}:`, destination.ref);
       return destination.ref;
-    } catch (error) {
-      logger.error('Error getting destination ID:', error);
-      throw error;
+    } catch (err) {
+        const viatorError = err as ViatorError;
+        logger.error('Destination ID lookup failed', {
+            cityName,
+            status: viatorError.response?.status
+        });
+        throw viatorError;
     }
   }
 
@@ -708,527 +945,439 @@ export class ViatorService {
     }
   }
 
-  private async performSearch(searchTerm: string): Promise<ViatorSearchResponse> {
-      const searchRequest = {
-        searchTerm,
-        searchTypes: [{
-          searchType: 'PRODUCTS',
-          pagination: {
-            offset: 0,
-            limit: 20
-          }
-        }],
-        currency: 'USD',
-        productFiltering: {
-          rating: {
-            minimum: 3.5
-          }
-        },
-        productSorting: {
-          sortBy: 'POPULARITY',
-          sortOrder: 'DESC'
-        }
-      };
+  private calculateSimilarity(str1: string, str2: string): number {
+    const clean1 = str1.toLowerCase().replace(/[^a-z0-9\s]/g, '');
+    const clean2 = str2.toLowerCase().replace(/[^a-z0-9\s]/g, '');
+    const words1 = new Set(clean1.split(/\s+/));
+    const words2 = new Set(clean2.split(/\s+/));
+    const intersection = new Set([...words1].filter(x => words2.has(x)));
+    return intersection.size / (words1.size + words2.size - intersection.size);
+  }
 
-      const response = await axios.post(
-        `${this.baseUrl}/search/freetext`,
-        searchRequest,
-        {
-          headers: {
-            'Accept': 'application/json;version=2.0',
-            'Content-Type': 'application/json',
-            'Accept-Language': 'en-US',
-            'exp-api-key': this.apiKey
-          }
+  private formatActivityResponse(result: ViatorSearchResult): any {
+    const ratingStr = result.reviews?.rating
+        ? `★ ${result.reviews.rating.toFixed(1)} (${result.reviews.reviewCount} reviews)`
+        : '';
+
+    return {
+        name: result.title,
+        description: result.description,
+        duration: result.duration?.fixedDurationInMinutes,
+        price: {
+            amount: result.pricing?.summary?.fromPrice,
+            currency: result.pricing?.currency
+        },
+        rating: result.reviews?.rating,
+        numberOfReviews: result.reviews?.reviewCount,
+        ratingDisplay: ratingStr,
+        images: result.images?.map((img) => {
+            const variants = img.variants || [];
+            const preferredVariant = variants.find(v => v.width && v.height && v.width <= 800) || variants[0];
+            return preferredVariant?.url;
+        }).filter((url): url is string => !!url),
+        bookingInfo: {
+            productCode: result.productCode,
+            cancellationPolicy: result.bookingInfo?.cancellationPolicy || 'Standard cancellation policy',
+            instantConfirmation: true,
+            mobileTicket: true,
+            languages: ['English'],
+            minParticipants: 1,
+            maxParticipants: 99
+        },
+        highlights: result.highlights || [],
+        location: result.location?.address || '',
+        category: this.determineCategory({
+            name: result.title,
+            description: result.description,
+            productCode: result.productCode,
+            categories: result.categories,
+            tags: result.tags
+        }),
+        referenceUrl: result.productUrl || `https://www.viator.com/tours/${result.productCode}`
+    };
+  }
+
+  private createBasicActivityInfo(searchTerm: string) {
+    // Extract category hints from the search term
+    const categoryHints = {
+      museum: 'Cultural & Historical',
+      tour: 'Cultural & Historical',
+      food: 'Food & Dining',
+      cruise: 'Cruises & Sailing',
+      show: 'Entertainment',
+      ticket: 'Tickets & Passes',
+      adventure: 'Nature & Adventure',
+      walk: 'Nature & Adventure'
+    };
+
+    // Determine category based on search term keywords
+    const searchTermLower = searchTerm.toLowerCase();
+    const category = Object.entries(categoryHints).find(([key]) => 
+      searchTermLower.includes(key)
+    )?.[1] || determineCategoryFromDescription(searchTerm);
+
+    return {
+      name: searchTerm,
+      description: `Activity in ${searchTerm.split(',')[1]?.trim() || 'the area'}`,
+      duration: 120, // Default 2 hours
+      category,
+      timeSlot: getPreferredTimeSlot(category),
+      location: searchTerm.split(',')[0]?.trim(),
+      price: {
+        amount: 0,
+        currency: 'USD'
+      }
+    };
+  }
+
+  private async searchViatorActivity(searchTerm: string, destination?: string): Promise<any> {
+    try {
+        const response = await this.performSearch(searchTerm, destination);
+        if (!response.products?.length) return null;
+
+        // Calculate relevance scores and sort results
+        const scoredResults = response.products.map((result) => {
+            const titleSimilarity = this.calculateSimilarity(result.title, searchTerm);
+            const rating = result.reviews?.rating || 0;
+            const reviewCount = result.reviews?.reviewCount || 0;
+            
+            const relevanceScore = (titleSimilarity * 0.6) + 
+                                ((rating / 5) * 0.3) + 
+                                (Math.min(reviewCount / 1000, 1) * 0.1);
+            
+            return { result, relevanceScore };
+        }).sort((a, b) => b.relevanceScore - a.relevanceScore);
+
+        // Take top 5 most relevant results if they meet minimum relevance threshold
+        const relevantResults = scoredResults
+            .filter(r => r.relevanceScore > 0.2)
+            .slice(0, 5)
+            .map(r => r.result);
+
+        logger.info('Viator search relevant matches:', {
+            searchTerm,
+            destination,
+            matches: relevantResults.map(match => ({
+                productCode: match.productCode,
+                name: match.title,
+                relevanceScore: scoredResults.find(r => r.result === match)?.relevanceScore.toFixed(2),
+                similarity: this.calculateSimilarity(match.title, searchTerm).toFixed(2),
+                rating: match.reviews?.rating || 'N/A'
+            }))
+        });
+
+        return relevantResults.map(result => 
+            this.formatActivityResponse(result)
+        );
+    } catch (error) {
+        logger.error(`Search failed: ${searchTerm}`, error);
+        throw error;
+    }
+}
+
+  private extractLocationInfo(productDetails: any): any {
+          const logistics = productDetails.logistics || {};
+          const travelerPickup = logistics.travelerPickup || {};
+          const start = logistics.start?.[0] || {};
+          const end = logistics.end?.[0] || {};
+
+    // Extract all possible location information
+    const address = start.location?.address || 
+                   productDetails.location?.address || 
+                   travelerPickup.location?.address || 
+                   '';
+
+    const meetingPoints = [
+        ...(start.description ? [start.description] : []),
+        ...(end.description ? [`End point: ${end.description}`] : []),
+        ...(travelerPickup.additionalInfo ? [travelerPickup.additionalInfo] : []),
+        ...(start.location?.address ? [start.location.address] : [])
+    ].filter(Boolean);
+
+    const startingLocations = [
+        ...(start.description ? [start.description] : []),
+        ...(end.description ? [`End point: ${end.description}`] : [])
+    ].filter(Boolean);
+
+    return {
+        address,
+        meetingPoints,
+        startingLocations
+    };
+  }
+
+  private determineCategory(info: CategoryDetermination): string {
+    // First, try to determine from existing categories
+    if (info.categories && info.categories.length > 0) {
+        const mainCategory = info.categories.find(cat => cat.level === 1);
+        if (mainCategory && VIATOR_CATEGORY_MAP[mainCategory.name]) {
+            return VIATOR_CATEGORY_MAP[mainCategory.name];
         }
-      );
+    }
+
+    // If no categories or mapping found, determine from description
+    return determineCategoryFromDescription(info.description);
+  }
+
+  private formatImages(images: ViatorImage[]): string[] {
+    if (!images) return [];
+    return images
+      .map(img => {
+        const variants = img.variants || [];
+        // Only compare dimensions if both width and height are defined
+        const preferredVariant = variants.find(v => 
+          v.width && v.height && v.width === 480 && v.height === 320
+        ) || variants[0];
+        return preferredVariant?.url;
+      })
+      .filter((url): url is string => !!url);
+  }
+
+  private async performSearch(searchTerm: string, destination?: string): Promise<ViatorSearchResponse> {
+    let destinationId;
+    if (destination) {
+        try {
+            destinationId = await this.getDestinationId(destination);
+        } catch (error) {
+            logger.debug(`Proceeding without destination ID for ${destination}`);
+        }
+    }
+
+    const searchRequest = {
+        text: searchTerm,
+        ...(destinationId && {
+            filtering: {
+                destination: destinationId
+            }
+        }),
+        startDate: new Date().toISOString().split('T')[0],
+        endDate: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+        currency: 'USD',
+        pagination: {
+            offset: 0,
+            limit: 50
+        },
+        sorting: {
+            sortBy: 'RELEVANCE',
+            sortOrder: 'DESC'
+        }
+    };
+
+    const response = await this.makeRequest('POST', '/products/search', searchRequest);
+    
+    if (!response.data.products?.length) {
+        logger.debug('No search results found', { searchTerm });
+    }
 
     return response.data;
   }
 
   private async getProductDetails(productCode: string): Promise<any> {
     try {
-      const response = await axios.get(
-        `${this.baseUrl}/products/${productCode}`,
-        {
-          headers: {
-            'Accept': 'application/json;version=2.0',
-            'Accept-Language': 'en-US',
-            'exp-api-key': this.apiKey
-          }
-        }
-      );
-
-      logger.info('[Viator] Product details response:', response.data);
-      return response.data;
+        const response = await this.makeRequest('GET', `/products/${productCode}`);
+        return response.data;
     } catch (error) {
-      logger.error('[Viator] Error fetching product details:', error);
-      throw error;
+        if ((error as ViatorError).response?.status === 429) {
+            await new Promise(resolve => setTimeout(resolve, 5000));
+            return this.getProductDetails(productCode);
+        }
+        throw error;
     }
   }
 
   async enrichActivityDetails(activity: any): Promise<any> {
     try {
-      const productCode = activity.bookingInfo?.productCode || activity.referenceUrl?.match(/\-([a-zA-Z0-9]+)(?:\?|$)/)?.[1];
-      
-      logger.debug('[Viator] Enriching activity:', {
-        name: activity.name,
-        productCode,
-        referenceUrl: activity.referenceUrl
-      });
-
-      if (!productCode) {
-        logger.warn('[Viator] No product code available for activity:', {
-          name: activity.name,
-          referenceUrl: activity.referenceUrl
-        });
-        throw new Error('No product code available for activity');
-      }
-
-      try {
-        // Get detailed product information
-        const productDetails = await this.getProductDetails(productCode);
+        const productCode = activity.bookingInfo?.productCode || activity.referenceUrl?.match(/\-([a-zA-Z0-9]+)(?:\?|$)/)?.[1];
         
-        if (productDetails && productDetails.status === 'ACTIVE') {
-          // Get availability schedule for pricing and schedules
-          const availabilitySchedule = await this.getAvailabilitySchedule(productCode);
-          
-          // Extract meeting point and location information
-          const logistics = productDetails.logistics || {};
-          const travelerPickup = logistics.travelerPickup || {};
-          const start = logistics.start?.[0] || {};
-          const end = logistics.end?.[0] || {};
+        if (!productCode) {
+            throw new Error('No product code available for activity');
+        }
 
-          const locationInfo: ViatorLocationInfo = {
-            address: start.location?.address || '',
-            meetingPoints: [],
-            startingLocations: []
-          };
+        const [productDetails, availabilitySchedule] = await Promise.all([
+            this.getProductDetails(productCode),
+            this.getAvailabilitySchedule(productCode)
+        ]);
+        
+        if (!productDetails) {
+            throw new Error('Product details not available');
+        }
 
-          // Add start location information
-          if (start.description) {
-            locationInfo.startingLocations.push(start.description);
-          }
+        // Extract all necessary information
+        const locationInfo = this.extractLocationInfo(productDetails);
+        const reviews = this.extractReviews(productDetails);
+        const images = this.extractImages(productDetails);
+        const itinerary = this.extractItineraryInfo(productDetails);
+        const whatIncluded = this.extractIncludedItems(productDetails);
+        const meetingAndPickup = this.extractMeetingPoint(productDetails);
+        const additionalInfo = this.extractAdditionalInfo(productDetails);
 
-          // Add end location information
-          if (end.description) {
-            locationInfo.startingLocations.push(`End point: ${end.description}`);
-          }
-
-          // Add pickup locations if available
-          if (travelerPickup.additionalInfo) {
-            locationInfo.meetingPoints.push(travelerPickup.additionalInfo);
-          }
-
-          // Add specific meeting point from start location
-          if (start.location?.address) {
-            locationInfo.meetingPoints.push(start.location.address);
-            locationInfo.address = start.location.address;
-          }
-
-          // Extract itinerary information based on type
-          const itinerary = productDetails.itinerary;
-          let structuredItinerary: ItineraryType | undefined;
-
-          if (itinerary) {
-            switch (itinerary.itineraryType) {
-              case 'STANDARD':
-                structuredItinerary = {
-                  itineraryType: 'STANDARD',
-                  skipTheLine: itinerary.skipTheLine,
-                  privateTour: itinerary.privateTour,
-                  maxTravelersInSharedTour: itinerary.maxTravelersInSharedTour,
-                  duration: {
-                    fixedDurationInMinutes: itinerary.duration.fixedDurationInMinutes
-                  },
-                  itineraryItems: itinerary.itineraryItems || []
-                };
-                break;
-
-              case 'ACTIVITY':
-                structuredItinerary = {
-                  itineraryType: 'ACTIVITY',
-                  skipTheLine: itinerary.skipTheLine,
-                  privateTour: itinerary.privateTour,
-                  maxTravelersInSharedTour: itinerary.maxTravelersInSharedTour,
-                  duration: {
-                    fixedDurationInMinutes: itinerary.duration.fixedDurationInMinutes
-                  },
-                  pointsOfInterest: itinerary.pointsOfInterest || [],
-                  activityInfo: itinerary.activityInfo,
-                  foodMenus: itinerary.foodMenus
-                };
-                break;
-
-              case 'MULTI_DAY_TOUR':
-                structuredItinerary = {
-                  itineraryType: 'MULTI_DAY_TOUR',
-                  skipTheLine: itinerary.skipTheLine,
-                  privateTour: itinerary.privateTour,
-                  maxTravelersInSharedTour: itinerary.maxTravelersInSharedTour,
-                  duration: {
-                    fixedDurationInMinutes: itinerary.duration.fixedDurationInMinutes
-                  },
-                  days: itinerary.days || []
-                };
-                break;
-
-              case 'HOP_ON_HOP_OFF':
-                structuredItinerary = {
-                  itineraryType: 'HOP_ON_HOP_OFF',
-                  skipTheLine: itinerary.skipTheLine,
-                  privateTour: itinerary.privateTour,
-                  maxTravelersInSharedTour: itinerary.maxTravelersInSharedTour,
-                  duration: itinerary.duration,
-                  routes: itinerary.routes || []
-                };
-                break;
-
-              case 'UNSTRUCTURED':
-                structuredItinerary = {
-                  itineraryType: 'UNSTRUCTURED',
-                  skipTheLine: itinerary.skipTheLine,
-                  privateTour: itinerary.privateTour,
-                  maxTravelersInSharedTour: itinerary.maxTravelersInSharedTour,
-                  unstructuredDescription: itinerary.unstructuredDescription
-                };
-                break;
+        return {
+            details: {
+                name: productDetails.title,
+                overview: productDetails.description,
+                location: productDetails.location?.address || '',
+                duration: {
+                    fixedDurationInMinutes: productDetails.duration?.fixedDurationInMinutes || 0
+                },
+                whatIncluded,
+                meetingAndPickup,
+                additionalInfo,
+                highlights: productDetails.highlights || []
+            },
+            location: locationInfo,
+            images,
+            reviews,
+            itinerary,
+            bookingInfo: {
+                availability: availabilitySchedule
             }
-          }
+        };
+    } catch (error) {
+        logger.error('Activity enrichment failed', {
+            activityName: activity.name,
+            error: error instanceof Error ? error.message : 'Unknown error'
+        });
+        throw error;
+    }
+  }
 
-          // Extract detailed product information
-          const details: ViatorProductDetails = {
-            overview: productDetails.description?.trim() || '',
-            whatIncluded: {
-              included: (productDetails.inclusions || [])
-                .map((inc: ViatorInclusion) => inc.otherDescription?.trim())
-                .filter((desc: string | undefined) => desc && desc.length > 0),
-              excluded: (productDetails.exclusions || [])
-                .map((exc: ViatorExclusion) => exc.otherDescription?.trim())
-                .filter((desc: string | undefined) => desc && desc.length > 0)
-            },
-            meetingAndPickup: {
-              meetingPoint: {
-                name: start.location?.name?.trim() || '',
-                address: start.description?.trim() || locationInfo.meetingPoints[0]?.trim() || '',
-                googleMapsUrl: start.location?.googleMapsUrl
-              },
-              endPoint: end.description?.trim() || travelerPickup.additionalInfo?.trim() || 'Returns to departure point'
-            },
-            whatToExpect: (productDetails.itinerary?.itineraryItems || [])
-              .map((item: ViatorItineraryItem, index: number) => {
-                const location = item.pointOfInterestLocation?.location;
-                const isPassBy = item.passByWithoutStopping;
-                
-                const stopData: WhatToExpectStop = {
-                  location: location?.name?.trim() || item.description?.split('.')[0]?.trim() || `Stop ${index + 1}`,
-                  description: item.description?.trim() || '',
-                  duration: item.duration ? `${item.duration.fixedDurationInMinutes} minutes` : 'Duration not specified',
-                  admissionType: isPassBy ? 'Pass By' : (item.admissionIncluded || 'Admission Ticket Free'),
-                  isPassBy,
-                  coordinates: location?.coordinates ? {
-                    lat: location.coordinates.latitude,
-                    lng: location.coordinates.longitude
-                  } : undefined,
-                  attractionId: item.pointOfInterestLocation?.attractionId,
-                  stopNumber: index + 1
-                };
+  private extractReviews(productDetails: any): any {
+    if (!productDetails.reviews) return undefined;
 
-                return stopData;
-              })
-              .filter((stop: WhatToExpectStop) => stop.description || stop.coordinates || stop.location !== `Stop ${stop.stopNumber}`),
-            additionalInfo: {
-              confirmation: productDetails.bookingConfirmationSettings?.confirmationType?.trim() || '',
-              accessibility: (productDetails.additionalInfo || [])
-                .map((info: ViatorAdditionalInfo) => info.description?.trim())
-                .filter((desc: string | undefined) => desc && desc.length > 0),
-              restrictions: productDetails.restrictions || [],
-              maxTravelers: productDetails.bookingRequirements?.maxTravelersPerBooking || 0,
-              cancellationPolicy: {
-                description: productDetails.cancellationPolicy?.description?.trim() || '',
-                refundEligibility: productDetails.cancellationPolicy?.refundEligibility || []
-              }
-            },
-            reviews: productDetails.reviews ? {
-              rating: productDetails.reviews.rating,
-              totalReviews: productDetails.reviews.totalReviews,
-              ratingBreakdown: productDetails.reviews.ratingBreakdown || [],
-              featuredReviews: productDetails.reviews.featuredReviews || []
-            } : undefined
-          };
+    const reviewStats = productDetails.reviews.ratingBreakdown?.map((stat: any) => ({
+        rating: stat.stars,
+        count: stat.count,
+        percentage: ((stat.count / productDetails.reviews.totalReviews) * 100).toFixed(1)
+    })) || [];
 
-          // Map reviews to frontend format
-          const reviews = productDetails.reviews ? {
-            reviewCountTotals: {
-              averageRating: productDetails.reviews.combinedAverageRating || 0,
-              totalReviews: productDetails.reviews.totalReviews || 0,
-              stats: productDetails.reviews.reviewCountTotals?.map((count: { rating: number; count: number }) => ({
-                rating: count.rating,
-                count: count.count,
-                percentage: ((count.count / productDetails.reviews.totalReviews) * 100).toFixed(1)
-              })) || [],
-              sources: productDetails.reviews.sources?.map((source: { provider: string; totalCount: number }) => ({
-                provider: source.provider,
-                count: source.totalCount
-              })) || []
-            },
-            items: productDetails.reviews.featuredReviews?.map((review: { 
-              author: string; 
-              date: string; 
-              rating: number; 
-              content: string;
-              title?: string;
-              helpful?: number;
-            }) => ({
+    return {
+        items: (productDetails.reviews.items || []).map((review: any) => ({
               author: review.author,
               date: review.date,
               rating: review.rating,
-              text: review.content,
               title: review.title,
+            text: review.text || review.content,
               helpful: review.helpful
-            })) || []
-          } : undefined;
-
-          // Extract availability and pricing information
-          const bookingInfo = {
-            productCode,
-            cancellationPolicy: productDetails.cancellationPolicy?.description || activity.bookingInfo?.cancellationPolicy || 'Standard cancellation policy',
-            instantConfirmation: productDetails.bookingConfirmationSettings?.confirmationType === 'INSTANT',
-            mobileTicket: productDetails.ticketInfo?.ticketTypes?.includes('MOBILE') || true,
-            languages: productDetails.languageGuides?.map((lg: any) => lg.language) || ['English'],
-            minParticipants: activity.bookingInfo?.minParticipants || 1,
-            maxParticipants: activity.bookingInfo?.maxParticipants || 999,
-            availability: availabilitySchedule ? {
-              startTimes: availabilitySchedule.bookableItems?.[0]?.seasons?.[0]?.pricingRecords?.[0]?.timedEntries?.map(entry => entry.startTime) || [],
-              daysAvailable: availabilitySchedule.bookableItems?.[0]?.seasons?.[0]?.pricingRecords?.[0]?.daysOfWeek || [],
-              seasons: availabilitySchedule.bookableItems?.[0]?.seasons || []
-            } : undefined
-          };
-
-          // Extract product options
-          const productOptions = productDetails.productOptions?.map((option: ViatorProductOption) => ({
-            productOptionCode: option.productOptionCode,
-            description: option.description,
-            title: option.title,
-            languageGuides: option.languageGuides
-          }));
-
-          // Format location data
-          const formatLocation = (locationData: any): string => {
-            if (typeof locationData === 'string') return locationData;
-            if (typeof locationData === 'object') {
-              return locationData.address || 
-                     (locationData.meetingPoints?.[0]?.address) ||
-                     (locationData.startingLocations?.[0]?.address) ||
-                     'Location details available upon booking';
-            }
-            return 'Location details available upon booking';
-          };
-
-          const enrichedActivity = {
-            ...activity,
-            location: formatLocation(activity.location),
-            locationDetails: activity.location,
-            openingHours: productDetails.itinerary?.routes?.[0]?.operatingSchedule || '',
-            details,
-            reviews,
-            bookingInfo,
-            itinerary: structuredItinerary,
-            productDetails: {
-              ...activity.productDetails,
-              productOptions
-            },
-            commentary: activity.commentary || details.overview,
-            itineraryHighlight: activity.itineraryHighlight || `Visit ${activity.name} ${details.whatToExpect?.[0]?.description || ''}`,
-            scoringReason: activity.scoringReason,
-            dayPlanningLogic: activity.dayPlanningLogic
-          };
-
-          return enrichedActivity;
+        })),
+        reviewCountTotals: {
+            averageRating: productDetails.reviews.rating || 0,
+            totalReviews: productDetails.reviews.totalReviews || 0,
+            stats: reviewStats,
+            sources: productDetails.reviews.sources || []
         }
-      } catch (error) {
-        logger.error('[Viator] Error getting product details:', {
-          productCode,
-          error: error instanceof Error ? error.message : 'Unknown error'
-        });
-        throw error;
-      }
-
-      throw new Error(`Failed to enrich activity details for product code: ${productCode}`);
-    } catch (error) {
-      logger.error('Error enriching activity details:', error);
-      throw error;
-    }
+    };
   }
 
-  private calculateSimilarity(str1: string, str2: string): number {
-    // Convert both strings to lowercase and remove special characters
-    const clean1 = str1.toLowerCase().replace(/[^a-z0-9\s]/g, '');
-    const clean2 = str2.toLowerCase().replace(/[^a-z0-9\s]/g, '');
+  private extractImages(productDetails: any): any[] {
+    if (!productDetails.images) return [];
 
-    // Split into words
-    const words1 = new Set(clean1.split(/\s+/));
-    const words2 = new Set(clean2.split(/\s+/));
-
-    // Calculate intersection
-    const intersection = new Set([...words1].filter(x => words2.has(x)));
-
-    // Calculate Jaccard similarity
-    const similarity = intersection.size / (words1.size + words2.size - intersection.size);
-
-    return similarity;
-  }
-
-  private mapProductToActivity(product: any): Activity {
-    return {
-      id: product.productCode,
-      name: product.title,
-      description: product.description,
-      duration: product.duration,
-      price: {
-        amount: product.price?.amount || 0,
-        currency: product.price?.currency || 'USD'
-      },
-      tier: this.determineTier(product.price?.amount || 0),
-      category: product.categories?.[0]?.name 
-        ? (VIATOR_CATEGORY_MAP[product.categories[0].name] || this.determineCategory({
-            name: product.title,
-            description: product.description,
-            productCode: product.productCode
-          }))
-        : this.determineCategory({
-            name: product.title,
-            description: product.description,
-            productCode: product.productCode
-          }),
-      location: {
-        address: product.location?.address,
-        coordinates: product.location?.coordinates ? {
-          latitude: product.location.coordinates.latitude,
-          longitude: product.location.coordinates.longitude
-        } : undefined
-      },
-      rating: product.rating,
-      numberOfReviews: product.reviewCount,
-      images: product.images?.map((img: any) => {
-        const preferredVariant = img.variants?.find((v: any) => v.width === 480 && v.height === 320);
-        return preferredVariant?.url || img.variants?.[0]?.url;
-      }) || [],
-      bookingInfo: {
-        productCode: product.productCode,
-        cancellationPolicy: product.bookingInfo?.cancellationPolicy || 'Standard cancellation policy',
-        instantConfirmation: true,
-        mobileTicket: true,
-        languages: ['English'],
-        minParticipants: product.bookingInfo?.minParticipants || 1,
-        maxParticipants: product.bookingInfo?.maxParticipants || 999
-      },
-      meetingPoint: product.meetingPoint ? {
-        name: product.meetingPoint.name,
-        address: product.meetingPoint.address,
-        details: product.meetingPoint.details
-      } : undefined,
-      endPoint: product.endPoint ? {
-        name: product.endPoint.name,
-        address: product.endPoint.address,
-        details: product.endPoint.details
-      } : undefined,
-      operatingHours: product.operatingHours,
-      overview: product.overview,
-      whatsIncluded: product.whatsIncluded,
-      itinerary: product.itinerary?.map((day: any) => ({
-        day: day.day,
-        title: day.title,
-        stops: day.stops?.map((stop: any) => ({
-          name: stop.name,
-          duration: stop.duration,
-          description: stop.description,
-          admissionType: stop.admissionType
+    return productDetails.images.map((image: any) => ({
+        variants: (image.variants || []).map((variant: any) => ({
+            url: variant.url,
+            width: variant.width,
+            height: variant.height
         }))
-      })),
-      cancellationPolicy: product.cancellationPolicy,
-      referenceUrl: product.productUrl || (product.destinations?.[0]?.ref ? 
-        `https://www.viator.com/tours/${product.destinations[0].name.split(',')[0]}/${product.title.replace(/[^a-zA-Z0-9]+/g, '-')}/d${product.destinations[0].ref}-${product.productCode}` : 
-        `https://www.viator.com/tours/${product.productCode}`)
-    };
+    }));
   }
 
-  private determineCategory(activity: CategoryDetermination): string {
-    if (activity.name.includes('Skip the Line') || activity.name.includes('Fast Track')) {
-      return 'Tickets & Passes';
-    }
-    const description = (activity.description + ' ' + activity.name).toLowerCase();
-    return determineCategoryFromDescription(description);
-  }
-
-  private getPreferredTimeSlot(category: string): ActivityTimeSlot {
-    const startTime = getPreferredTimeSlot(category) === 'morning' ? '09:00' :
-                     getPreferredTimeSlot(category) === 'afternoon' ? '14:00' : '19:00';
-    const endTime = getPreferredTimeSlot(category) === 'morning' ? '13:00' :
-                   getPreferredTimeSlot(category) === 'afternoon' ? '18:00' : '23:00';
-    
+  private extractIncludedItems(productDetails: any): any {
     return {
-      startTime,
-      endTime,
-      duration: getTypicalDuration(category),
-      category
+        included: productDetails.inclusions?.map((item: any) => item.description) || [],
+        excluded: productDetails.exclusions?.map((item: any) => item.description) || []
     };
+  }
+
+  private extractMeetingPoint(productDetails: any): any {
+    const logistics = productDetails.logistics || {};
+    const start = logistics.start?.[0] || {};
+    const end = logistics.end?.[0] || {};
+
+    return {
+        meetingPoint: {
+            name: start.location?.name || 'Meeting Point',
+            address: start.location?.address || '',
+            details: start.description || '',
+            coordinates: start.location?.coordinates,
+            googleMapsUrl: start.location?.googleMapsUrl
+        },
+        endPoint: end.description || undefined
+    };
+  }
+
+  private extractAdditionalInfo(productDetails: any): any {
+    return {
+        confirmation: productDetails.bookingInfo?.confirmation || 'Immediate confirmation',
+        accessibility: productDetails.accessibility || [],
+        restrictions: productDetails.restrictions || [],
+        maxTravelers: productDetails.maxTravelers || 99,
+        cancellationPolicy: {
+            description: productDetails.cancellationPolicy?.description || 'Standard cancellation policy',
+            refundEligibility: productDetails.cancellationPolicy?.refundEligibility || []
+        }
+    };
+  }
+
+  private extractItineraryInfo(productDetails: any): any {
+    const itinerary = productDetails.itinerary;
+    if (!itinerary) return undefined;
+
+    return {
+        itineraryType: itinerary.itineraryType,
+        skipTheLine: itinerary.skipTheLine || false,
+        privateTour: itinerary.privateTour || false,
+        maxTravelersInSharedTour: itinerary.maxTravelersInSharedTour,
+        duration: {
+            fixedDurationInMinutes: itinerary.duration?.fixedDurationInMinutes
+        },
+        itineraryItems: (itinerary.itineraryItems || []).map((item: any) => ({
+            pointOfInterestLocation: {
+      location: {
+                    name: item.pointOfInterestLocation?.location?.name,
+                    address: item.pointOfInterestLocation?.location?.address,
+                    coordinates: item.pointOfInterestLocation?.location?.coordinates
+                },
+                attractionId: item.pointOfInterestLocation?.attractionId
+            },
+            duration: {
+                fixedDurationInMinutes: item.duration?.fixedDurationInMinutes
+            },
+            passByWithoutStopping: item.passByWithoutStopping || false,
+            admissionIncluded: item.admissionIncluded || 'NOT_APPLICABLE',
+            description: item.description || ''
+        })),
+        days: itinerary.days?.map((day: any) => ({
+            dayNumber: day.dayNumber,
+        title: day.title,
+            items: day.items || [],
+            accommodations: day.accommodations,
+            foodAndDrinks: day.foodAndDrinks
+        }))
+    };
+  }
+
+  private buildActivityQuery(params: GenerateActivitiesParams): string {
+    const { destination, preferences } = params;
+    const { interests } = preferences;
+
+    const searchTerms = [
+      destination,
+      ...interests.slice(0, 2)
+    ].filter(Boolean);
+
+    return searchTerms.join(' ');
   }
 
   async getAvailabilitySchedule(productCode: string): Promise<ViatorAvailabilitySchedule> {
     try {
-      const response = await axios.get(
-        `${this.baseUrl}/availability/schedules/${productCode}`,
-        {
-          headers: {
-            'Accept': 'application/json;version=2.0',
-            'Accept-Language': 'en-US',
-            'exp-api-key': this.apiKey
-          }
-        }
-      );
-      
-      logger.info('Availability schedule response:', response.data);
+      const response = await this.makeRequest('GET', `/availability/schedules/${productCode}`);
       return response.data;
     } catch (error) {
-      logger.error('Error fetching availability schedule:', error);
+      if ((error as ViatorError).response?.status === 429) {
+        await new Promise(resolve => setTimeout(resolve, 5000));
+        return this.getAvailabilitySchedule(productCode);
+      }
       throw error;
     }
-  }
-
-  async checkRealTimeAvailability(productCode: string, date: string, travelers: number): Promise<any> {
-    try {
-      const response = await axios.post(
-        `${this.baseUrl}/availability/check`,
-        {
-          productCode,
-          travelDate: date,
-          paxMix: [{
-            ageBand: 'ADULT',
-            numberOfTravelers: travelers
-          }]
-        },
-        {
-          headers: {
-            'Accept': 'application/json;version=2.0',
-            'Accept-Language': 'en-US',
-            'exp-api-key': this.apiKey
-          }
-        }
-      );
-      
-      logger.info('Real-time availability response:', response.data);
-      return response.data;
-    } catch (error) {
-      logger.error('Error checking real-time availability:', error);
-      throw error;
-    }
-  }
-
-  private determineTier(price: number): 'budget' | 'medium' | 'premium' {
-    if (price <= 50) return 'budget';
-    if (price <= 150) return 'medium';
-    return 'premium';
   }
 }
 
