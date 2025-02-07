@@ -1181,14 +1181,14 @@ export class ViatorService {
             await new Promise(resolve => setTimeout(resolve, 5000));
             return this.getProductDetails(productCode);
         }
-        throw error;
+      throw error;
     }
   }
 
   async enrichActivityDetails(activity: any): Promise<any> {
     try {
         const productCode = activity.bookingInfo?.productCode || activity.referenceUrl?.match(/\-([a-zA-Z0-9]+)(?:\?|$)/)?.[1];
-        
+
         if (!productCode) {
             throw new Error('No product code available for activity');
         }
@@ -1203,13 +1203,13 @@ export class ViatorService {
         }
 
         // Extract all necessary information
-        const locationInfo = this.extractLocationInfo(productDetails);
-        const reviews = this.extractReviews(productDetails);
-        const images = this.extractImages(productDetails);
-        const itinerary = this.extractItineraryInfo(productDetails);
-        const whatIncluded = this.extractIncludedItems(productDetails);
-        const meetingAndPickup = this.extractMeetingPoint(productDetails);
-        const additionalInfo = this.extractAdditionalInfo(productDetails);
+                const locationInfo = this.extractLocationInfo(productDetails);
+                const reviews = this.extractReviews(productDetails);
+                const images = this.extractImages(productDetails);
+                const itinerary = this.extractItineraryInfo(productDetails);
+                const whatIncluded = this.extractIncludedItems(productDetails);
+                const meetingAndPickup = this.extractMeetingPoint(productDetails);
+                const additionalInfo = this.extractAdditionalInfo(productDetails);
 
         return {
             details: {
@@ -1228,7 +1228,7 @@ export class ViatorService {
             images,
             reviews,
             itinerary,
-            bookingInfo: {
+                    bookingInfo: {
                 availability: availabilitySchedule
             }
         };
@@ -1353,7 +1353,7 @@ export class ViatorService {
             foodAndDrinks: day.foodAndDrinks
         }))
     };
-  }
+}
 
   private buildActivityQuery(params: GenerateActivitiesParams): string {
     const { destination, preferences } = params;

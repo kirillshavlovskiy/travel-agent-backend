@@ -1,8 +1,74 @@
 import { Router, Request, Response } from 'express';
-import { perplexityClient } from '../services/perplexity.js';
-import { viatorClient } from '../services/viator.js';
-import { logger } from '../utils/logger.js';
-import { ViatorService } from '../services/viator.js';
+import { getPerplexityClient } from '../services/perplexity';
+import { viatorClient } from '../services/viator';
+import { logger } from '../utils/logger';
+import { ViatorService } from '../services/viator';
+import { Activity } from '../types/activities';
+import { TravelPreferences } from '../types/preferences';
+
+// Add missing utility functions
+function countCategories(activities: any[]): Record<string, number> {
+  return activities.reduce((acc: Record<string, number>, activity) => {
+    const category = activity.category || 'Uncategorized';
+    acc[category] = (acc[category] || 0) + 1;
+    return acc;
+  }, {});
+}
+
+interface CategoryDistribution {
+  [category: string]: {
+    count: number;
+    percentage: number;
+    byTier: {
+      budget: number;
+      medium: number;
+      premium: number;
+    };
+  };
+}
+
+function calculateDistribution(activities: any[]): CategoryDistribution {
+  const total = activities.length;
+  const categories = activities.reduce((acc: CategoryDistribution, activity) => {
+    const category = activity.category || 'Uncategorized';
+    const price = activity.price?.amount || 0;
+    const tier = price <= 50 ? 'budget' : price <= 150 ? 'medium' : 'premium';
+
+    if (!acc[category]) {
+      acc[category] = {
+        count: 0,
+        percentage: 0,
+        byTier: { budget: 0, medium: 0, premium: 0 }
+      };
+    }
+
+    acc[category].count++;
+    acc[category].percentage = (acc[category].count / total) * 100;
+    acc[category].byTier[tier]++;
+
+    return acc;
+  }, {});
+
+  return categories;
+}
+
+interface GeneratedActivity {
+  name: string;
+  description?: string;
+  timeSlot: string;
+  dayNumber: number;
+  category: string;
+  price: {
+    amount: number;
+    currency: string;
+  };
+  selected?: boolean;
+  preferenceScore?: number;
+  matchedPreferences?: string[];
+  scoringReason?: string;
+  assigned?: boolean;
+  location?: string;
+}
 
 const router = Router();
 
@@ -124,507 +190,375 @@ function calculateActivityScore(
   };
 }
 
+// Add getTimeSlotValue function
+function getTimeSlotValue(timeSlot: string): number {
+  switch (timeSlot.toLowerCase()) {
+    case 'morning': return 0;
+    case 'afternoon': return 1;
+    case 'evening': return 2;
+    default: return 3;
+  }
+}
+
+// Add new interfaces at the top
+interface GeoLocation {
+  latitude: number;
+  longitude: number;
+  area: string;
+  address: string;
+}
+
+interface DailyPlan {
+  dayNumber: number;
+  theme: string;
+  mainArea: string;
+  activities: {
+    morning: PlannedActivity[];
+    afternoon: PlannedActivity[];
+    evening: PlannedActivity[];
+  };
+  breaks: {
+    morning?: Break;
+    lunch?: Break;
+    afternoon?: Break;
+    dinner?: Break;
+  };
+  logistics: {
+    transportSuggestions: string[];
+    walkingDistances: string[];
+    timeEstimates: string[];
+  };
+  commentary: string;
+  highlights: string[];
+}
+
+interface Break {
+  startTime: string;
+  endTime: string;
+  duration: number;
+  suggestion: string;
+  location?: string;
+}
+
+interface PlannedActivity extends Activity {
+  subActivities?: Array<{
+    name: string;
+    duration: number;
+    description: string;
+  }>;
+  nearbyAttractions?: Array<{
+    name: string;
+    distance: string;
+    type: string;
+  }>;
+  geoLocation?: GeoLocation;
+  itineraryHighlight?: string;
+  timeAllocation?: {
+    preparation: number;
+    mainActivity: number;
+    exploration: number;
+  };
+}
+
+// Add helper function to calculate distance between coordinates
+function calculateDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const R = 6371; // Earth's radius in km
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a = 
+    Math.sin(dLat/2) * Math.sin(dLat/2) +
+    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * 
+    Math.sin(dLon/2) * Math.sin(dLon/2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  return R * c;
+}
+
+// Add function to group activities by geographical proximity
+function groupByProximity(activities: PlannedActivity[], maxDistance: number = 2): Record<string, PlannedActivity[]> {
+  const groups: Record<string, PlannedActivity[]> = {};
+  
+  activities.forEach(activity => {
+    if (!activity.geoLocation) return;
+    
+    let foundGroup = false;
+    for (const [groupId, groupActivities] of Object.entries(groups)) {
+      const groupCenter = groupActivities[0].geoLocation!;
+      const distance = calculateDistance(
+        activity.geoLocation.latitude,
+        activity.geoLocation.longitude,
+        groupCenter.latitude,
+        groupCenter.longitude
+      );
+      
+      if (distance <= maxDistance) {
+        groups[groupId].push(activity);
+        foundGroup = true;
+        break;
+      }
+    }
+    
+    if (!foundGroup) {
+      const groupId = `area-${Object.keys(groups).length + 1}`;
+      groups[groupId] = [activity];
+    }
+  });
+  
+  return groups;
+}
+
+// Update the tier determination logic
+function determineTier(price: number): 'budget' | 'medium' | 'premium' {
+  if (price <= 50) return 'budget';
+  if (price <= 150) return 'medium';
+  return 'premium';
+}
+
+// Add this interface at the top with other interfaces
+interface LocationDetails {
+  name: string;
+  address: string;
+  coordinates?: {
+    latitude: number;
+    longitude: number;
+  };
+  type: 'meeting' | 'activity' | 'end';
+}
+
+const DEFAULT_SYSTEM_MESSAGE = `You are a travel activity planner. CRITICAL INSTRUCTIONS:
+1. You MUST return ONLY a valid JSON object
+2. DO NOT include any markdown, headings, or explanatory text
+3. DO NOT wrap the response in code blocks
+4. The response must be a raw JSON object following this EXACT structure:
+{
+  "activities": [
+    {
+      "name": "Example Activity",
+      "description": "Brief description",
+      "duration": 2,
+      "price": { "amount": 50, "currency": "USD" },
+      "category": "Cultural",
+      "location": "Example Location, Address",
+      "timeSlot": "morning",
+      "dayNumber": 1,
+      "rating": 4,
+      "isVerified": false,
+      "verificationStatus": "pending",
+      "tier": "medium"
+    }
+  ],
+  "dailyPlans": [
+    {
+      "dayNumber": 1,
+      "theme": "Example Theme",
+      "mainArea": "Example Area",
+      "commentary": "Brief commentary",
+      "highlights": ["highlight 1", "highlight 2"],
+      "logistics": {
+        "transportSuggestions": ["suggestion 1"],
+        "walkingDistances": ["distance 1"],
+        "timeEstimates": ["estimate 1"]
+      }
+    }
+  ]
+}`;
+
 router.post('/generate', async (req: Request, res: Response) => {
   try {
-    // Add detailed request logging
-    logger.info('Raw request body:', {
-      hasDestination: !!req.body.destination,
-      hasDays: !!req.body.days,
-      hasBudget: !!req.body.budget,
-      hasCurrency: !!req.body.currency,
-      hasPreferences: !!req.body.preferences,
-      rawPreferences: req.body.preferences, // Log the raw preferences object
-      body: req.body // Log the entire body for debugging
-    });
+    const { destination, days, budget, currency, flightTimes, preferences } = req.body;
 
-    const { destination, days, budget, currency, flightTimes, preferences: rawPreferences } = req.body;
+    if (!destination || !days || !budget || !currency) {
+      return res.status(400).json({
+        error: 'Missing required fields',
+        details: 'destination, days, budget, and currency are required',
+        timestamp: new Date().toISOString()
+      });
+    }
 
-    // Log extracted values
-    logger.info('Extracted values:', {
+    logger.info('[Activities] Generating activities:', {
       destination,
       days,
       budget,
       currency,
-      hasFlightTimes: !!flightTimes,
-      rawPreferences
+      flightTimes,
+      preferences
     });
 
-    // Validate required fields
-    if (!destination || !days || !budget || !currency) {
-      logger.warn('Missing required fields:', {
-        hasDestination: !!destination,
-        hasDays: !!days,
-        hasBudget: !!budget,
-        hasCurrency: !!currency
-      });
-      return res.status(400).json({
-        error: 'Missing required fields: destination, days, budget, and currency are required',
-        timestamp: new Date().toISOString(),
-        receivedFields: {
-          destination: !!destination,
-          days: !!days,
-          budget: !!budget,
-          currency: !!currency
-        }
-      });
-    }
+    const perplexityService = getPerplexityClient();
 
-    // Log raw preferences before validation
-    logger.info('Raw preferences before validation:', rawPreferences);
-
-    // Validate and get preferences with defaults
-    const preferences = validatePreferences(rawPreferences);
-
-    // Log final preferences after validation
-    logger.info('Final preferences after validation:', preferences);
-
-    logger.info('Received activity generation request with preferences:', {
+    const response = await perplexityService.generateActivities({
       destination,
       days,
       budget,
       currency,
       flightTimes,
       preferences: {
-        travelStyle: preferences.travelStyle,
-        pacePreference: preferences.pacePreference,
-        interests: preferences.interests,
-        accessibility: preferences.accessibility,
-        dietaryRestrictions: preferences.dietaryRestrictions
+        travelStyle: preferences?.travelStyle || 'moderate',
+        pacePreference: preferences?.pacePreference || 'moderate',
+        interests: preferences?.interests || [],
+        accessibility: preferences?.accessibility || [],
+        dietaryRestrictions: preferences?.dietaryRestrictions || []
       }
     });
 
-    // Get initial activity suggestions from Perplexity
-    const query = `List popular activities in ${destination} with:
-- Name and location
-- Time slot (morning/afternoon/evening)
-- Basic category
-
-Return JSON array:
-[{
-  "name": "activity name",
-  "location": "area name",
-  "timeSlot": "morning|afternoon|evening",
-  "category": "Cultural|Nature|Food|Local"
-}]`;
-
-    logger.debug('Sending query to Perplexity API', { query });
-    const response = await perplexityClient.chat(query);
-    
-    const parsedData = response;
-    if (!parsedData.activities || !Array.isArray(parsedData.activities)) {
-      logger.error('Invalid data structure', { parsedData });
-      throw new Error('Invalid response format: missing or invalid activities array');
-    }
-
-    // Ensure all activities are unselected after regeneration
-    parsedData.activities = parsedData.activities.map(activity => ({
-      ...activity,
-      selected: false
-    }));
-
-    // Enrich activities with Viator data
-    const viatorClient = new ViatorService(process.env.VIATOR_API_KEY || '');
-    const enrichedActivities = await Promise.all(
-      parsedData.activities.map(async (activity: any) => {
-        try {
-          const searchResults = await viatorClient.searchActivity(`${activity.name} ${destination}`);
-          if (!searchResults || searchResults.length === 0) {
-            logger.warn('No Viator activities found for:', activity.name);
-            return null;
-          }
-          
-          const enrichedResults = await Promise.all(
-            searchResults.map(async (result) => {
-              const enriched = await viatorClient.enrichActivityDetails(result);
-              if (!enriched) return null;
-
-              // Use validated preferences for scoring
-              const score = calculateActivityScore(enriched, preferences);
-              
-              return {
-                ...enriched,
-                ...score
-              };
-            })
-          );
-
-          return enrichedResults.filter(Boolean);
-        } catch (error) {
-          logger.error('Failed to enrich activity:', {
-            activity: activity.name,
-            error: error instanceof Error ? error.message : 'Unknown error'
-          });
-          return null;
-        }
-      })
-    );
-
-    // Flatten and filter out failed enrichments
-    const validActivities = enrichedActivities
-      .filter(result => result !== null)
-      .flat()
-      .filter((activity, index, self) => 
-        index === self.findIndex(a => a?.bookingInfo?.productCode === activity?.bookingInfo?.productCode)
-      );
-
-    // Log scoring details
-    validActivities.forEach(activity => {
-      logger.info('Activity scoring details:', {
-        name: activity.name,
-        score: activity.preferenceScore,
-        matchedPreferences: activity.matchedPreferences,
-        scoringReason: activity.scoringReason
-      });
+    logger.info('[Activities] Generation successful:', {
+      activityCount: response.activities?.length,
+      dailyPlansCount: response.dailyPlans?.length
     });
 
-    // Sort activities by score before optimization
-    const sortedActivities = validActivities.sort((a, b) => 
-      (b.preferenceScore - a.preferenceScore) || ((b.rating || 0) - (a.rating || 0))
-      );
-
-    // Helper function to calculate similarity between activities
-    const calculateSimilarity = (activity1: any, activity2: any): number => {
-      const name1 = activity1.name.toLowerCase();
-      const name2 = activity2.name.toLowerCase();
-      const desc1 = activity1.description?.toLowerCase() || '';
-      const desc2 = activity2.description?.toLowerCase() || '';
-
-      // Calculate name similarity
-      const nameSimilarity = name1 === name2 ? 1 : 
-        name1.includes(name2) || name2.includes(name1) ? 0.8 :
-        0;
-
-      // Calculate description similarity if both exist
-      const descSimilarity = desc1 && desc2 ? 
-        (desc1 === desc2 ? 1 :
-        desc1.includes(desc2) || desc2.includes(desc1) ? 0.7 :
-        0) : 0;
-
-      // Calculate location similarity
-      const locationSimilarity = activity1.location === activity2.location ? 1 : 0;
-
-      // Weighted average
-      return (nameSimilarity * 0.5) + (descSimilarity * 0.3) + (locationSimilarity * 0.2);
-    };
-
-    // Simplify to just handle deduplication
-    const deduplicateActivities = (activities: any[]): any[] => {
-      // Track seen activities by name and product code
-      const seen = new Set<string>();
-      const uniqueActivities = activities.filter(activity => {
-        const key = `${activity.name}|${activity.bookingInfo?.productCode || ''}`;
-        if (seen.has(key)) {
-          return false;
-        }
-        seen.add(key);
-        return true;
-      });
-
-      // Filter out activities that are too long for the trip duration
-      const validActivities = uniqueActivities.filter(activity => {
-        const durationInMinutes = activity.duration || 0;
-        const durationInHours = durationInMinutes / 60;
-        
-        // Filter out activities longer than 24 hours
-        if (durationInHours > 24) {
-          logger.debug('Filtering out multi-day activity:', {
-            name: activity.name,
-            durationInMinutes,
-            durationInHours: Math.round(durationInHours * 10) / 10
-          });
-          return false;
-        }
-
-        // Also filter out suspiciously short activities (less than 15 minutes)
-        if (durationInMinutes < 15 && durationInMinutes !== 0) {
-          logger.debug('Filtering out suspiciously short activity:', {
-            name: activity.name,
-            durationInMinutes
-          });
-          return false;
-        }
-
-        return true;
-      });
-
-      logger.info('Activities after deduplication:', {
-        originalCount: activities.length,
-        uniqueCount: validActivities.length,
-        removedCount: activities.length - validActivities.length
-      });
-
-      return validActivities;
-    };
-
-    // After deduplication, add scheduling optimization
-    const optimizeSchedule = async (activities: any[], days: number, destination: string): Promise<any> => {
-      try {
-        const query = `Optimize this ${days}-day schedule for ${destination} with these activities:
-${activities.map(a => `- ${a.name} (${a.duration || 'N/A'} hours)`).join('\n')}
-
-REQUIREMENTS:
-1. Create a balanced schedule across ${days} days
-2. Group nearby activities on the same day
-3. Consider activity durations and opening hours
-4. Allow 2-4 activities per day
-5. Mix different types of activities
-
-PROVIDE FOR EACH DAY:
-1. List of activities with time slots
-2. Reasoning for activity grouping and timing
-3. Travel logistics between activities
-4. Special considerations (opening hours, crowds, weather)
-
-ALSO PROVIDE:
-1. Overall trip flow explanation
-2. Why certain activities were grouped together
-3. Alternative suggestions if any activities don't fit well
-
-Return as JSON with:
-- schedule: array of days with activities and timeSlots
-- dayPlanningLogic: detailed reasoning for each day's plan
-- tripOverview: overall trip organization logic
-- activityFitNotes: why activities were included/excluded`;
-
-        const response = await perplexityClient.chat(query);
-        
-        // If optimization fails, create a basic schedule
-        if (!response?.schedule) {
-          logger.warn('Creating basic schedule due to optimization failure');
-          return createBasicSchedule(activities, days);
-        }
-
-        logger.info('Schedule optimization reasoning:', {
-          tripOverview: response.tripOverview,
-          activityFitNotes: response.activityFitNotes
-        });
-
-        return response;
-      } catch (error) {
-        logger.error('Failed to optimize schedule:', error);
-        return createBasicSchedule(activities, days);
-      }
-    };
-
-    // Helper function to create a basic schedule
-    const createBasicSchedule = (activities: any[], days: number) => {
-      const schedule = [];
-      let activityIndex = 0;
-
-      for (let day = 1; day <= days; day++) {
-        const dayActivities = [];
-        // Add up to 3 activities per day
-        for (let slot = 0; slot < 3 && activityIndex < activities.length; slot++) {
-          const activity = activities[activityIndex++];
-          dayActivities.push({
-            name: activity.name,
-            timeSlot: ['morning', 'afternoon', 'evening'][slot],
-            startTime: ['09:00', '14:00', '19:00'][slot]
-          });
-        }
-
-        schedule.push({
-          dayNumber: day,
-          activities: dayActivities,
-          dayPlanningLogic: 'Basic schedule with evenly distributed activities'
-        });
-      }
-
-      return { schedule };
-    };
-
-    // Use in main flow:
-    const dedupedActivities = deduplicateActivities(sortedActivities);
-
-    if (dedupedActivities.length === 0) {
-      logger.warn('No activities found after deduplication');
-      return res.status(200).json({
-        activities: [],
-        message: "No valid activities found after deduplication.",
-        error: true
-      });
-    }
-
-    try {
-      // Optimize the schedule
-      const optimizedSchedule = await optimizeSchedule(dedupedActivities, days, destination);
-      
-      // Log the planning logic for each day
-      optimizedSchedule.schedule.forEach((day: any) => {
-        logger.info(`Day ${day.dayNumber} Planning:`, {
-          dayNumber: day.dayNumber,
-          planningLogic: day.dayPlanningLogic,
-          activityCount: day.activities.length,
-          activities: day.activities.map((a: any) => ({
-            name: a.name,
-            timeSlot: a.timeSlot,
-            startTime: a.startTime
-          }))
-        });
-      });
-
-      // Transform activities based on the optimized schedule
-      const transformedActivities = optimizedSchedule.schedule.flatMap((day: any) => 
-        day.activities.map((activity: any) => {
-          const originalActivity = dedupedActivities.find(a => a.name === activity.name);
-          if (!originalActivity) return null;
-
-      // Get price value
-      let price = 0;
-          if (typeof originalActivity?.price === 'object' && originalActivity.price !== null) {
-            price = originalActivity.price.amount || 0;
-          } else if (typeof originalActivity?.price === 'number') {
-            price = originalActivity.price;
-          } else if (typeof originalActivity?.price === 'string') {
-            price = originalActivity.price.toLowerCase() === 'free' ? 0 : parseFloat(originalActivity.price) || 0;
-      }
-
-      // Determine tier based on price
-      const tier = price <= 50 ? 'budget' : price <= 150 ? 'medium' : 'premium';
-
-          // Format location data properly
-          const formattedLocation = (() => {
-            if (typeof originalActivity.location === 'object') {
-              // If location is an object, extract the main address or first meeting point
-              return originalActivity.location.address || 
-                     (originalActivity.location.meetingPoints?.[0]?.address) ||
-                     (originalActivity.location.startingLocations?.[0]?.address) ||
-                     'Location details available upon booking';
-            }
-            return originalActivity.location || 'Location details available upon booking';
-          })();
-
-      return {
-            ...originalActivity,
-            category: activity.category,
-            timeSlot: activity.timeSlot,
-            dayNumber: day.dayNumber,
-            startTime: activity.startTime,
-            scoringReason: activity.scoringReason,
-            dayPlanningLogic: day.dayPlanningLogic,
-            tier,
-            // Ensure location is a string
-            location: formattedLocation,
-        price: {
-          amount: price,
-          currency: req.body.currency || 'USD'
-            }
-          };
-        }).filter(Boolean)
-      );
-
-    // Group activities by day and tier for suggested itineraries
-    const groupedActivities = new Map();
-
-    // Initialize groups for each day
-    for (let day = 1; day <= days; day++) {
-      groupedActivities.set(day, {
-        budget: { morning: [], afternoon: [], evening: [] },
-        medium: { morning: [], afternoon: [], evening: [] },
-        premium: { morning: [], afternoon: [], evening: [] }
-      });
-    }
-
-    // Group activities by day, tier, and time slot
-    transformedActivities.forEach(activity => {
-      const dayGroup = groupedActivities.get(activity.dayNumber);
-      if (dayGroup?.[activity.tier]?.[activity.timeSlot]) {
-        dayGroup[activity.tier][activity.timeSlot].push(activity);
-      }
-    });
-
-    // Create suggested itineraries
-    const suggestedItineraries: Record<string, any[]> = {
-      budget: [],
-      medium: [],
-      premium: []
-    };
-
-    // Generate itineraries for each day
-    for (let day = 1; day <= days; day++) {
-      const dayActivities = groupedActivities.get(day) || {
-        budget: { morning: [], afternoon: [], evening: [] },
-        medium: { morning: [], afternoon: [], evening: [] },
-        premium: { morning: [], afternoon: [], evening: [] }
-      };
-
-      // Budget tier
-      suggestedItineraries.budget.push({
-        dayNumber: day,
-        morning: dayActivities?.budget?.morning?.[0] || null,
-        afternoon: dayActivities?.budget?.afternoon?.[0] || null,
-        evening: dayActivities?.budget?.evening?.[0] || null,
-        morningOptions: dayActivities?.budget?.morning || [],
-        afternoonOptions: dayActivities?.budget?.afternoon || [],
-        eveningOptions: dayActivities?.budget?.evening || []
-      });
-
-      // Medium tier (includes budget options as fallback)
-      suggestedItineraries.medium.push({
-        dayNumber: day,
-        morning: dayActivities?.medium?.morning?.[0] || dayActivities?.budget?.morning?.[0] || null,
-        afternoon: dayActivities?.medium?.afternoon?.[0] || dayActivities?.budget?.afternoon?.[0] || null,
-        evening: dayActivities?.medium?.evening?.[0] || dayActivities?.budget?.evening?.[0] || null,
-        morningOptions: [...(dayActivities?.medium?.morning || []), ...(dayActivities?.budget?.morning || [])],
-        afternoonOptions: [...(dayActivities?.medium?.afternoon || []), ...(dayActivities?.budget?.afternoon || [])],
-        eveningOptions: [...(dayActivities?.medium?.evening || []), ...(dayActivities?.budget?.evening || [])]
-      });
-
-      // Premium tier (includes medium and budget options as fallback)
-      suggestedItineraries.premium.push({
-        dayNumber: day,
-        morning: dayActivities?.premium?.morning?.[0] || dayActivities?.medium?.morning?.[0] || dayActivities?.budget?.morning?.[0] || null,
-        afternoon: dayActivities?.premium?.afternoon?.[0] || dayActivities?.medium?.afternoon?.[0] || dayActivities?.budget?.afternoon?.[0] || null,
-        evening: dayActivities?.premium?.evening?.[0] || dayActivities?.medium?.evening?.[0] || dayActivities?.budget?.evening?.[0] || null,
-        morningOptions: [...(dayActivities?.premium?.morning || []), ...(dayActivities?.medium?.morning || []), ...(dayActivities?.budget?.morning || [])],
-        afternoonOptions: [...(dayActivities?.premium?.afternoon || []), ...(dayActivities?.medium?.afternoon || []), ...(dayActivities?.budget?.afternoon || [])],
-        eveningOptions: [...(dayActivities?.premium?.evening || []), ...(dayActivities?.medium?.evening || []), ...(dayActivities?.budget?.evening || [])]
-      });
-    }
-
-    res.json({
-      activities: transformedActivities,
-        suggestedItineraries,
-        schedule: optimizedSchedule.schedule.map((day: any) => ({
-          dayNumber: day.dayNumber,
-          planningLogic: day.dayPlanningLogic,
-          activities: day.activities
-        })),
-        categoryDistribution: optimizedSchedule.categoryDistribution
-    });
+    return res.json(response);
 
   } catch (error) {
-    logger.error('Failed to generate activities', { error: error instanceof Error ? error.message : 'Unknown error' });
-      res.status(500).json({
-        error: error instanceof Error ? error.message : 'Failed to generate activities',
-        timestamp: new Date().toISOString()
-      });
-    }
-  } catch (error) {
-    logger.error('Failed to generate activities', {
-      error: error instanceof Error ? error.message : 'Unknown error',
-      stack: error instanceof Error ? error.stack : undefined
-    });
-    res.status(500).json({
+    logger.error('[Activities] Generation failed:', error);
+    return res.status(500).json({
       error: error instanceof Error ? error.message : 'Failed to generate activities',
       timestamp: new Date().toISOString()
     });
   }
 });
 
+function countActivitiesByDay(activities: any[]): Record<number, number> {
+  return activities.reduce((acc: Record<number, number>, activity) => {
+    const day = activity.dayNumber || 1;
+    acc[day] = (acc[day] || 0) + 1;
+    return acc;
+  }, {});
+}
+
+function countActivitiesByTimeSlot(activities: any[]): Record<string, number> {
+  return activities.reduce((acc: Record<string, number>, activity) => {
+    const slot = activity.timeSlot || 'unspecified';
+    acc[slot] = (acc[slot] || 0) + 1;
+    return acc;
+  }, {});
+}
+
+// Update ensureMinimumActivities function to be more efficient
+async function ensureMinimumActivities(
+  activities: GeneratedActivity[], 
+  minPerSlot: number,
+  totalDays: number,
+  preferences?: {
+    travelStyle: string;
+    pacePreference: string;
+    interests: string[];
+    accessibility: string[];
+    dietaryRestrictions: string[];
+  }
+): Promise<GeneratedActivity[]> {
+  const result = [...activities];
+  const timeSlots = ['morning', 'afternoon', 'evening'];
+  
+  // Calculate how many additional activities we need
+  const neededActivities = new Map<string, number>();
+  const grouped = activities.reduce((acc: any, activity) => {
+    const day = activity.dayNumber;
+    const slot = activity.timeSlot;
+    if (!acc[day]) acc[day] = {};
+    if (!acc[day][slot]) acc[day][slot] = [];
+    acc[day][slot].push(activity);
+    return acc;
+  }, {});
+
+  // Calculate total needed activities
+  let totalNeeded = 0;
+  for (let day = 1; day <= totalDays; day++) {
+    for (const slot of timeSlots) {
+      const currentCount = (grouped[day]?.[slot] || []).length;
+      if (currentCount < minPerSlot) {
+        const needed = minPerSlot - currentCount;
+        const key = `${day}-${slot}`;
+        neededActivities.set(key, needed);
+        totalNeeded += needed;
+      }
+    }
+  }
+
+  if (totalNeeded === 0) {
+    return result;
+  }
+
+  // Make a single call to generate all needed activities
+  logger.info(`Generating ${totalNeeded} additional activities in a single call`, {
+    neededBySlot: Object.fromEntries(neededActivities),
+    preferences
+  });
+
+  const perplexityService = getPerplexityClient();
+  const additionalActivities = await perplexityService.generateActivities({
+    destination: activities[0]?.location || '',
+    days: totalDays,
+    budget: activities[0]?.price?.amount || 100,
+    currency: activities[0]?.price?.currency || 'USD',
+    preferences: preferences || {
+      travelStyle: 'moderate',
+      pacePreference: 'moderate',
+      interests: Array.from(new Set(activities.map(a => a.category))),
+      accessibility: [],
+      dietaryRestrictions: []
+    }
+  });
+
+  if (additionalActivities?.activities) {
+    // Sort additional activities by preference score
+    const scoredActivities = additionalActivities.activities.map(activity => {
+      const score = preferences ? calculateActivityScore(activity, preferences) : { preferenceScore: 0, matchedPreferences: [], scoringReason: '' };
+      return {
+        ...activity,
+        selected: false,
+        preferenceScore: score.preferenceScore,
+        matchedPreferences: score.matchedPreferences,
+        scoringReason: score.scoringReason
+      };
+    }).sort((a, b) => (b.preferenceScore || 0) - (a.preferenceScore || 0));
+
+    // Distribute activities to needed slots
+    for (const [key, needed] of neededActivities) {
+      const [day, slot] = key.split('-');
+      const dayNum = parseInt(day);
+      const availableActivities = scoredActivities
+        .filter(a => !a.assigned && a.timeSlot === slot)
+        .slice(0, needed);
+
+      if (availableActivities.length > 0) {
+        availableActivities.forEach(activity => {
+          activity.assigned = true;
+          activity.dayNumber = dayNum;
+          result.push(activity);
+        });
+
+        logger.info(`Added ${availableActivities.length} activities for day ${day}, ${slot}`, {
+          activities: availableActivities.map(a => ({
+            name: a.name,
+            preferenceScore: a.preferenceScore,
+            matchedPreferences: a.matchedPreferences
+          }))
+        });
+      }
+    }
+  }
+
+  return result;
+}
+
 router.post('/enrich', async (req, res) => {
   try {
-    const { activityId, productCode, name } = req.body;
+    const { activityId, productCode, name, destination } = req.body;
 
     logger.info('[Activities API] Enriching activity:', {
       activityId,
       productCode,
-      name
+      name,
+      destination
     });
 
     if (!productCode) {
       logger.warn('[Activities API] No product code provided');
       return res.status(400).json({ error: 'Product code is required' });
+    }
+
+    if (!destination) {
+      logger.warn('[Activities API] No destination provided');
+      return res.status(400).json({ error: 'Destination is required' });
     }
 
     const viatorClient = new ViatorService(process.env.VIATOR_API_KEY || '');
@@ -660,7 +594,7 @@ router.post('/enrich', async (req, res) => {
           ...bestMatch,
           name: name || bestMatch.name,
           referenceUrl: bestMatch.referenceUrl
-        });
+        }, destination);
       } else {
         const basicActivity = searchResults[0];
         
@@ -669,7 +603,7 @@ router.post('/enrich', async (req, res) => {
           ...basicActivity,
           name: name || basicActivity.name,
           referenceUrl: `https://www.viator.com/tours/${productCode}`
-        });
+        }, destination);
       }
 
       res.json(enrichedActivity);

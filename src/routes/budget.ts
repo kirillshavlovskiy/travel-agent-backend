@@ -8,6 +8,8 @@ import { AirlineInfo } from '../types.js';
 import { AmadeusSegment, AmadeusFare, AmadeusFareDetail, AmadeusFlightOffer } from '../types/amadeus.js';
 import { AIRCRAFT_CODES as AIRCRAFT_CODE_MAP } from '../constants/aircraft.js';
 import { normalizeCategory } from '../constants/categories.js';
+import { API_CONFIG } from '../config/api.js';
+import { logger } from '../utils/logger.js';
 
 const router = Router();
 const amadeusService = new AmadeusService();
@@ -156,6 +158,28 @@ interface TransformedRequest {
   endDate: string;
   flightData?: AmadeusFlightOffer[];
   days: number;
+}
+
+interface BudgetCalculationParams {
+  departureLocation: {
+    code: string;
+    label: string;
+  };
+  destinations: Array<{
+    code: string;
+    label: string;
+  }>;
+  startDate: string;
+  endDate: string;
+  travelers: number;
+  budgetLimit: number;
+  preferences?: {
+    travelStyle: string;
+    pacePreference: string;
+    interests: string[];
+    accessibility: string[];
+    dietaryRestrictions: string[];
+  };
 }
 
 // Get available cities and airports
@@ -853,5 +877,101 @@ router.post('/generate-activity', async (req: Request, res: Response) => {
     });
   }
 });
+
+async function generateActivities(params: BudgetCalculationParams) {
+  try {
+    const start = new Date(params.startDate);
+    const end = new Date(params.endDate);
+    const days = Math.ceil(Math.abs(end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24)) + 1;
+
+    logger.info('Preparing activity generation request:', {
+      startDate: params.startDate,
+      endDate: params.endDate,
+      calculatedDays: days
+    });
+
+    const requestBody = {
+      destination: params.destinations[0]?.label,
+      days,
+      startDate: params.startDate,
+      endDate: params.endDate,
+      budget: params.budgetLimit,
+      currency: 'USD',
+      preferences: params.preferences || {
+        travelStyle: 'moderate',
+        pacePreference: 'balanced',
+        interests: ['sightseeing', 'culture'],
+        accessibility: [],
+        dietaryRestrictions: []
+      },
+      flightTimes: {
+        arrival: params.startDate,
+        departure: params.endDate
+      }
+    };
+
+    logger.info('Generating activities with params:', requestBody);
+
+    const response = await fetch(`${API_CONFIG.BACKEND_URL}/api/activities/generate`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(requestBody)
+    });
+
+    if (!response.ok) {
+      const error = await response.json();
+      logger.error('Activities generation failed:', {
+        status: response.status,
+        error,
+        requestBody
+      });
+      throw new Error(error.message || 'Failed to generate activities');
+    }
+
+    const result = await response.json();
+    logger.info('Activities generated successfully:', {
+      activityCount: result.activities?.length || 0,
+      hasItineraries: !!result.suggestedItineraries
+    });
+
+    return {
+      activities: result.activities || [],
+      suggestedItineraries: result.suggestedItineraries || {}
+    };
+  } catch (error) {
+    logger.error('Activity generation failed:', error);
+    return { activities: [], suggestedItineraries: {} };
+  }
+}
+
+export async function calculateBudget(params: BudgetCalculationParams) {
+  try {
+    // Start both budget calculation and activity generation in parallel
+    const [budgetResult, activitiesResult] = await Promise.all([
+      // Your existing budget calculation logic here
+      calculateBaseBudget(params),
+      // Generate activities
+      generateActivities(params)
+    ]);
+
+    return {
+      ...budgetResult,
+      activities: activitiesResult.activities,
+      suggestedItineraries: activitiesResult.suggestedItineraries
+    };
+  } catch (error) {
+    logger.error('Budget calculation failed:', error);
+    throw error;
+  }
+}
+
+async function calculateBaseBudget(params: BudgetCalculationParams) {
+  // Your existing budget calculation logic here
+  return {
+    // ... budget calculation results
+  };
+}
 
 export default router; 

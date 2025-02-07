@@ -4,6 +4,7 @@ import { PrismaClient } from '@prisma/client';
 import { cities } from '../data/cities.js';
 import { airports } from '../data/airports.js';
 import { AmadeusService } from '../services/amadeus.js';
+import { normalizeCategory } from '../constants/categories.js';
 const router = Router();
 const amadeusService = new AmadeusService();
 const agent = new VacationBudgetAgent(amadeusService);
@@ -651,13 +652,17 @@ router.post('/generate-activity', async (req, res) => {
         if (!destination || !dayNumber || !timeSlot || !tier) {
             return res.status(400).json({ error: 'Missing required parameters' });
         }
-        console.log('[Budget API] Calling VacationBudgetAgent to generate activity...');
+        const mappedCategory = normalizeCategory(category || '');
+        console.log('[Budget API] Calling VacationBudgetAgent to generate activity with mapped category:', {
+            originalCategory: category,
+            mappedCategory
+        });
         const activity = await agent.generateSingleActivity({
             destination,
             dayNumber,
             timeOfDay: timeSlot,
             budget: tier,
-            category,
+            category: mappedCategory,
             userPreferences,
             existingActivities,
             flightTimes,

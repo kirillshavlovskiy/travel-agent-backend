@@ -256,16 +256,16 @@ export class VacationBudgetAgent {
         }
     }
     constructPrompt(params) {
-        const { category, request } = params;
-        return `Search for available activities in ${request.destinations[0].label} with these requirements:
+        const { destination, category, userPreferences } = params;
+        return `Search for available activities in ${destination} with these requirements:
 
 SEARCH PROCESS:
 1. Search both platforms:
-   - Search Viator.com for ${request.destinations[0].label} activities
-   - Search GetYourGuide.com for ${request.destinations[0].label} activities
+   - Search Viator.com for ${destination} activities
+   - Search GetYourGuide.com for ${destination} activities
 2. Sort by: Best Rating
-3. Find at least 3 activities from each platform${request.category ? `\n4. Focus on category: ${request.category}` : ''}
-${request.userPreferences ? `\nAdditional preferences: ${request.userPreferences}` : ''}
+3. Find at least 3 activities from each platform${category ? `\n4. Focus on category: ${category}` : ''}
+${userPreferences ? `\nAdditional preferences: ${userPreferences}` : ''}
 
 VALIDATION RULES:
 1. Activities must have valid booking URLs
@@ -566,9 +566,18 @@ For each activity you find, include:
         });
         const result = await this.querySingleActivity(prompt);
         if (result.error) {
-            return this.createPlaceholderActivity();
+            return this.createPlaceholderActivity({
+                dayNumber: params.dayNumber,
+                timeSlot: params.timeOfDay,
+                tier: params.budget
+            });
         }
-        return result;
+        return {
+            ...result,
+            dayNumber: params.dayNumber,
+            timeSlot: params.timeOfDay,
+            tier: params.budget
+        };
     }
     getPriceRangeForTier(budget, currency) {
         const budgetNum = typeof budget === 'string' ? this.getBudgetAmount(budget) : budget;
@@ -627,18 +636,38 @@ For each activity you find, include:
             totalActivities: validActivities.length,
             days
         });
-        // Group activities by day and time slot
-        const activityGroups = validActivities.reduce((acc, activity) => {
-            // Skip activities without proper booking details
-            if (!this.hasValidBookingDetails(activity)) {
-                logger.warn('Skipping activity without valid booking details', {
+        // First, filter out activities without essential fields and deduplicate
+        const uniqueActivities = validActivities.reduce((acc, activity) => {
+            // Check only essential fields
+            if (!activity.name || !activity.price) {
+                logger.warn('Skipping activity missing essential fields', {
                     name: activity.name,
-                    provider: activity.bookingDetails?.provider
+                    hasPrice: !!activity.price
                 });
                 return acc;
             }
-            const day = activity.day || activity.dayNumber || activity.day_number;
-            const timeSlot = activity.preferred_time_of_day || 'morning';
+            // Check for duplicates (same name and price)
+            const isDuplicate = acc.some(existing => existing.name.toLowerCase() === activity.name.toLowerCase() &&
+                Math.abs(existing.price - activity.price) < 0.01);
+            if (!isDuplicate) {
+                acc.push(activity);
+            }
+            else {
+                logger.debug('Filtered out duplicate activity', {
+                    name: activity.name,
+                    price: activity.price
+                });
+            }
+            return acc;
+        }, []);
+        logger.debug('After deduplication', {
+            originalCount: validActivities.length,
+            uniqueCount: uniqueActivities.length
+        });
+        // Group activities by day and time slot
+        const activityGroups = uniqueActivities.reduce((acc, activity) => {
+            const day = activity.day || activity.dayNumber || activity.day_number || 1;
+            const timeSlot = activity.preferred_time_of_day || activity.timeSlot || 'morning';
             const tier = this.determineActivityTier(activity.price);
             if (!acc[day]) {
                 acc[day] = {
@@ -648,11 +677,28 @@ For each activity you find, include:
                 };
             }
             if (acc[day][timeSlot] && acc[day][timeSlot][tier]) {
-                acc[day][timeSlot][tier].push(activity);
+                acc[day][timeSlot][tier].push({
+                    ...activity,
+                    // Add default booking details - these will be enriched later by Viator API
+                    bookingDetails: {
+                        provider: 'Viator',
+                        referenceUrl: `https://www.viator.com/tours/${activity.name.replace(/[^a-zA-Z0-9]+/g, '-')}`,
+                        cancellationPolicy: 'Free cancellation up to 24 hours before the activity starts',
+                        instantConfirmation: true,
+                        mobileTicket: true,
+                        languages: ['English'],
+                        minParticipants: 1,
+                        maxParticipants: 50,
+                        pickupIncluded: tier === 'premium',
+                        pickupLocation: tier === 'premium' ? 'Your hotel' : '',
+                        accessibility: 'Standard',
+                        restrictions: []
+                    }
+                });
             }
             return acc;
         }, {});
-        // Ensure each day has activities in each time slot and tier
+        // Transform activities
         const transformedActivities = [];
         for (let day = 1; day <= days; day++) {
             const dayActivities = activityGroups[day] || {
@@ -660,24 +706,23 @@ For each activity you find, include:
                 afternoon: { budget: [], medium: [], premium: [] },
                 evening: { budget: [], medium: [], premium: [] }
             };
-            // Process each time slot
             ['morning', 'afternoon', 'evening'].forEach((timeSlot) => {
-                // Ensure at least one activity per tier in each time slot
                 ['budget', 'medium', 'premium'].forEach((tier) => {
                     const activities = dayActivities[timeSlot][tier];
                     if (activities.length === 0) {
-                        // Create placeholder activity if none exists
-                        const placeholder = this.createPlaceholderActivity(day, timeSlot, tier);
+                        const placeholder = this.createPlaceholderActivity({
+                            dayNumber: day,
+                            timeSlot,
+                            tier
+                        });
                         activities.push(placeholder);
                     }
-                    // Add all activities from this tier and time slot
                     activities.forEach((activity) => {
                         transformedActivities.push({
                             ...activity,
                             dayNumber: day,
                             timeSlot,
-                            tier,
-                            bookingDetails: this.ensureValidBookingDetails(activity.bookingDetails, tier)
+                            tier
                         });
                     });
                 });
@@ -690,8 +735,9 @@ For each activity you find, include:
         return transformedActivities;
     }
     hasValidBookingDetails(activity) {
-        const isViatorUrl = (url) => /^https:\/\/www\.viator\.com\/tours\/[^/]+\/[^/]+\/d\d+-[a-zA-Z0-9]+$/.test(url);
-        const isGetYourGuideUrl = (url) => /^https:\/\/www\.getyourguide\.com\/[^/]+\/[^/]+-t\d+$/.test(url);
+        // Less strict URL validation - just check if it's a valid URL for the provider
+        const isViatorUrl = (url) => url.includes('viator.com');
+        const isGetYourGuideUrl = (url) => url.includes('getyourguide.com');
         const isValid = activity.bookingDetails &&
             (activity.bookingDetails.provider === 'Viator' || activity.bookingDetails.provider === 'GetYourGuide') &&
             activity.bookingDetails.referenceUrl &&

@@ -10,3 +10,19 @@ export interface TripPreferences {
     departure: string;
   };
 } 
+
+export interface TravelPreferences {
+  travelStyle: string;
+  pacePreference: string;
+  interests: string[];
+  accessibility: string[];
+  dietaryRestrictions: string[];
+}
+
+export const DEFAULT_PREFERENCES: TravelPreferences = {
+  travelStyle: 'medium',
+  pacePreference: 'moderate',
+  interests: ['Cultural & Historical', 'Nature & Adventure'],
+  accessibility: [],
+  dietaryRestrictions: []
+}; 

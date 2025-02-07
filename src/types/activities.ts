@@ -1,29 +1,57 @@
+export type TimeSlotKey = 'morning' | 'afternoon' | 'evening';
+
+export interface Price {
+  amount: number;
+  currency: string;
+}
+
+export interface TimeSlotVerification {
+  isAvailable: boolean;
+  recommendedTimeSlot: TimeSlotKey;
+  availableTimeSlots: TimeSlotKey[];
+  operatingHours?: string;
+  bestTimeToVisit?: string;
+}
+
 export interface Activity {
+  id?: string;
   name: string;
-  description: string;
-  timeSlot: string;
-  category: string;
-  dayNumber: number;
-  duration: number;
-  selected: boolean;
-  location: string;
+  description?: string;
+  duration?: number | { min: number; max: number };
+  price?: Price;
   rating?: number;
   numberOfReviews?: number;
-  price: {
-    amount: number;
-    currency: string;
-  };
+  category: string;
+  location?: string;
   address?: string;
   images?: string[];
   referenceUrl?: string;
   bookingInfo?: {
-    productCode: string;
-    cancellationPolicy: string;
-    instantConfirmation: boolean;
-    mobileTicket: boolean;
-    languages: string[];
-    minParticipants: number;
-    maxParticipants: number;
+    cancellationPolicy?: string;
+    instantConfirmation?: boolean;
+    mobileTicket?: boolean;
+    languages?: string[];
+    minParticipants?: number;
+    maxParticipants?: number;
+  };
+  timeSlot: TimeSlotKey;
+  dayNumber: number;
+  commentary?: string;
+  itineraryHighlight?: string;
+  keyHighlights?: string[];
+  selected?: boolean;
+  tier?: string;
+  preferenceScore?: number;
+  matchedPreferences?: string[];
+  date?: string;
+  timeSlotVerification?: TimeSlotVerification;
+  bestTimeToVisit?: string;
+  availability?: {
+    isAvailable: boolean;
+    operatingHours?: string;
+    availableTimeSlots: TimeSlotKey[];
+    bestTimeToVisit?: string;
+    nextAvailableDate?: string;
   };
 }
 
