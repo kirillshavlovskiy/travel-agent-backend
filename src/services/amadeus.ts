@@ -553,28 +553,33 @@ export class AmadeusService {
             originLocationCode: segment.originLocationCode,
             destinationLocationCode: segment.destinationLocationCode,
             departureDateTimeRange: {
-              date: segment.departureDate
+              date: new Date(segment.departureDate).toISOString().split('T')[0] // Format as YYYY-MM-DD
             }
           })),
-          travelers: Array.from({ length: params.adults }, (_, i) => ({
-            id: String(i + 1),
-            travelerType: 'ADULT'
-          })),
+          travelers: [{
+            id: '1',
+            travelerType: 'ADULT',
+            fareOptions: ['STANDARD']
+          }],
           sources: ['GDS'],
           searchCriteria: {
-            maxFlightOffers: params.max || 100,
+            maxFlightOffers: params.max || 50,
             flightFilters: {
               cabinRestrictions: [{
                 cabin: params.travelClass,
                 coverage: 'MOST_SEGMENTS',
-                originDestinationIds: params.segments.map((_, i) => String(i + 1))
-              }]
+                originDestinationIds: ['1']
+              }],
+              carrierRestrictions: {
+                excludedCarrierCodes: []
+              }
             }
           }
         };
 
         logger.info('Making Amadeus API call with formatted params:', searchParams);
 
+        // Ensure proper content type header
         const response = await this.amadeus.shopping.flightOffersSearch.post(
           JSON.stringify(searchParams)
         );
@@ -597,28 +602,46 @@ export class AmadeusService {
 
         return results.data || [];
       } catch (error) {
-        logger.error('Failed to search flights', {
-          error: error instanceof Error ? {
-            name: error.name,
-            message: error.message,
-            stack: error.stack,
-            code: (error as any).code,
-            response: {
-              status: (error as any)?.response?.statusCode,
-              statusText: (error as any)?.response?.statusText,
-              errors: (error as any)?.response?.result?.errors,
-              data: (error as any)?.response?.data,
-              request: {
-                method: (error as any)?.response?.request?.method,
-                path: (error as any)?.response?.request?.path
-              }
+        // Enhanced error logging
+        const errorDetails = error instanceof Error ? {
+          name: error.name,
+          message: error.message,
+          stack: error.stack,
+          code: (error as any).code,
+          response: {
+            status: (error as any)?.response?.statusCode,
+            statusText: (error as any)?.response?.statusText,
+            errors: (error as any)?.response?.result?.errors,
+            data: (error as any)?.response?.data,
+            body: (error as any)?.response?.body,
+            request: {
+              method: (error as any)?.response?.request?.method,
+              path: (error as any)?.response?.request?.path,
+              headers: (error as any)?.response?.request?.headers,
+              params: params
             }
-          } : 'Unknown error',
+          }
+        } : 'Unknown error';
+
+        logger.error('Failed to search flights', {
+          error: errorDetails,
           params,
           amadeusInitialized: !!this.amadeus,
-          hasShoppingAPI: !!(this.amadeus as any)?.shopping?.flightOffersSearch?.post
+          hasShoppingAPI: !!(this.amadeus as any)?.shopping?.flightOffersSearch?.post,
+          rawError: error
         });
-        return []; // Return empty array instead of throwing
+
+        // If it's an Amadeus API error with specific error details, throw those
+        if ((error as any)?.response?.result?.errors) {
+          throw new Error(JSON.stringify((error as any).response.result.errors));
+        }
+
+        // If it's a rate limit error, throw that specifically
+        if ((error as any)?.response?.statusCode === 429) {
+          throw new Error('Rate limit exceeded. Please try again later.');
+        }
+
+        return []; // Return empty array for other errors
       }
     });
   }

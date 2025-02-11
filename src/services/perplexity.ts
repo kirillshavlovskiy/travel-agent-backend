@@ -533,20 +533,60 @@ Return ONLY a valid JSON array of activities.`;
           const cleanedJson = jsonContent
             .replace(/[\u0000-\u001F]+/g, '') // Remove control characters
             .replace(/,\s*([}\]])/g, '$1') // Remove trailing commas
+            .replace(/([{,]\s*)'([^']+)':/g, '$1"$2":') // Convert single quotes to double quotes for property names
             .replace(/([{,]\s*)(\w+):/g, '$1"$2":') // Ensure property names are quoted
-            .replace(/\n/g, ' ') // Remove newlines
-            .replace(/\s+/g, ' ') // Normalize spaces
+            .replace(/\n/g, ' ') // Replace newlines with spaces
+            .replace(/\s+/g, ' ') // Normalize multiple spaces to single space
+            .replace(/:\s*'([^']*?)'/g, ':"$1"') // Convert single quoted values to double quotes
+            .replace(/([{,]\s*)"([^"]+)":\s*"([^"]*)"/g, '$1"$2":"$3"') // Normalize spacing around colons
             .trim();
 
-          logger.debug('[Activity Generation] Attempting to parse cleaned JSON:', { cleanedJson });
-          parsedContent = JSON.parse(cleanedJson);
+            logger.debug('[Activity Generation] Attempting to parse cleaned JSON:', { cleanedJson });
+            parsedContent = JSON.parse(cleanedJson);
         }
 
-        // Handle both array and object with activities field
-        const activities = Array.isArray(parsedContent) ? parsedContent : parsedContent.activities || [];
-        
+        // Validate the structure
+        if (!parsedContent.activities) {
+          // Try to extract activities from schedule structure
+          if (parsedContent.schedule?.[0]?.activities) {
+            parsedContent = {
+              activities: parsedContent.schedule[0].activities
+            };
+          } else if (Array.isArray(parsedContent.schedule)) {
+            parsedContent = {
+              activities: parsedContent.schedule
+            };
+          } else {
+            logger.error('[Perplexity] Invalid response structure:', parsedContent);
+            throw new Error('Invalid response structure');
+          }
+        }
+
+        if (!Array.isArray(parsedContent.activities)) {
+          logger.error('[Perplexity] Activities is not an array:', parsedContent.activities);
+          throw new Error('Activities is not an array');
+        }
+
+        // Add valid activities to the collection
+        const validActivities = parsedContent.activities.filter(activity => 
+          activity && 
+          activity.name &&
+          activity.category &&
+          activity.timeSlot
+        );
+
+        if (validActivities.length === 0) {
+          logger.warn('[Perplexity] No valid activities found in response');
+          throw new Error('No valid activities found in response');
+        }
+
+        logger.info('[Perplexity] Found valid activities:', {
+          count: validActivities.length,
+          categories: validActivities.map(a => a.category)
+        });
+
         // Add duration validation and normalization
-        const normalizedActivities = activities.map(activity => {
+        const normalizedActivities = validActivities.map(activity => {
           // Normalize duration to minutes
           let duration = 0;
           if (activity.duration) {
@@ -815,8 +855,13 @@ Return ONLY a valid JSON object without any explanatory text or markdown formatt
             const cleanedJson = jsonContent
               .replace(/[\u0000-\u001F]+/g, '') // Remove control characters
               .replace(/,\s*([}\]])/g, '$1') // Remove trailing commas
+              .replace(/([{,]\s*)'([^']+)':/g, '$1"$2":') // Convert single quotes to double quotes for property names
               .replace(/([{,]\s*)(\w+):/g, '$1"$2":') // Ensure property names are quoted
-          .trim();
+              .replace(/\n/g, ' ') // Replace newlines with spaces
+              .replace(/\s+/g, ' ') // Normalize multiple spaces to single space
+              .replace(/:\s*'([^']*?)'/g, ':"$1"') // Convert single quoted values to double quotes
+              .replace(/([{,]\s*)"([^"]+)":\s*"([^"]*)"/g, '$1"$2":"$3"') // Normalize spacing around colons
+              .trim();
 
             try {
               parsedContent = JSON.parse(cleanedJson);
@@ -827,13 +872,46 @@ Return ONLY a valid JSON object without any explanatory text or markdown formatt
           }
           
           // Validate the structure
-          if (!parsedContent.activities || !Array.isArray(parsedContent.activities)) {
-            console.error('[Perplexity] Invalid response structure: missing activities array');
+          if (!parsedContent.activities) {
+            // Try to extract activities from schedule structure
+            if (parsedContent.schedule?.[0]?.activities) {
+              parsedContent = {
+                activities: parsedContent.schedule[0].activities
+              };
+            } else if (Array.isArray(parsedContent.schedule)) {
+              parsedContent = {
+                activities: parsedContent.schedule
+              };
+            } else {
+              logger.error('[Perplexity] Invalid response structure:', parsedContent);
+              continue;
+            }
+          }
+
+          if (!Array.isArray(parsedContent.activities)) {
+            logger.error('[Perplexity] Activities is not an array:', parsedContent.activities);
             continue;
           }
 
           // Add valid activities to the collection
-          allActivities = [...allActivities, ...parsedContent.activities.map((activity: ViatorActivity) => ({
+          const validActivities = parsedContent.activities.filter(activity => 
+            activity && 
+            activity.name &&
+            activity.category &&
+            activity.timeSlot
+          );
+
+          if (validActivities.length === 0) {
+            logger.warn('[Perplexity] No valid activities found in response');
+            continue;
+          }
+
+          logger.info('[Perplexity] Found valid activities:', {
+            count: validActivities.length,
+            categories: validActivities.map(a => a.category)
+          });
+
+          allActivities = [...allActivities, ...validActivities.map((activity: ViatorActivity) => ({
             ...activity,
             selected: false
           }))];
@@ -959,7 +1037,12 @@ IMPORTANT: You MUST provide detailed commentary and highlights that explicitly r
         const cleanedJson = jsonContent
           .replace(/[\u0000-\u001F]+/g, '') // Remove control characters
           .replace(/,\s*([}\]])/g, '$1') // Remove trailing commas
+          .replace(/([{,]\s*)'([^']+)':/g, '$1"$2":') // Convert single quotes to double quotes for property names
           .replace(/([{,]\s*)(\w+):/g, '$1"$2":') // Ensure property names are quoted
+          .replace(/\n/g, ' ') // Replace newlines with spaces
+          .replace(/\s+/g, ' ') // Normalize multiple spaces to single space
+          .replace(/:\s*'([^']*?)'/g, ':"$1"') // Convert single quoted values to double quotes
+          .replace(/([{,]\s*)"([^"]+)":\s*"([^"]*)"/g, '$1"$2":"$3"') // Normalize spacing around colons
           .trim();
 
         logger.debug('[Enrichment] Attempting to parse cleaned JSON:', { cleanedJson });
