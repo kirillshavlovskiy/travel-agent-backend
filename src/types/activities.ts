@@ -14,44 +14,98 @@ export interface TimeSlotVerification {
 }
 
 export interface Activity {
-  id?: string;
+  id: string;
   name: string;
-  description?: string;
-  duration?: number | { min: number; max: number };
-  price?: Price;
-  rating?: number;
-  numberOfReviews?: number;
-  category: string;
-  location?: string;
-  address?: string;
-  images?: string[];
-  referenceUrl?: string;
-  bookingInfo?: {
-    cancellationPolicy?: string;
-    instantConfirmation?: boolean;
-    mobileTicket?: boolean;
-    languages?: string[];
-    minParticipants?: number;
-    maxParticipants?: number;
+  description: string;
+  duration: string;
+  price: {
+    amount: number;
+    currency: string;
   };
-  timeSlot: TimeSlotKey;
+  category: string;
+  location: {
+    name: string;
+    address: string;
+    coordinates?: {
+      latitude: number;
+      longitude: number;
+    };
+    type: string;
+  };
+  timeSlot: string;
   dayNumber: number;
-  commentary?: string;
-  itineraryHighlight?: string;
-  keyHighlights?: string[];
-  selected?: boolean;
-  tier?: string;
-  preferenceScore?: number;
-  matchedPreferences?: string[];
-  date?: string;
-  timeSlotVerification?: TimeSlotVerification;
-  bestTimeToVisit?: string;
-  availability?: {
-    isAvailable: boolean;
-    operatingHours?: string;
-    availableTimeSlots: TimeSlotKey[];
-    bestTimeToVisit?: string;
-    nextAvailableDate?: string;
+  startTime: string;
+  rating: number;
+  numberOfReviews: number;
+  isVerified: boolean;
+  verificationStatus: 'verified' | 'pending' | 'unverified';
+  tier: 'budget' | 'standard' | 'premium' | 'luxury';
+  referenceUrl: string;
+  productCode: string;
+  images: string[];
+  contactInfo: {
+    phone: string;
+    website: string;
+    address: string;
+  };
+  preferenceScore: number;
+  matchedPreferences: string[];
+  scoringReason: string;
+  selected: boolean;
+  suggestedOption: boolean;
+  viatorDetails: {
+    productUrl: string;
+    bookingUrl: string;
+    highlights: string[];
+    inclusions: string[];
+    exclusions: string[];
+    cancellationPolicy: string;
+    reviews: {
+      rating: number;
+      totalReviews: number;
+      breakdown: Array<{
+        stars: number;
+        count: number;
+      }>;
+    };
+    itinerary: {
+      type: string;
+      duration: string;
+      items: Array<{
+        description: string;
+        duration: number;
+        location?: {
+          name: string;
+          address: string;
+          coordinates?: {
+            latitude: number;
+            longitude: number;
+          };
+        };
+      }>;
+    };
+    meetingPoint: {
+      name: string;
+      address: string;
+      coordinates: {
+        latitude: number;
+        longitude: number;
+      } | null;
+    };
+  };
+  bookingInfo: {
+    provider: string;
+    productCode: string;
+    cancellationPolicy: string;
+    instantConfirmation: boolean;
+    mobileTicket: boolean;
+    languages: string[];
+    minParticipants: number;
+    maxParticipants: number;
+    pickupIncluded: boolean;
+    pickupLocation: string;
+    accessibility: string[];
+    restrictions: string[];
   };
 }
 

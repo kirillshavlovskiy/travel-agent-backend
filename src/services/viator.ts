@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { logger } from '../utils/logger';
+import { logger, logViator } from '../utils/logger';
 import { ACTIVITY_CATEGORIES, determineCategoryFromDescription, getPreferredTimeSlot, getTypicalDuration } from '../constants/categories.js';
 
 // Update the interface for category determination
@@ -1075,35 +1075,43 @@ export class ViatorService {
     }
 }
 
-  private extractLocationInfo(productDetails: any): any {
-          const logistics = productDetails.logistics || {};
-          const travelerPickup = logistics.travelerPickup || {};
-          const start = logistics.start?.[0] || {};
-          const end = logistics.end?.[0] || {};
-
-    // Extract all possible location information
-    const address = start.location?.address || 
-                   productDetails.location?.address || 
-                   travelerPickup.location?.address || 
-                   '';
-
-    const meetingPoints = [
-        ...(start.description ? [start.description] : []),
-        ...(end.description ? [`End point: ${end.description}`] : []),
-        ...(travelerPickup.additionalInfo ? [travelerPickup.additionalInfo] : []),
-        ...(start.location?.address ? [start.location.address] : [])
-    ].filter(Boolean);
-
-    const startingLocations = [
-        ...(start.description ? [start.description] : []),
-        ...(end.description ? [`End point: ${end.description}`] : [])
-    ].filter(Boolean);
-
-    return {
-        address,
-        meetingPoints,
-        startingLocations
+  private extractLocationInfo(productDetails: any) {
+    const location = {
+      address: productDetails.location?.address || '',
+      coordinates: productDetails.location?.coordinates || null,
+      cityName: productDetails.location?.cityName || '',
+      countryName: productDetails.location?.countryName || '',
+      locationId: productDetails.location?.locationId || '',
+      areaId: productDetails.location?.areaId || '',
+      meetingPoint: {
+        coordinates: productDetails.meetingPoint?.coordinates || null,
+        address: productDetails.meetingPoint?.address || '',
+        description: productDetails.meetingPoint?.description || '',
+        directions: productDetails.meetingPoint?.directions || ''
+      },
+      endPoint: {
+        coordinates: productDetails.endPoint?.coordinates || null,
+        address: productDetails.endPoint?.address || '',
+        description: productDetails.endPoint?.description || '',
+        directions: productDetails.endPoint?.directions || ''
+      }
     };
+
+    logger.debug('[Viator] Extracted location info:', { location });
+    return location;
+  }
+
+  private extractImages(productDetails: any): any[] {
+    if (!productDetails || !productDetails.images) {
+        return [];
+    }
+
+    return productDetails.images.map((img: any) => ({
+        url: img.url || '',
+        caption: img.caption || '',
+        provider: img.provider || 'Viator',
+        isHero: !!img.isHero
+    })).filter((img: any) => img.url);
   }
 
   private determineCategory(info: CategoryDetermination): string {
@@ -1185,102 +1193,191 @@ export class ViatorService {
     }
   }
 
-  async enrichActivityDetails(activity: any): Promise<any> {
-    try {
-        const productCode = activity.bookingInfo?.productCode || activity.referenceUrl?.match(/\-([a-zA-Z0-9]+)(?:\?|$)/)?.[1];
-
-        if (!productCode) {
-            throw new Error('No product code available for activity');
-        }
-
-        const [productDetails, availabilitySchedule] = await Promise.all([
-            this.getProductDetails(productCode),
-            this.getAvailabilitySchedule(productCode)
-        ]);
-        
-        if (!productDetails) {
-            throw new Error('Product details not available');
-        }
-
-        // Extract all necessary information
-                const locationInfo = this.extractLocationInfo(productDetails);
-                const reviews = this.extractReviews(productDetails);
-                const images = this.extractImages(productDetails);
-                const itinerary = this.extractItineraryInfo(productDetails);
-                const whatIncluded = this.extractIncludedItems(productDetails);
-                const meetingAndPickup = this.extractMeetingPoint(productDetails);
-                const additionalInfo = this.extractAdditionalInfo(productDetails);
-
-        return {
-            details: {
-                name: productDetails.title,
-                overview: productDetails.description,
-                location: productDetails.location?.address || '',
-                duration: {
-                    fixedDurationInMinutes: productDetails.duration?.fixedDurationInMinutes || 0
-                },
-                whatIncluded,
-                meetingAndPickup,
-                additionalInfo,
-                highlights: productDetails.highlights || []
-            },
-            location: locationInfo,
-            images,
-            reviews,
-            itinerary,
-                    bookingInfo: {
-                availability: availabilitySchedule
-            }
-        };
-    } catch (error) {
-        logger.error('Activity enrichment failed', {
-            activityName: activity.name,
-            error: error instanceof Error ? error.message : 'Unknown error'
-        });
-        throw error;
-    }
-  }
-
-  private extractReviews(productDetails: any): any {
-    if (!productDetails.reviews) return undefined;
-
-    const reviewStats = productDetails.reviews.ratingBreakdown?.map((stat: any) => ({
-        rating: stat.stars,
-        count: stat.count,
-        percentage: ((stat.count / productDetails.reviews.totalReviews) * 100).toFixed(1)
-    })) || [];
-
+  private constructViatorUrls(productCode: string, images: any[] = []) {
     return {
-        items: (productDetails.reviews.items || []).map((review: any) => ({
-              author: review.author,
-              date: review.date,
-              rating: review.rating,
-              title: review.title,
-            text: review.text || review.content,
-              helpful: review.helpful
-        })),
-        reviewCountTotals: {
-            averageRating: productDetails.reviews.rating || 0,
-            totalReviews: productDetails.reviews.totalReviews || 0,
-            stats: reviewStats,
-            sources: productDetails.reviews.sources || []
-        }
+        productUrl: `https://www.viator.com/tours/${productCode}`,
+        bookingUrl: `https://www.viator.com/tours/${productCode}/booking`,
+        mainImageUrl: images?.[0]?.url || 'https://www.viator.com/img/placeholder.jpg',
+        mobileUrl: `https://m.viator.com/tours/${productCode}`,
+        deepLink: `viator://product/${productCode}`
     };
   }
 
-  private extractImages(productDetails: any): any[] {
-    if (!productDetails.images) return [];
+  async enrichActivityDetails(activity: any): Promise<any> {
+    try {
+        // Extract product code from activity
+        const productCode = this.extractProductCode(activity) || `VIATOR-${Date.now()}`;
+        
+        // Get product details and availability schedule
+        const [productDetails, availabilitySchedule] = await Promise.all([
+            this.getProductDetails(productCode).catch(() => null),
+            this.getAvailabilitySchedule(productCode).catch(() => null)
+        ]);
 
-    return productDetails.images.map((image: any) => ({
-        variants: (image.variants || []).map((variant: any) => ({
-            url: variant.url,
-            width: variant.width,
-            height: variant.height
-        }))
-    }));
+        logger.info(`[Viator] Enriching activity: ${activity.name} with product code: ${productCode}`);
+
+        // Get URLs
+        const urls = this.constructViatorUrls(productCode, productDetails?.images);
+
+        // Base enriched activity with fallback values
+        const enrichedActivity = {
+            ...activity,
+            productCode,
+            provider: 'Viator',
+            bookingStatus: productDetails ? 'available' : 'unavailable',
+            enrichmentStatus: productDetails ? 'success' : 'partial',
+            rating: productDetails?.rating || activity.rating || 4.0,
+            reviews: this.extractReviews(productDetails),
+            images: this.extractImages(productDetails),
+            location: this.extractLocation(productDetails),
+            includedItems: this.extractIncludedItems(productDetails),
+            excludedItems: this.extractExcludedItems(productDetails),
+            meetingPoint: this.extractMeetingPoint(productDetails),
+            itinerary: this.extractItinerary(productDetails),
+            bookingInfo: this.extractBookingInfo(productDetails, availabilitySchedule),
+            cancellationPolicy: this.extractCancellationPolicy(productDetails),
+            accessibility: this.extractAccessibility(productDetails),
+            urls,
+            viatorDetails: {
+                productUrl: urls.productUrl,
+                bookingUrl: urls.bookingUrl,
+                mainImageUrl: urls.mainImageUrl,
+                mobileUrl: urls.mobileUrl,
+                deepLink: urls.deepLink,
+                highlights: productDetails?.highlights || [],
+                inclusions: productDetails?.includedItems?.included || [],
+                exclusions: productDetails?.includedItems?.excluded || [],
+                cancellationPolicy: productDetails?.cancellationPolicy?.description || 'Standard cancellation policy',
+                reviews: {
+                    rating: productDetails?.rating || 0,
+                    totalReviews: productDetails?.numberOfReviews || 0,
+                    breakdown: productDetails?.reviews?.breakdown || []
+                },
+                itinerary: productDetails?.itinerary || {
+                    type: 'STANDARD',
+                    duration: activity.duration,
+                    items: []
+                },
+                meetingPoint: productDetails?.meetingPoint || {
+                    name: 'To be confirmed',
+                    address: 'To be confirmed',
+                    coordinates: null
+                }
+            }
+        };
+
+        // Log success
+        if (productDetails) {
+            logger.info(`[Viator] Successfully enriched activity: ${activity.name}`, {
+                productCode,
+                urls
+            });
+        } else {
+            logger.warn(`[Viator] Partially enriched activity: ${activity.name} - product details not available`);
+        }
+        
+        return enrichedActivity;
+    } catch (error) {
+        logger.error(`[Viator] Failed to enrich activity: ${activity.name}`, error);
+        
+        // Return activity with basic enrichment and default URLs
+        const urls = this.constructViatorUrls('', []);
+        return {
+            ...activity,
+            provider: 'Viator',
+            enrichmentStatus: 'failed',
+            bookingStatus: 'unavailable',
+            urls,
+            viatorDetails: {
+                productUrl: urls.productUrl,
+                bookingUrl: urls.bookingUrl,
+                mainImageUrl: urls.mainImageUrl,
+                mobileUrl: urls.mobileUrl,
+                deepLink: urls.deepLink
+            }
+        };
+    }
+}
+
+  private extractProductCode(activity: any): string | null {
+    // Try to extract from existing URL if present
+    if (activity.urls?.product) {
+      const match = activity.urls.product.match(/tours\/([A-Z0-9]+)/);
+      if (match) return match[1];
+    }
+    
+    // Try to extract from description if present
+    if (activity.description) {
+      const match = activity.description.match(/Viator tour code: ([A-Z0-9]+)/i);
+      if (match) return match[1];
+    }
+    
+    return null;
+  }
+
+  private determineTier(price: number): string {
+    if (price <= 50) return 'budget';
+    if (price <= 150) return 'standard';
+    if (price <= 300) return 'premium';
+    return 'luxury';
+  }
+
+  private extractReviews(productDetails: any): any {
+    if (!productDetails) {
+        return {
+            rating: 0,
+            totalReviews: 0,
+            breakdown: [],
+            featured: []
+        };
+    }
+
+    return {
+        rating: productDetails.reviews?.rating || 0,
+        totalReviews: productDetails.reviews?.totalReviews || 0,
+        breakdown: productDetails.reviews?.breakdown || [],
+        featured: productDetails.reviews?.featured || []
+    };
+  }
+
+  private extractLocation(productDetails: any): ViatorLocationInfo {
+    if (!productDetails) {
+        return {
+            address: '',
+            coordinates: null,
+            meetingPoint: null
+        };
+    }
+
+    return {
+        address: productDetails.location?.address || '',
+        coordinates: productDetails.location?.coordinates || null,
+        meetingPoint: productDetails.meetingPoint || null
+    };
   }
 
   private extractIncludedItems(productDetails: any): any {
+    if (!productDetails) {
+        return {
+            included: [],
+            excluded: []
+        };
+    }
+
+    return {
+        included: productDetails.inclusions?.map((item: any) => item.description) || [],
+        excluded: productDetails.exclusions?.map((item: any) => item.description) || []
+    };
+  }
+
+  private extractExcludedItems(productDetails: any): any {
+    if (!productDetails) {
+        return {
+            included: [],
+            excluded: []
+        };
+    }
+
     return {
         included: productDetails.inclusions?.map((item: any) => item.description) || [],
         excluded: productDetails.exclusions?.map((item: any) => item.description) || []
@@ -1288,72 +1385,108 @@ export class ViatorService {
   }
 
   private extractMeetingPoint(productDetails: any): any {
-    const logistics = productDetails.logistics || {};
-    const start = logistics.start?.[0] || {};
-    const end = logistics.end?.[0] || {};
+    if (!productDetails) {
+        return {
+            meetingPoint: null,
+            endPoint: null
+        };
+    }
 
     return {
-        meetingPoint: {
-            name: start.location?.name || 'Meeting Point',
-            address: start.location?.address || '',
-            details: start.description || '',
-            coordinates: start.location?.coordinates,
-            googleMapsUrl: start.location?.googleMapsUrl
-        },
-        endPoint: end.description || undefined
+        meetingPoint: productDetails.meetingPoint || null,
+        endPoint: productDetails.endPoint || null
     };
   }
 
-  private extractAdditionalInfo(productDetails: any): any {
-    return {
-        confirmation: productDetails.bookingInfo?.confirmation || 'Immediate confirmation',
-        accessibility: productDetails.accessibility || [],
-        restrictions: productDetails.restrictions || [],
-        maxTravelers: productDetails.maxTravelers || 99,
-        cancellationPolicy: {
-            description: productDetails.cancellationPolicy?.description || 'Standard cancellation policy',
-            refundEligibility: productDetails.cancellationPolicy?.refundEligibility || []
-        }
-    };
-  }
+  private extractItinerary(productDetails: any): any {
+    if (!productDetails || !productDetails.itinerary) {
+        return {
+            itineraryType: 'STANDARD',
+            skipTheLine: false,
+            privateTour: false,
+            duration: {
+                fixedDurationInMinutes: 0
+            },
+            itineraryItems: [],
+            days: []
+        };
+    }
 
-  private extractItineraryInfo(productDetails: any): any {
     const itinerary = productDetails.itinerary;
-    if (!itinerary) return undefined;
-
     return {
-        itineraryType: itinerary.itineraryType,
+        itineraryType: itinerary.itineraryType || 'STANDARD',
         skipTheLine: itinerary.skipTheLine || false,
         privateTour: itinerary.privateTour || false,
         maxTravelersInSharedTour: itinerary.maxTravelersInSharedTour,
         duration: {
-            fixedDurationInMinutes: itinerary.duration?.fixedDurationInMinutes
+            fixedDurationInMinutes: itinerary.duration?.fixedDurationInMinutes || 0
         },
         itineraryItems: (itinerary.itineraryItems || []).map((item: any) => ({
             pointOfInterestLocation: {
-      location: {
-                    name: item.pointOfInterestLocation?.location?.name,
-                    address: item.pointOfInterestLocation?.location?.address,
+                location: {
+                    name: item.pointOfInterestLocation?.location?.name || '',
+                    address: item.pointOfInterestLocation?.location?.address || '',
                     coordinates: item.pointOfInterestLocation?.location?.coordinates
                 },
                 attractionId: item.pointOfInterestLocation?.attractionId
             },
             duration: {
-                fixedDurationInMinutes: item.duration?.fixedDurationInMinutes
+                fixedDurationInMinutes: item.duration?.fixedDurationInMinutes || 0
             },
             passByWithoutStopping: item.passByWithoutStopping || false,
             admissionIncluded: item.admissionIncluded || 'NOT_APPLICABLE',
             description: item.description || ''
         })),
-        days: itinerary.days?.map((day: any) => ({
-            dayNumber: day.dayNumber,
-        title: day.title,
+        days: (itinerary.days || []).map((day: any) => ({
+            dayNumber: day.dayNumber || 1,
+            title: day.title || '',
             items: day.items || [],
-            accommodations: day.accommodations,
-            foodAndDrinks: day.foodAndDrinks
+            accommodations: day.accommodations || [],
+            foodAndDrinks: day.foodAndDrinks || []
         }))
     };
 }
+
+  private extractBookingInfo(productDetails: any, availabilitySchedule: any): any {
+    return {
+      provider: 'Viator',
+      productCode: productDetails.productCode,
+      cancellationPolicy: productDetails.cancellationPolicy?.description || 'Free cancellation available',
+      instantConfirmation: true,
+      mobileTicket: true,
+      languages: productDetails.bookingInfo?.languages || ['English'],
+      minParticipants: productDetails.bookingInfo?.minParticipants || 1,
+      maxParticipants: productDetails.bookingInfo?.maxParticipants || 999,
+      pickupIncluded: this.extractMeetingPoint(productDetails)?.meetingPoint?.name?.toLowerCase().includes('pickup') || false,
+      pickupLocation: this.extractMeetingPoint(productDetails)?.meetingPoint?.name || '',
+      accessibility: productDetails.accessibility || [],
+      restrictions: productDetails.restrictions || []
+    };
+  }
+
+  private extractCancellationPolicy(productDetails: any): any {
+    if (!productDetails) {
+        return {
+            description: 'Standard cancellation policy',
+            refundable: true,
+            deadline: '24h before'
+        };
+    }
+
+    return {
+        description: productDetails.cancellationPolicy?.description || 'Standard cancellation policy',
+        refundable: productDetails.cancellationPolicy?.refundable !== false,
+        deadline: productDetails.cancellationPolicy?.deadline || '24h before'
+    };
+  }
+
+  private extractAccessibility(productDetails: any): string[] {
+    if (!productDetails) {
+        return [];
+    }
+
+    return productDetails.accessibility || [];
+  }
 
   private buildActivityQuery(params: GenerateActivitiesParams): string {
     const { destination, preferences } = params;

@@ -756,30 +756,79 @@ export class AmadeusService {
     }
   }
 
-  async searchLocations(keyword: string): Promise<AmadeusLocation[]> {
+  async searchLocations(keyword: string): Promise<any[]> {
     try {
-      logger.info('Searching locations with keyword', { keyword });
-
+      console.info('Searching locations with keyword', { keyword });
+      
+      // Try exact IATA code match first
+      if (keyword.length === 3) {
+        const response = await this.amadeus.referenceData.locations.get({
+          keyword,
+          subType: Amadeus.location.AIRPORT
+        });
+        
+        if (response.data && response.data.length > 0) {
+          console.info('Location search successful', { count: response.data.length });
+          return response.data;
+        }
+      }
+      
+      // Try city search if IATA code not found
       const response = await this.amadeus.referenceData.locations.get({
         keyword,
-        subType: 'CITY,AIRPORT',
-        view: 'LIGHT'
+        subType: Amadeus.location.CITY
       });
-
-      const locations = JSON.parse(response.body);
       
-      logger.info('Location search successful', {
-        count: locations.data?.length || 0
-      });
-
-      return locations.data || [];
+      if (response.data && response.data.length > 0) {
+        console.info('Location search successful', { count: response.data.length });
+        return response.data;
+      }
+      
+      // If no results found, try to find from our local database
+      const localResult = this.findLocationInLocalDb(keyword);
+      if (localResult) {
+        console.info('Found location in local database', { location: localResult });
+        return [localResult];
+      }
+      
+      console.warn('No locations found for keyword', { keyword });
+      return [];
     } catch (error) {
-      logger.error('Failed to search locations', {
-        error: error instanceof Error ? error.message : 'Unknown error',
-        stack: error instanceof Error ? error.stack : undefined,
-        keyword
-      });
+      console.error('Failed to search locations', { error, keyword });
+      
+      // Try to find from local database as fallback
+      const localResult = this.findLocationInLocalDb(keyword);
+      if (localResult) {
+        console.info('Found location in local database after API error', { location: localResult });
+        return [localResult];
+      }
+      
       throw error;
     }
+  }
+
+  private findLocationInLocalDb(keyword: string): any {
+    // Common airport/city codes
+    const commonLocations: Record<string, any> = {
+      'NYC': {
+        iataCode: 'JFK',
+        name: 'John F Kennedy International',
+        address: {
+          cityName: 'New York',
+          countryName: 'United States of America'
+        }
+      },
+      'LON': {
+        iataCode: 'LHR',
+        name: 'London Heathrow',
+        address: {
+          cityName: 'London',
+          countryName: 'United Kingdom'
+        }
+      }
+      // Add more common locations as needed
+    };
+    
+    return commonLocations[keyword.toUpperCase()];
   }
 } 
