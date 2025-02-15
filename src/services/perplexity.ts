@@ -16,6 +16,13 @@ interface PerplexityResponse {
   commentary?: string;
   itineraryHighlight?: string;
   activities?: Activity[];
+  schedule?: Array<{
+    dayNumber: number;
+    activities: Activity[];
+    dayPlanningLogic?: string;
+  }>;
+  tripOverview?: string;
+  activityFitNotes?: string;
 }
 
 interface PerplexityErrorResponse {
@@ -50,12 +57,12 @@ interface ViatorActivity {
   };
 }
 
-interface Activity {
+export interface Activity {
   id?: string;
   name: string;
   description?: string;
-  duration?: number | { min: number; max: number };
-  price?: number;
+  duration?: number | { min: number; max: number } | string;
+  price?: number | { amount: number; currency: string };
   rating?: number;
   numberOfReviews?: number;
   category: string;
@@ -69,6 +76,7 @@ interface Activity {
   tier?: string;
   preferenceScore?: number;
   matchedPreferences?: string[];
+  scoringReason?: string;
   date?: string;
   timeSlotVerification?: TimeSlotVerification;
   availability?: {
@@ -77,6 +85,9 @@ interface Activity {
     availableTimeSlots: string[];
     bestTimeToVisit?: string;
     nextAvailableDate?: string;
+  };
+  bookingInfo?: {
+    productCode?: string;
   };
 }
 
@@ -118,10 +129,18 @@ interface CategoryDistribution {
   };
 }
 
-function determinePriceTier(price: number): typeof PRICE_TIERS[number] {
-  if (price <= 50) return 'budget';
-  if (price <= 150) return 'medium';
+function determinePriceTier(price: number | { amount: number; currency: string; } | undefined): typeof PRICE_TIERS[number] {
+  if (!price) return 'budget';
+  const amount = typeof price === 'number' ? price : price.amount;
+  if (amount <= 50) return 'budget';
+  if (amount <= 150) return 'medium';
   return 'premium';
+}
+
+function getActivityPrice(price: number | { amount: number; currency: string } | undefined): number {
+  if (typeof price === 'number') return price;
+  if (typeof price === 'object' && price !== null) return price.amount;
+  return 0;
 }
 
 function calculateDistribution(activities: Activity[]): CategoryDistribution {
@@ -144,7 +163,7 @@ function calculateDistribution(activities: Activity[]): CategoryDistribution {
   // Count activities by category and tier
   activities.forEach((activity: Activity) => {
     const category = normalizeCategory(activity.category);
-    const tier = determinePriceTier(activity.price || 0);
+    const tier = determinePriceTier(activity.price);
     
     if (distribution[category]) {
       distribution[category].count++;
@@ -178,7 +197,7 @@ function balanceActivities(activities: Activity[]): Activity[] {
   // Group activities by category and tier
   const groupedActivities = cleanedActivities.reduce((acc: Record<string, Record<typeof PRICE_TIERS[number], Activity[]>>, activity: Activity) => {
     const category = activity.category;
-    const tier = determinePriceTier(activity.price || 0);
+    const tier = determinePriceTier(activity.price);
     
     if (!acc[category]) {
       acc[category] = { budget: [], medium: [], premium: [] };
@@ -351,7 +370,7 @@ function shouldPreferActivity(activity1: Activity, activity2: Activity): boolean
   }
 
   // If both rating and reviews are equal, prefer the cheaper option
-  return (activity1.price || 0) < (activity2.price || 0);
+  return getActivityPrice(activity1.price) < getActivityPrice(activity2.price);
 }
 
 function countCategories(activities: Activity[]): Record<string, number> {
@@ -361,8 +380,7 @@ function countCategories(activities: Activity[]): Record<string, number> {
   }, {} as Record<string, number>);
 }
 
-// Add new interface for time slot verification
-interface TimeSlotVerification {
+export interface TimeSlotVerification {
   isAvailable: boolean;
   recommendedTimeSlot: string;
   availableTimeSlots: string[];
@@ -375,6 +393,17 @@ interface DayHighlight {
   highlight: string;
   theme: string;
   mainAttractions: string[];
+}
+
+export interface PerplexityApiResponse {
+  schedule?: Array<{
+    dayNumber: number;
+    activities: Activity[];
+    dayPlanningLogic?: string;
+  }>;
+  activities?: Activity[];
+  tripOverview?: string;
+  activityFitNotes?: string;
 }
 
 export class PerplexityService {
@@ -433,11 +462,17 @@ ${Object.entries(categoryWeights)
   .join('\n')}
 
 TIME SLOTS:
-${preferences.pacePreference === 'relaxed' ? 
-  '- Flexible timing with breaks between activities\n- Later starts in the morning' :
-  preferences.pacePreference === 'intensive' ? 
-  '- Efficient scheduling to maximize activities\n- Earlier starts to fit more in' :
-  '- Balanced timing with reasonable breaks\n- Standard activity start times'}
+- Morning (9:00-13:00): Provide 2-3 cultural & historical options
+- Afternoon (14:00-18:00): Provide 2-3 nature & adventure options
+- Evening (19:00-23:00): Provide 2-3 food & entertainment options
+
+CRITICAL REQUIREMENTS:
+1. For EACH time slot, provide MULTIPLE activity options (2-3 per slot)
+2. Ensure activities in the same time slot are different but complementary
+3. Include variety in difficulty levels and prices within each time slot
+4. Consider travel time between potential activities
+5. Account for opening hours and seasonal factors
+6. Suggest alternatives for popular attractions
 
 BALANCE REQUIREMENTS:
 - CRITICAL: Suggest DIFFERENT types of activities - avoid similar or duplicate experiences
@@ -510,22 +545,23 @@ Return ONLY a valid JSON array of activities.`;
 
       const content = response.data.choices[0]?.message?.content;
       if (!content) {
-        throw new Error('No content in Perplexity response');
+        logger.error('[Activity Generation] No content in Perplexity response');
+        return [];
       }
 
       logger.debug('[Activity Generation] Raw content received:', { contentLength: content.length });
 
       try {
         // First try to parse the content directly
-        let parsedContent;
+        let parsedContent: any;
         try {
           parsedContent = JSON.parse(content);
         } catch (e) {
           // If direct parsing fails, try to extract JSON from markdown or text
-          const jsonMatch = content.match(/```json\s*([\s\S]*?)\s*```/) || content.match(/\{[\s\S]*\}/);
+          const jsonMatch = content.match(/```json\s*([\s\S]*?)\s*```/) || content.match(/\{[\s\S]*\}|\[[\s\S]*\]/);
           if (!jsonMatch) {
             logger.error('[Activity Generation] No JSON content found in response');
-            throw new Error('No JSON content found in response');
+            return [];
           }
 
           const jsonContent = jsonMatch[1] || jsonMatch[0];
@@ -533,75 +569,55 @@ Return ONLY a valid JSON array of activities.`;
           const cleanedJson = jsonContent
             .replace(/[\u0000-\u001F]+/g, '') // Remove control characters
             .replace(/,\s*([}\]])/g, '$1') // Remove trailing commas
-            .replace(/([{,]\s*)'([^']+)':/g, '$1"$2":') // Convert single quotes to double quotes for property names
             .replace(/([{,]\s*)(\w+):/g, '$1"$2":') // Ensure property names are quoted
-            .replace(/\n/g, ' ') // Replace newlines with spaces
-            .replace(/\s+/g, ' ') // Normalize multiple spaces to single space
-            .replace(/:\s*'([^']*?)'/g, ':"$1"') // Convert single quoted values to double quotes
-            .replace(/([{,]\s*)"([^"]+)":\s*"([^"]*)"/g, '$1"$2":"$3"') // Normalize spacing around colons
+            .replace(/\n/g, ' ') // Remove newlines
+            .replace(/\s+/g, ' ') // Normalize spaces
             .trim();
 
-            logger.debug('[Activity Generation] Attempting to parse cleaned JSON:', { cleanedJson });
-            parsedContent = JSON.parse(cleanedJson);
+          logger.debug('[Activity Generation] Attempting to parse cleaned JSON:', { cleanedJson });
+          parsedContent = JSON.parse(cleanedJson);
         }
 
-        // Validate the structure
-        if (!parsedContent.activities) {
-          // Try to extract activities from schedule structure
-          if (parsedContent.schedule?.[0]?.activities) {
-            parsedContent = {
-              activities: parsedContent.schedule[0].activities
-            };
-          } else if (Array.isArray(parsedContent.schedule)) {
-            parsedContent = {
-              activities: parsedContent.schedule
-            };
-          } else {
-            logger.error('[Perplexity] Invalid response structure:', parsedContent);
-            throw new Error('Invalid response structure');
-          }
+        // Initialize activities array
+        let activities: Activity[] = [];
+
+        // Handle different response formats
+        if (Array.isArray(parsedContent)) {
+          activities = parsedContent;
+        } else if (parsedContent.activities && Array.isArray(parsedContent.activities)) {
+          activities = parsedContent.activities;
+        } else if (parsedContent.schedule && Array.isArray(parsedContent.schedule)) {
+          activities = parsedContent.schedule.reduce((acc: Activity[], day: any) => {
+            if (day.activities && Array.isArray(day.activities)) {
+              acc.push(...day.activities);
+            }
+            return acc;
+          }, []);
         }
 
-        if (!Array.isArray(parsedContent.activities)) {
-          logger.error('[Perplexity] Activities is not an array:', parsedContent.activities);
-          throw new Error('Activities is not an array');
+        if (!activities || activities.length === 0) {
+          logger.error('[Activity Generation] No valid activities found in response');
+          return [];
         }
-
-        // Add valid activities to the collection
-        const validActivities = parsedContent.activities.filter(activity => 
-          activity && 
-          activity.name &&
-          activity.category &&
-          activity.timeSlot
-        );
-
-        if (validActivities.length === 0) {
-          logger.warn('[Perplexity] No valid activities found in response');
-          throw new Error('No valid activities found in response');
-        }
-
-        logger.info('[Perplexity] Found valid activities:', {
-          count: validActivities.length,
-          categories: validActivities.map(a => a.category)
-        });
-
+        
         // Add duration validation and normalization
-        const normalizedActivities = validActivities.map(activity => {
+        const normalizedActivities = activities.map((activity: Activity) => {
           // Normalize duration to minutes
           let duration = 0;
           if (activity.duration) {
             if (typeof activity.duration === 'number') {
               duration = activity.duration;
             } else if (typeof activity.duration === 'object') {
-              if (activity.duration.fixedDurationInMinutes) {
-                duration = activity.duration.fixedDurationInMinutes;
-              } else if (activity.duration.min && activity.duration.max) {
-                duration = Math.floor((activity.duration.min + activity.duration.max) / 2);
+              const durationObj = activity.duration as { min?: number; max?: number; fixedDurationInMinutes?: number };
+              if (durationObj.fixedDurationInMinutes) {
+                duration = durationObj.fixedDurationInMinutes;
+              } else if (durationObj.min && durationObj.max) {
+                duration = Math.floor((durationObj.min + durationObj.max) / 2);
               }
             } else if (typeof activity.duration === 'string') {
-              // Try to extract number of hours/minutes from string
-              const hourMatch = activity.duration.match(/(\d+)\s*(?:hours?|hrs?)/i);
-              const minuteMatch = activity.duration.match(/(\d+)\s*(?:minutes?|mins?)/i);
+              const durationStr = activity.duration as string;
+              const hourMatch = durationStr.match(/(\d+)\s*(?:hours?|hrs?)/i);
+              const minuteMatch = durationStr.match(/(\d+)\s*(?:minutes?|mins?)/i);
               
               if (hourMatch) {
                 duration += parseInt(hourMatch[1]) * 60;
@@ -612,30 +628,39 @@ Return ONLY a valid JSON array of activities.`;
             }
           }
 
+          // Normalize price
+          const price = typeof activity.price === 'number' 
+            ? { amount: activity.price, currency: 'USD' }
+            : activity.price || { amount: 0, currency: 'USD' };
+
           return {
             ...activity,
+            id: activity.id || `${activity.name}-${activity.timeSlot}-${Date.now()}`.toLowerCase().replace(/\s+/g, '-'),
             duration: duration || 120, // Default to 2 hours if no duration specified
-            durationDisplay: duration ? 
-              duration >= 60 ? 
-                `${Math.floor(duration / 60)} hour${Math.floor(duration / 60) !== 1 ? 's' : ''}${duration % 60 ? ` ${duration % 60} minutes` : ''}` : 
-                `${duration} minutes` :
-              '2 hours'
+            price,
+            selected: false,
+            category: activity.category || 'Cultural & Historical'
           };
         });
         
-        logger.info('[Activity Generation] Successfully parsed activities', {
+        logger.info('[Activity Generation] Successfully processed activities', {
           totalActivities: normalizedActivities.length,
           firstActivity: normalizedActivities[0]?.name
         });
 
         return normalizedActivities;
       } catch (error) {
-        logger.error('[Activity Generation] Failed to parse Perplexity response', { content, error });
-        throw new Error('Invalid JSON response from Perplexity');
+        logger.error('[Activity Generation] Failed to parse Perplexity response', { 
+          error: error instanceof Error ? error.message : 'Unknown error',
+          content 
+        });
+        return [];
       }
     } catch (error) {
-      logger.error('[Activity Generation] Error calling Perplexity API', error);
-      throw error;
+      logger.error('[Activity Generation] Error calling Perplexity API', {
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
+      return [];
     }
   }
 
@@ -648,15 +673,47 @@ Return ONLY a valid JSON array of activities.`;
       logger.debug('Sending query to Perplexity API', { query });
       const activities = await this.makePerplexityRequests(query);
       
+      if (!activities || activities.length === 0) {
+        logger.error('No activities generated from initial request');
+        return {
+          success: false,
+          error: 'Failed to generate activities',
+          activities: [],
+          metadata: {
+            originalCount: 0,
+            finalCount: 0,
+            enrichedCount: 0,
+            daysPlanned: params.days,
+            destination: params.destination
+          }
+        };
+      }
+      
       // 2. Clean and balance activities
       const balancedActivities = await this.cleanAndBalanceActivities(activities, params);
+      
+      if (!balancedActivities || balancedActivities.length === 0) {
+        logger.error('No activities after balancing');
+        return {
+          success: false,
+          error: 'Failed to balance activities',
+          activities: [],
+          metadata: {
+            originalCount: activities.length,
+            finalCount: 0,
+            enrichedCount: 0,
+            daysPlanned: params.days,
+            destination: params.destination
+          }
+        };
+      }
       
       // Log category distribution before enrichment
       const distribution = countCategories(balancedActivities);
       logger.info('Category distribution after balancing:', distribution);
       
       // 3. Enrich activities with detailed information
-      const enrichedActivities = [];
+      const enrichedActivities: Activity[] = [];
       for (const activity of balancedActivities) {
         const date = this.getDateForActivity(activity.dayNumber, params);
         const enrichedActivity = await this.enrichActivity(activity, params, date);
@@ -675,16 +732,39 @@ Return ONLY a valid JSON array of activities.`;
         }
       }
 
+      if (!enrichedActivities || enrichedActivities.length === 0) {
+        logger.error('No activities after enrichment');
+        return {
+          success: false,
+          error: 'Failed to enrich activities',
+          activities: [],
+          metadata: {
+            originalCount: activities.length,
+            finalCount: balancedActivities.length,
+            enrichedCount: 0,
+            daysPlanned: params.days,
+            destination: params.destination
+          }
+        };
+      }
+
       // 4. Generate daily summaries
       const dailySummaries = await this.generateDailyHighlights(enrichedActivities);
+      if (!dailySummaries) {
+        logger.warn('Failed to generate daily summaries');
+      }
 
       // 5. Generate day highlights
       const dayHighlights = this.generateDayHighlights(enrichedActivities);
+      if (!dayHighlights) {
+        logger.warn('Failed to generate day highlights');
+      }
 
-      return {
+      const response = {
+        success: true,
         activities: enrichedActivities,
-        dailySummaries,
-        dayHighlights,
+        dailySummaries: dailySummaries || [],
+        dayHighlights: dayHighlights || [],
         distribution,
         metadata: {
           originalCount: activities.length,
@@ -695,24 +775,45 @@ Return ONLY a valid JSON array of activities.`;
           availabilityChanges: enrichedActivities.filter(a => a.availability?.nextAvailableDate).length
         }
       };
+
+      logger.info('Successfully generated activities response', {
+        activitiesCount: enrichedActivities.length,
+        hasSummaries: !!dailySummaries,
+        hasHighlights: !!dayHighlights,
+        metadata: response.metadata
+      });
+
+      return response;
+
     } catch (error) {
-      logger.error('Failed to generate activities', error);
-      throw error;
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+      logger.error('Failed to generate activities', {
+        error: errorMessage,
+        stack: error instanceof Error ? error.stack : undefined
+      });
+      
+      return {
+        success: false,
+        error: errorMessage,
+        activities: [],
+        metadata: {
+          originalCount: 0,
+          finalCount: 0,
+          enrichedCount: 0,
+          daysPlanned: params.days,
+          destination: params.destination
+        }
+      };
     }
   }
 
   // For initial activity planning - uses sonar model
-  async chat(query: string, options?: { web_search?: boolean; temperature?: number; max_tokens?: number }) {
+  async chat(query: string, options?: { web_search?: boolean; temperature?: number; max_tokens?: number }): Promise<PerplexityApiResponse> {
     try {
       if (!this.apiKey) {
         throw new Error('Perplexity API key is not configured');
       }
 
-      const chunks = Math.ceil(7 / 3); // Process 3 days at a time
-      let allActivities: any[] = [];
-
-      for (let chunk = 0; chunk < chunks; chunk++) {
-        console.log('[Perplexity] Sending request with model: sonar');
         const response = await axios.post(
           this.baseUrl,
           {
@@ -720,106 +821,14 @@ Return ONLY a valid JSON array of activities.`;
             messages: [
               {
                 role: 'system',
-                content: `You are a travel activity expert specializing in Viator bookings.
-
-ACTIVITY CATEGORIES (MUST be evenly distributed):
-1. Cultural & Historical (25% of activities):
-   - Museums, palaces, monuments
-   - Historical tours, archaeological sites
-   - Architecture walks
-
-2. Nature & Adventure (25% of activities):
-   - Parks and gardens
-   - Hiking and biking tours
-   - Adventure sports
-   - Wildlife experiences
-   - Water activities
-
-3. Food & Entertainment (25% of activities):
-   - Food tours and tastings
-   - Cooking classes
-   - Shows and performances
-   - Evening entertainment
-   - Local dining experiences
-
-4. Lifestyle & Local (25% of activities):
-   - Shopping tours
-   - Local markets
-   - Wellness activities
-   - Photography spots
-   - Artisan workshops
-
-GEOGRAPHIC OPTIMIZATION:
-- Group activities in the same area for each day
-- Consider the main tourist areas and attractions in the destination
-- Plan routes to minimize travel time between activities
-- Use the most popular tourist zones in the destination
-
-TIME SLOTS:
-- Morning (9:00-13:00): Cultural & Nature activities
-- Afternoon (14:00-18:00): Adventure & Shopping activities
-- Evening (19:00-23:00): Food & Entertainment activities
-
-BALANCE REQUIREMENTS:
-- Maximum 1 museum/historical site per day
-- At least 1 outdoor/nature activity per day
-- One unique food experience per day
-- Balance activities across different categories
-- Include local specialties and unique experiences
-
-CRITICAL RULES:
-1. Return ONLY 3-4 activities per request to avoid response truncation
-2. ONLY suggest activities that you can find on Viator.com
-3. ALL URLs must be real, active Viator booking links that you verify
-4. Copy exact prices, descriptions, and details from Viator listings
-5. Do not make up or guess any information - only use what you find on Viator
-6. Ensure activities in the same day are geographically close
-7. Account for travel time between locations
-8. Don't schedule overlapping activities
-9. Consider seasonal/weather appropriate activities
-10. Maintain STRICT category distribution (25% each)
-
-Return ONLY a valid JSON object without any explanatory text or markdown formatting, following this structure:
-{
-  "activities": [
-    {
-      "name": "EXACT name from Viator listing",
-      "description": "EXACT description from Viator",
-      "duration": hours (number),
-      "price": exact price in USD (number),
-      "category": "Cultural & Historical|Nature & Adventure|Food & Entertainment|Lifestyle & Local",
-      "location": "EXACT location name from Viator",
-      "address": "EXACT address from Viator",
-      "zone": "Area name in the destination",
-      "keyHighlights": ["EXACT highlights from Viator listing"],
-      "openingHours": "EXACT operating hours from Viator",
-      "rating": exact Viator rating (number),
-      "numberOfReviews": exact number of Viator reviews (number),
-      "timeSlot": "morning|afternoon|evening",
-      "dayNumber": number,
-      "referenceUrl": "EXACT Viator booking URL",
-      "images": ["EXACT image URLs from Viator"],
-      "selected": false,
-      "commentary": "2-3 sentences explaining why this activity is recommended and what makes it special",
-      "itineraryHighlight": "1-2 sentences explaining how this activity fits into the day's flow",
-      "bookingInfo": {
-        "cancellationPolicy": "EXACT policy from Viator",
-        "instantConfirmation": true/false,
-        "mobileTicket": true/false,
-        "languages": ["available languages"],
-        "minParticipants": number,
-        "maxParticipants": number
-      }
-    }
-  ]
-}`
+              content: 'You are a helpful travel planning assistant. For each time slot (morning, afternoon, evening), provide multiple activity options to allow for selection and optimization. Return ONLY valid JSON.'
               },
               {
                 role: 'user',
                 content: query
               }
             ],
-            temperature: options?.temperature ?? 0.1,
+          temperature: options?.temperature ?? 0.4, // Slightly increased for more variety
             max_tokens: options?.max_tokens ?? 8000,
             web_search: true
           },
@@ -831,107 +840,236 @@ Return ONLY a valid JSON object without any explanatory text or markdown formatt
           }
         );
 
-        console.log('[Perplexity] Raw response:', JSON.stringify(response.data, null, 2));
-        
-        // Extract JSON content from the response
-        const content = response.data.choices[0].message.content;
-        console.log('[Perplexity] Content to parse:', content);
-        
-        try {
-          // First try to parse the content directly
-          let parsedContent;
-          try {
-            parsedContent = JSON.parse(content);
+      const rawContent = response.data.choices[0]?.message?.content;
+      if (!rawContent) {
+        logger.error('[Perplexity] No content in response');
+        return { activities: [] };
+      }
+
+      logger.debug('[Perplexity] Raw response:', { rawContent });
+
+      // Clean and parse the content
+      let cleanedContent = this.cleanJsonString(rawContent);
+      let parsedContent: any;
+
+      try {
+        parsedContent = JSON.parse(cleanedContent);
           } catch (e) {
-            // If direct parsing fails, try to extract JSON from markdown or text
-            const jsonMatch = content.match(/```json\s*([\s\S]*?)\s*```/) || content.match(/\{[\s\S]*\}/);
+        // If direct parsing fails, try to extract JSON object
+        const jsonMatch = cleanedContent.match(/\{[\s\S]*\}/);
             if (!jsonMatch) {
-              console.error('[Perplexity] No JSON content found in response');
-              continue;
-            }
+          logger.error('[Perplexity] No JSON content found in response');
+          return { activities: [] };
+        }
 
-            const jsonContent = jsonMatch[1] || jsonMatch[0];
-            // Clean the JSON string before parsing
-            const cleanedJson = jsonContent
-              .replace(/[\u0000-\u001F]+/g, '') // Remove control characters
-              .replace(/,\s*([}\]])/g, '$1') // Remove trailing commas
-              .replace(/([{,]\s*)'([^']+)':/g, '$1"$2":') // Convert single quotes to double quotes for property names
-              .replace(/([{,]\s*)(\w+):/g, '$1"$2":') // Ensure property names are quoted
-              .replace(/\n/g, ' ') // Replace newlines with spaces
-              .replace(/\s+/g, ' ') // Normalize multiple spaces to single space
-              .replace(/:\s*'([^']*?)'/g, ':"$1"') // Convert single quoted values to double quotes
-              .replace(/([{,]\s*)"([^"]+)":\s*"([^"]*)"/g, '$1"$2":"$3"') // Normalize spacing around colons
-              .trim();
-
-            try {
-              parsedContent = JSON.parse(cleanedJson);
+        try {
+          parsedContent = JSON.parse(jsonMatch[0]);
             } catch (parseError) {
-              console.error('[Perplexity] Failed to parse cleaned JSON:', parseError);
-              continue;
-            }
-          }
-          
-          // Validate the structure
-          if (!parsedContent.activities) {
-            // Try to extract activities from schedule structure
-            if (parsedContent.schedule?.[0]?.activities) {
-              parsedContent = {
-                activities: parsedContent.schedule[0].activities
-              };
-            } else if (Array.isArray(parsedContent.schedule)) {
-              parsedContent = {
-                activities: parsedContent.schedule
-              };
-            } else {
-              logger.error('[Perplexity] Invalid response structure:', parsedContent);
-              continue;
-            }
-          }
-
-          if (!Array.isArray(parsedContent.activities)) {
-            logger.error('[Perplexity] Activities is not an array:', parsedContent.activities);
-            continue;
-          }
-
-          // Add valid activities to the collection
-          const validActivities = parsedContent.activities.filter(activity => 
-            activity && 
-            activity.name &&
-            activity.category &&
-            activity.timeSlot
-          );
-
-          if (validActivities.length === 0) {
-            logger.warn('[Perplexity] No valid activities found in response');
-            continue;
-          }
-
-          logger.info('[Perplexity] Found valid activities:', {
-            count: validActivities.length,
-            categories: validActivities.map(a => a.category)
-          });
-
-          allActivities = [...allActivities, ...validActivities.map((activity: ViatorActivity) => ({
-            ...activity,
-            selected: false
-          }))];
-        } catch (e) {
-          console.error('[Perplexity] Failed to parse response:', e);
-          continue;
+          logger.error('[Perplexity] Failed to parse content:', { error: parseError, rawContent });
+          return { activities: [] };
         }
       }
 
-      // Return all collected activities
+      // Extract activities from schedule
+      let activities: Activity[] = [];
+      if (parsedContent.schedule && Array.isArray(parsedContent.schedule)) {
+        // First, extract preselected activities from the query
+        const preselectedMatch = query.match(/preselectedActivities":\s*(\[[\s\S]*?\])/);
+        const preselectedActivities: Activity[] = [];
+        if (preselectedMatch) {
+          try {
+            const preselectedJson = JSON.parse(preselectedMatch[1]);
+            preselectedActivities.push(...preselectedJson);
+            logger.info('[Perplexity] Found preselected activities:', {
+              count: preselectedActivities.length,
+              activities: preselectedActivities.map(a => ({
+                name: a.name,
+                dayNumber: a.dayNumber,
+                timeSlot: a.timeSlot
+              }))
+            });
+          } catch (e) {
+            logger.error('[Perplexity] Failed to parse preselected activities:', e);
+          }
+        }
+
+        // Process each day's activities
+        activities = parsedContent.schedule.flatMap(day => {
+          const dayNumber = day.dayNumber;
+          const dayActivities = day.activities || [];
+
+          // First, add preselected activities for this day
+          const dayPreselected = preselectedActivities.filter(a => a.dayNumber === dayNumber);
+          const preselectedTimeSlots = new Set(dayPreselected.map(a => a.timeSlot));
+
+          // Then add other activities from the schedule, skipping time slots that are already taken
+          const otherActivities = dayActivities
+            .filter(activity => !preselectedTimeSlots.has(activity.timeSlot))
+            .map(activity => ({
+              name: activity.name,
+              category: activity.category || determineCategoryFromDescription(activity.description || ''),
+              rating: activity.rating || 0,
+              numberOfReviews: activity.numberOfReviews || 0,
+              price: activity.price || { amount: 0, currency: 'USD' },
+              location: activity.location || '',
+              timeSlot: activity.timeSlot || this.getTimeSlot(activity.startTime || ''),
+              dayNumber,
+              selected: false,
+              duration: activity.duration || this.estimateDuration(activity.startTime || ''),
+              commentary: activity.commentary || '',
+              itineraryHighlight: activity.itineraryHighlight || '',
+              scoringReason: activity.scoringReason || '',
+              startTime: activity.startTime || '',
+              description: activity.description || '',
+              matchedPreferences: activity.matchedPreferences || [],
+              preferenceScore: activity.preferenceScore || 0
+            }));
+
+          // Combine preselected and other activities
+          return [
+            ...dayPreselected.map(activity => ({
+            ...activity,
+              category: activity.category || 'Cultural & Historical',
+              rating: activity.rating || 4.5,
+              numberOfReviews: activity.numberOfReviews || 1000,
+              price: activity.price || { amount: 0, currency: 'USD' },
+              selected: true,
+              commentary: activity.commentary || `Preselected activity for ${activity.timeSlot}`,
+              itineraryHighlight: activity.itineraryHighlight || `Part of the original plan`,
+              scoringReason: activity.scoringReason || 'Preselected by user'
+            })),
+            ...otherActivities
+          ];
+        });
+      }
+
+      logger.info('[Perplexity] Successfully parsed response', {
+        activitiesCount: activities.length,
+        hasSchedule: !!parsedContent.schedule,
+        hasTripOverview: !!parsedContent.tripOverview,
+        firstActivity: activities[0]?.name,
+        preselectedCount: activities.filter(a => a.selected).length
+      });
+
       return {
-        activities: allActivities
+        schedule: parsedContent.schedule,
+        activities,
+        tripOverview: parsedContent.tripOverview,
+        activityFitNotes: parsedContent.activityFitNotes
       };
-    } catch (error: any) {
-      console.error('[Perplexity] Error calling API:', error.response?.data || error);
-      const errorResponse: PerplexityErrorResponse = {
-        error: 'Failed to call Perplexity API'
-      };
-      throw errorResponse;
+    } catch (error) {
+      logger.error('[Perplexity] Error calling API:', error);
+      return { activities: [] };
     }
+  }
+
+  private cleanJsonString(str: string): string {
+    // First remove markdown code blocks
+    let cleaned = str.replace(/```(?:json)?\s*|\s*```/g, '');
+    
+    // Extract just the JSON object if there's surrounding text
+    const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      cleaned = jsonMatch[0];
+    }
+
+    // Clean up the JSON string
+    return cleaned
+      .replace(/[\u0000-\u001F]+/g, '') // Remove control characters
+      .replace(/,\s*([}\]])/g, '$1') // Remove trailing commas
+      .replace(/([{,]\s*)(\w+):/g, '$1"$2":') // Ensure property names are quoted
+      .replace(/\n/g, ' ') // Remove newlines
+      .replace(/\s+/g, ' ') // Normalize spaces
+      .replace(/(\d+)\+/g, '$1') // Remove + from numbers
+      .replace(/'/g, "'") // Fix curly quotes
+      .replace(/"/g, '"') // Fix curly quotes
+      .replace(/\\/g, '\\\\') // Escape backslashes
+      .replace(/(?<=\{|\[|,)\s*"([^"]+)":\s*"([^"]+)"/g, (_, key, value) => {
+        // Clean up key-value pairs
+        const cleanValue = value
+          .replace(/\$/g, '') // Remove dollar signs
+          .replace(/\s*per person\s*/gi, '') // Remove "per person"
+          .replace(/\s*\(External\)\s*/gi, '') // Remove "(External)"
+          .replace(/Free/gi, '0') // Convert "Free" to 0
+          .trim();
+        return `"${key}":"${cleanValue}"`;
+      })
+      .trim();
+  }
+
+  private getTimeSlot(time: string): string {
+    if (!time) return 'morning';
+    const hour = parseInt(time.split(':')[0]);
+    if (hour < 13) return 'morning';
+    if (hour < 18) return 'afternoon';
+    return 'evening';
+  }
+
+  private estimateDuration(time: string): number {
+    if (!time) return 120; // default 2 hours
+    const [start, end] = time.split('-').map(t => {
+      const [hours, minutes] = t.split(':').map(Number);
+      return hours * 60 + minutes;
+    });
+    return end - start;
+  }
+
+  private normalizeActivity(activity: any, dayNumber: number, timeSlot: string): Activity {
+      return {
+      name: activity.activity || activity.name,
+      category: activity.category,
+      rating: parseFloat(activity.rating) || 0,
+      numberOfReviews: typeof activity.reviews === 'string' ? 
+        parseInt(activity.reviews.replace(/\D/g, '')) : 
+        activity.reviews || 0,
+      price: {
+        amount: typeof activity.budget === 'string' ? 
+          parseFloat(activity.budget.replace(/[^\d.]/g, '')) || 0 : 
+          activity.budget || 0,
+        currency: 'USD'
+      },
+      location: activity.location || '',
+      timeSlot,
+      dayNumber,
+      selected: false,
+      duration: this.estimateDuration(activity.time),
+      commentary: activity.commentary || '',
+      itineraryHighlight: activity.itineraryHighlight || '',
+      scoringReason: activity.scoringReason || ''
+    };
+  }
+
+  private parseReviewCount(reviews: string | number): number {
+    if (typeof reviews === 'number') return reviews;
+    if (!reviews) return 0;
+
+    const match = reviews.toString().match(/(\d+)(?:\+|,000\+)?/);
+    if (!match) return 0;
+
+    const number = parseInt(match[1]);
+    if (reviews.includes('000+') || reviews.includes('k+')) {
+      return number * 1000;
+    }
+    return number;
+  }
+
+  private parseCost(cost: string | number): { amount: number; currency: string } {
+    if (typeof cost === 'number') {
+      return { amount: cost, currency: 'USD' };
+    }
+
+    if (!cost || cost.toLowerCase() === 'free') {
+      return { amount: 0, currency: 'USD' };
+    }
+
+    const match = cost.toString().match(/\$?(\d+)(?:-\$?(\d+))?/);
+    if (match) {
+      const min = parseInt(match[1]);
+      const max = match[2] ? parseInt(match[2]) : min;
+      return { amount: Math.floor((min + max) / 2), currency: 'USD' };
+    }
+
+    return { amount: 0, currency: 'USD' };
   }
 
   // For individual activity details - uses sonar model
@@ -1037,12 +1175,7 @@ IMPORTANT: You MUST provide detailed commentary and highlights that explicitly r
         const cleanedJson = jsonContent
           .replace(/[\u0000-\u001F]+/g, '') // Remove control characters
           .replace(/,\s*([}\]])/g, '$1') // Remove trailing commas
-          .replace(/([{,]\s*)'([^']+)':/g, '$1"$2":') // Convert single quotes to double quotes for property names
           .replace(/([{,]\s*)(\w+):/g, '$1"$2":') // Ensure property names are quoted
-          .replace(/\n/g, ' ') // Replace newlines with spaces
-          .replace(/\s+/g, ' ') // Normalize multiple spaces to single space
-          .replace(/:\s*'([^']*?)'/g, ':"$1"') // Convert single quoted values to double quotes
-          .replace(/([{,]\s*)"([^"]+)":\s*"([^"]*)"/g, '$1"$2":"$3"') // Normalize spacing around colons
           .trim();
 
         logger.debug('[Enrichment] Attempting to parse cleaned JSON:', { cleanedJson });
@@ -1177,7 +1310,11 @@ IMPORTANT: You MUST provide detailed commentary and highlights that explicitly r
       categories.forEach(category => {
         const categoryActivities = scoredActivities
           .filter(a => a.category === category)
-          .sort((a, b) => (b.preferenceScore - a.preferenceScore) || ((b.rating || 0) - (a.rating || 0)));
+          .sort((a, b) => {
+            const scoreCompare = (b.preferenceScore || 0) - (a.preferenceScore || 0);
+            if (scoreCompare !== 0) return scoreCompare;
+            return (b.rating || 0) - (a.rating || 0);
+          });
         
         if (categoryActivities.length > 0) {
           selectedActivities.push(categoryActivities[0]);
@@ -1188,7 +1325,11 @@ IMPORTANT: You MUST provide detailed commentary and highlights that explicitly r
       while (selectedActivities.length < minActivitiesPerDay && scoredActivities.length > selectedActivities.length) {
         const remainingActivities = scoredActivities
           .filter(a => !selectedActivities.includes(a))
-          .sort((a, b) => (b.preferenceScore - a.preferenceScore) || ((b.rating || 0) - (a.rating || 0)));
+          .sort((a, b) => {
+            const scoreCompare = (b.preferenceScore || 0) - (a.preferenceScore || 0);
+            if (scoreCompare !== 0) return scoreCompare;
+            return (b.rating || 0) - (a.rating || 0);
+          });
 
         if (remainingActivities.length > 0) {
           selectedActivities.push(remainingActivities[0]);
@@ -1198,11 +1339,11 @@ IMPORTANT: You MUST provide detailed commentary and highlights that explicitly r
       }
 
       // Try to distribute activities across time slots if possible
-      const timeSlots = ['morning', 'afternoon', 'evening'];
-      const activitiesByTimeSlot = new Map<string, Activity[]>();
+      const timeSlots = ['morning', 'afternoon', 'evening'] as const;
+      const activitiesByTimeSlot = new Map<typeof timeSlots[number], Activity[]>();
       
       selectedActivities.forEach(activity => {
-        const slot = activity.timeSlot;
+        const slot = activity.timeSlot as typeof timeSlots[number];
         if (!activitiesByTimeSlot.has(slot)) {
           activitiesByTimeSlot.set(slot, []);
         }
@@ -1226,14 +1367,6 @@ IMPORTANT: You MUST provide detailed commentary and highlights that explicitly r
           }
         }
       }
-
-      logger.info(`Completed day ${day} processing`, {
-        dayNumber: day,
-        originalCount: dayActivities.length,
-        selectedCount: selectedActivities.length,
-        categories: Array.from(categories),
-        timeSlots: Array.from(activitiesByTimeSlot.keys())
-      });
 
       return selectedActivities;
     });
@@ -1598,9 +1731,33 @@ Return ONLY the summary paragraph, no additional formatting or explanation.`;
   async enrichActivity(
     activity: Activity,
     params: GenerateActivitiesParams,
-    date: string
+    date: string,
+    retryCount: number = 0
   ): Promise<Activity | null> {
     try {
+      // If we've already tried 3 times to find an available date, stop trying
+      if (retryCount >= 3) {
+        logger.warn('Maximum retry attempts reached for finding available dates', {
+          activity: activity.name,
+          originalDate: date,
+          retryCount
+        });
+        // Instead of returning null, return the activity with a warning flag
+        return {
+          ...activity,
+          date,
+          availability: {
+            isAvailable: false,
+            operatingHours: 'Not available on requested dates',
+            availableTimeSlots: [],
+            bestTimeToVisit: 'Please check alternative dates',
+            nextAvailableDate: undefined
+          },
+          commentary: `This activity may not be available on the requested dates. ${activity.commentary || ''}`,
+          itineraryHighlight: `Consider checking alternative dates or similar activities. ${activity.itineraryHighlight || ''}`
+        };
+      }
+
       const enrichmentQuery = `Analyze this activity in ${params.destination}:
       Name: ${activity.name}
       Location: ${activity.location}
@@ -1639,7 +1796,8 @@ Return ONLY the summary paragraph, no additional formatting or explanation.`;
       if (!timeSlotVerification?.isAvailable) {
         logger.info('Activity not available on requested date, searching for alternative dates', {
           activity: activity.name,
-          originalDate: date
+          originalDate: date,
+          retryCount
         });
         
         const nextAvailable = await this.findNextAvailableDate(activity, date);
@@ -1647,13 +1805,27 @@ Return ONLY the summary paragraph, no additional formatting or explanation.`;
         if (!nextAvailable) {
           logger.warn('No available dates found for activity', {
             name: activity.name,
-            originalDate: date
+            originalDate: date,
+            retryCount
           });
-          return null;
+          // Return activity with warning instead of null
+          return {
+            ...activity,
+            date,
+            availability: {
+              isAvailable: false,
+              operatingHours: 'Not available on requested dates',
+              availableTimeSlots: [],
+              bestTimeToVisit: 'Please check alternative dates',
+              nextAvailableDate: undefined
+            },
+            commentary: `This activity may not be available on the requested dates. ${activity.commentary || ''}`,
+            itineraryHighlight: `Consider checking alternative dates or similar activities. ${activity.itineraryHighlight || ''}`
+          };
         }
 
-        // Re-run enrichment with new date
-        return this.enrichActivity(activity, params, nextAvailable.date);
+        // Re-run enrichment with new date, incrementing retry count
+        return this.enrichActivity(activity, params, nextAvailable.date, retryCount + 1);
       }
 
       const adjustedTimeSlot = this.determineOptimalTimeSlot(
@@ -1689,32 +1861,66 @@ Return ONLY the summary paragraph, no additional formatting or explanation.`;
     } catch (error) {
       logger.error('Error enriching activity', {
         name: activity.name,
-        error: error instanceof Error ? error.message : 'Unknown error'
+        error: error instanceof Error ? error.message : 'Unknown error',
+        retryCount
       });
-      return null;
+      // Return activity with error flag instead of null
+      return {
+        ...activity,
+        date,
+        availability: {
+          isAvailable: false,
+          operatingHours: 'Error checking availability',
+          availableTimeSlots: [],
+          bestTimeToVisit: 'Please try again later',
+          nextAvailableDate: undefined
+        },
+        commentary: `There was an error checking availability for this activity. ${activity.commentary || ''}`,
+        itineraryHighlight: `Please verify availability before booking. ${activity.itineraryHighlight || ''}`
+      };
     }
   }
-}
 
-// Create and export a singleton instance
-export const perplexityClient = new PerplexityService(); 
+  private async optimizeSchedule(activities: Activity[], days: number, destination: string): Promise<any> {
+    try {
+      // First, separate preselected activities from the rest
+      const preselectedActivities = activities.filter(a => a.selected);
+      const unselectedActivities = activities.filter(a => !a.selected);
 
-const optimizeSchedule = async (activities: any[], days: number, destination: string): Promise<any> => {
-  try {
-    const query = `Optimize this ${days}-day schedule for ${destination} with these activities:
-${activities.map(a => `- ${a.name} (${a.duration || 'N/A'} hours)`).join('\n')}
+      logger.info('Optimizing schedule with preselected activities:', {
+        totalActivities: activities.length,
+        preselected: preselectedActivities.length,
+        unselected: unselectedActivities.length
+      });
+
+      const query = `Create a ${days}-day schedule for ${destination} with these activities:
+
+PRESELECTED ACTIVITIES (MUST BE INCLUDED):
+${preselectedActivities.map(a => `- ${a.name} (${a.duration || 'N/A'} minutes, ${a.timeSlot}, Day ${a.dayNumber})`).join('\n')}
+
+AVAILABLE ACTIVITIES TO FILL GAPS:
+${unselectedActivities.map(a => `- ${a.name} (${a.duration || 'N/A'} minutes)`).join('\n')}
 
 REQUIREMENTS:
-1. Create a balanced schedule across ${days} days
-2. Group nearby activities on the same day
-3. Consider activity durations and opening hours
-4. Allow 2-4 activities per day
-5. Mix different types of activities
+1. CRITICAL: Include ALL preselected activities in their specified days and time slots
+2. For each time slot WITHOUT a preselected activity, suggest 2-3 alternatives
+3. Create a balanced schedule across ${days} days
+4. Group nearby activities for each time slot
+5. Consider activity durations and opening hours
+6. Allow multiple options per time slot for flexibility
 
-FOR EACH ACTIVITY PROVIDE:
-1. Commentary: Why this activity fits user's interests and schedule (3-4 sentences)
-2. Itinerary Highlight: How it connects with other activities that day (2-3 sentences)
-3. Scoring Reason: Specific reasons for time slot and day placement
+PROVIDE FOR EACH DAY:
+1. Morning activities (2-3 options if no preselected)
+2. Afternoon activities (2-3 options if no preselected)
+3. Evening activities (2-3 options if no preselected)
+4. Reasoning for activity grouping and timing
+5. Travel logistics between activities
+6. Special considerations (opening hours, crowds, weather)
+
+ALSO PROVIDE:
+1. Overall trip flow explanation
+2. Why certain activities were grouped together
+3. Alternative suggestions if any activities don't fit well
 
 Return as JSON with:
 {
@@ -1730,25 +1936,453 @@ Return as JSON with:
       "scoringReason": "specific placement reasoning"
     }]
   }],
-  "tripOverview": "overall trip organization logic"
+  "tripOverview": "overall trip organization logic",
+  "activityFitNotes": "why activities were included/excluded"
+}`;
+
+      const response = await this.chat(query);
+      
+      if (!response?.schedule) {
+        logger.warn('Creating basic schedule due to optimization failure');
+        return this.createBasicSchedule(activities, days);
+      }
+
+      logger.info('Schedule optimization reasoning:', {
+        tripOverview: response.tripOverview,
+        activityFitNotes: response.activityFitNotes
+      });
+
+      // Verify that all preselected activities are included in their specified slots
+      const missingPreselected = preselectedActivities.filter(preselected => {
+        return !response.schedule.some(day => 
+          day.dayNumber === preselected.dayNumber &&
+          day.activities.some(activity => 
+            activity.name === preselected.name && 
+            activity.timeSlot === preselected.timeSlot
+          )
+        );
+      });
+
+      if (missingPreselected.length > 0) {
+        logger.warn('Some preselected activities are missing from the schedule:', {
+          missing: missingPreselected.map(a => ({
+            name: a.name,
+            day: a.dayNumber,
+            timeSlot: a.timeSlot
+          }))
+        });
+        
+        // Fall back to basic schedule if optimization failed to include all preselected activities
+        return this.createBasicSchedule(activities, days);
+      }
+
+      // Preserve activity details when transforming schedule
+      const enrichedSchedule = response.schedule.map((day: any) => ({
+        ...day,
+        activities: day.activities.map((scheduledActivity: any) => {
+          // First try to find a matching preselected activity
+          const preselected = preselectedActivities.find(a => 
+            a.name === scheduledActivity.name && 
+            a.dayNumber === day.dayNumber &&
+            a.timeSlot === scheduledActivity.timeSlot
+          );
+
+          if (preselected) {
+            return {
+              ...preselected,
+              ...scheduledActivity,
+              selected: true,
+              commentary: scheduledActivity.commentary || preselected.commentary,
+              itineraryHighlight: scheduledActivity.itineraryHighlight || preselected.itineraryHighlight,
+              scoringReason: scheduledActivity.scoringReason || preselected.scoringReason
+            };
+          }
+
+          // If not preselected, look for the original activity
+          const originalActivity = activities.find(a => a.name === scheduledActivity.name);
+          if (!originalActivity) return scheduledActivity;
+
+          return {
+            ...originalActivity,
+            ...scheduledActivity,
+            timeSlot: scheduledActivity.timeSlot || originalActivity.timeSlot,
+            startTime: scheduledActivity.startTime,
+            commentary: scheduledActivity.commentary || originalActivity.commentary,
+            itineraryHighlight: scheduledActivity.itineraryHighlight || originalActivity.itineraryHighlight,
+            scoringReason: scheduledActivity.scoringReason || originalActivity.scoringReason
+          };
+        })
+      }));
+
+      return {
+        schedule: enrichedSchedule,
+        tripOverview: response.tripOverview,
+        activityFitNotes: response.activityFitNotes
+      };
+    } catch (error) {
+      logger.error('Failed to optimize schedule:', error);
+      return this.createBasicSchedule(activities, days);
+    }
+  }
+
+  private createBasicSchedule(activities: Activity[], days: number) {
+    const schedule = [];
+    const preselectedByDay = new Map<number, Activity[]>();
+    const unselectedActivities = activities.filter(a => !a.selected);
+
+    // First, group preselected activities by day
+    activities.filter(a => a.selected).forEach(activity => {
+      if (!preselectedByDay.has(activity.dayNumber)) {
+        preselectedByDay.set(activity.dayNumber, []);
+      }
+      preselectedByDay.get(activity.dayNumber)?.push(activity);
+    });
+
+    // Calculate how many activities we need per time slot
+    const targetActivitiesPerTimeSlot = 3; // 2-3 options per time slot
+    const timeSlots = ['morning', 'afternoon', 'evening'] as const;
+    
+    for (let day = 1; day <= days; day++) {
+      const preselectedForDay = preselectedByDay.get(day) || [];
+      const preselectedTimeSlots = new Set(preselectedForDay.map(a => a.timeSlot));
+      
+      // Get available time slots for this day
+      const availableTimeSlots = timeSlots.filter(
+        slot => !preselectedTimeSlots.has(slot)
+      );
+
+      // Group unselected activities by category for better distribution
+      const categorizedActivities = unselectedActivities.reduce((acc, activity) => {
+        if (!acc[activity.category]) {
+          acc[activity.category] = [];
+        }
+        acc[activity.category].push(activity);
+        return acc;
+      }, {} as Record<string, Activity[]>);
+
+      // Select additional activities for available time slots
+      const additionalActivities = availableTimeSlots.flatMap(timeSlot => {
+        // Get activities suitable for this time slot
+        const suitableActivities = unselectedActivities
+          .filter(activity => !activity.selected)
+          .filter(activity => {
+            if (timeSlot === 'morning') {
+              return ['Cultural & Historical', 'Nature & Adventure'].includes(activity.category);
+            } else if (timeSlot === 'afternoon') {
+              return ['Nature & Adventure', 'Lifestyle & Local'].includes(activity.category);
+            } else {
+              return ['Food & Entertainment', 'Lifestyle & Local'].includes(activity.category);
+            }
+          })
+          .sort((a, b) => (b.rating || 0) - (a.rating || 0))
+          .slice(0, targetActivitiesPerTimeSlot)
+          .map((activity, index) => ({
+          ...activity,
+            timeSlot,
+            startTime: timeSlot === 'morning' ? '09:00' :
+                      timeSlot === 'afternoon' ? '14:00' : '19:00',
+            dayNumber: day,
+            commentary: `Option ${index + 1} for ${timeSlot} activities`,
+            itineraryHighlight: `Alternative activity for ${timeSlot} slot`
+          }));
+
+        return suitableActivities;
+      });
+
+      const dayActivities = [...preselectedForDay, ...additionalActivities];
+
+      schedule.push({
+        dayNumber: day,
+        theme: `Day ${day} Exploration`,
+        mainArea: "City Center",
+        commentary: `Day ${day} activities with multiple options per time slot`,
+        highlights: [`Day ${day} main activities with alternatives`],
+        mapData: {
+          center: { latitude: 0, longitude: 0 },
+          bounds: { north: 0, south: 0, east: 0, west: 0 },
+          locations: dayActivities.map((activity, index) => ({
+            name: activity.name,
+            coordinates: { latitude: 0, longitude: 0 },
+            address: activity.location || '',
+            type: 'activity',
+            category: activity.category,
+            description: activity.description || '',
+            duration: activity.duration || 120,
+            timeSlot: activity.timeSlot,
+            order: index + 1
+          })),
+          routes: []
+        },
+        breaks: {
+          morning: {
+            startTime: "10:30",
+            endTime: "11:00",
+            duration: 30,
+            suggestion: "Coffee break",
+            location: "Nearby café"
+          },
+          lunch: {
+            startTime: "12:30",
+            endTime: "13:30",
+            duration: 60,
+            suggestion: "Lunch break",
+            location: "Local restaurant"
+          },
+          afternoon: {
+            startTime: "15:30",
+            endTime: "16:00",
+            duration: 30,
+            suggestion: "Rest break",
+            location: "Local park or café"
+          },
+          dinner: {
+            startTime: "18:30",
+            endTime: "20:00",
+            duration: 90,
+            suggestion: "Dinner",
+            location: "Restaurant district"
+          }
+        },
+        logistics: {
+          transportSuggestions: ["Use public transport between main locations"],
+          walkingDistances: ["Walking distances vary between activities"],
+          timeEstimates: ["Allow 15-30 minutes between activities for transitions"]
+        },
+        activities: dayActivities
+      });
+    }
+
+    return {
+      schedule,
+      tripOverview: 'Schedule created with multiple options per time slot',
+      activityFitNotes: 'Activities arranged based on time slots with alternatives for flexibility'
+    };
+  }
+}
+
+// Create and export a singleton instance
+export const perplexityClient = new PerplexityService(); 
+
+const optimizeSchedule = async (activities: any[], days: number, destination: string): Promise<any> => {
+  try {
+    const query = `Create a detailed ${days}-day schedule for ${destination} with these activities:
+${activities.map(a => `- ${a.name} (${a.duration || 'N/A'} minutes)`).join('\n')}
+
+REQUIREMENTS:
+1. Create a balanced schedule across ${days} days
+2. Group activities geographically to minimize travel time
+3. Include specific break times and suggestions
+4. Plan efficient routes between locations
+5. Consider opening hours and crowd patterns
+6. Include meeting points and end points for each day
+
+FOR EACH DAY PROVIDE:
+1. Theme: Main focus/theme of the day
+2. Main Area: Primary geographical area being explored
+3. Commentary: Detailed explanation of the day's flow
+4. Highlights: Key points and special considerations
+5. Timeline: Chronological sequence with:
+   - Meeting point location and time
+   - Each activity with exact location
+   - Break times and suggested locations
+   - Transport between locations
+   - End point location and time
+6. Logistics:
+   - Transport suggestions between activities
+   - Walking distances and routes
+   - Time estimates for transitions
+   - Break recommendations
+7. Breaks Schedule:
+   - Morning break suggestions
+   - Lunch break with restaurant options
+   - Afternoon break ideas
+   - Dinner recommendations
+
+Return as JSON with this EXACT structure:
+{
+  "schedule": [{
+    "dayNumber": number,
+    "theme": "string",
+    "mainArea": "string",
+    "commentary": "string",
+    "highlights": ["string"],
+    "mapData": {
+      "center": {
+        "latitude": number,
+        "longitude": number
+      },
+      "bounds": {
+        "north": number,
+        "south": number,
+        "east": number,
+        "west": number
+      },
+      "locations": [{
+        "name": "string",
+        "coordinates": {
+          "latitude": number,
+          "longitude": number
+        },
+        "address": "string",
+        "type": "activity|break|transport|landmark",
+        "category": "string",
+        "description": "string",
+        "duration": number,
+        "timeSlot": "string",
+        "order": number,
+        "locationType": "string"
+      }],
+      "routes": [{
+        "from": "string",
+        "to": "string",
+        "mode": "walking|transit|driving",
+        "duration": number,
+        "distance": "string"
+      }]
+    },
+    "breaks": {
+      "morning": {
+        "startTime": "string",
+        "endTime": "string",
+        "duration": number,
+        "suggestion": "string",
+        "location": "string"
+      },
+      "lunch": {
+        "startTime": "string",
+        "endTime": "string",
+        "duration": number,
+        "suggestion": "string",
+        "location": "string"
+      },
+      "afternoon": {
+        "startTime": "string",
+        "endTime": "string",
+        "duration": number,
+        "suggestion": "string",
+        "location": "string"
+      },
+      "dinner": {
+        "startTime": "string",
+        "endTime": "string",
+        "duration": number,
+        "suggestion": "string",
+        "location": "string"
+      }
+    },
+    "logistics": {
+      "transportSuggestions": ["string"],
+      "walkingDistances": ["string"],
+      "timeEstimates": ["string"]
+    }
+  }],
+  "tripOverview": "string",
+  "activityFitNotes": "string"
 }`;
 
     const response = await perplexityClient.chat(query);
     
-    // Preserve the commentary and highlights when transforming activities
-    if (response?.schedule) {
-      response.schedule = response.schedule.map((day: any) => ({
-        ...day,
-        activities: day.activities.map((activity: any) => ({
-          ...activity,
-          commentary: activity.commentary || `This activity was selected because ${activity.scoringReason}`,
-          itineraryHighlight: activity.itineraryHighlight || `Fits well with the day's ${day.dayPlanningLogic}`
-        }))
-      }));
+    if (!response?.schedule) {
+      logger.warn('Creating basic schedule due to optimization failure');
+      return createBasicSchedule(activities, days);
     }
 
-    return response;
+    logger.info('Schedule optimization complete with detailed planning', {
+      days: response.schedule.length,
+      hasMapData: response.schedule.every(day => day.mapData),
+      hasBreaks: response.schedule.every(day => day.breaks),
+      hasLogistics: response.schedule.every(day => day.logistics)
+    });
+
+    return {
+      schedule: response.schedule,
+      tripOverview: response.tripOverview,
+      activityFitNotes: response.activityFitNotes
+    };
   } catch (error) {
-    // ... error handling ...
+    logger.error('Failed to optimize schedule:', error);
+    return createBasicSchedule(activities, days);
   }
-}; 
+};
+
+// Update createBasicSchedule to match the new structure
+function createBasicSchedule(activities: Activity[], days: number) {
+  const schedule = [];
+  const activitiesPerDay = Math.ceil(activities.length / days);
+
+  for (let day = 1; day <= days; day++) {
+    const dayActivities = activities
+      .slice((day - 1) * activitiesPerDay, day * activitiesPerDay)
+      .map(activity => ({
+        ...activity,
+        startTime: activity.timeSlot === 'morning' ? '09:00' :
+                  activity.timeSlot === 'afternoon' ? '14:00' : '19:00'
+      }));
+
+    schedule.push({
+      dayNumber: day,
+      theme: `Day ${day} Exploration`,
+      mainArea: "City Center",
+      commentary: `Day ${day} activities arranged by time slots`,
+      highlights: [`Day ${day} main activities`],
+      mapData: {
+        center: { latitude: 0, longitude: 0 },
+        bounds: { north: 0, south: 0, east: 0, west: 0 },
+        locations: dayActivities.map((activity, index) => ({
+          name: activity.name,
+          coordinates: { latitude: 0, longitude: 0 },
+          address: activity.location || '',
+          type: 'activity',
+          category: activity.category,
+          description: activity.description || '',
+          duration: activity.duration || 120,
+          timeSlot: activity.timeSlot,
+          order: index + 1
+        })),
+        routes: []
+      },
+      breaks: {
+        morning: {
+          startTime: "10:30",
+          endTime: "11:00",
+          duration: 30,
+          suggestion: "Coffee break",
+          location: "Nearby café"
+        },
+        lunch: {
+          startTime: "12:30",
+          endTime: "13:30",
+          duration: 60,
+          suggestion: "Lunch break",
+          location: "Local restaurant"
+        },
+        afternoon: {
+          startTime: "15:30",
+          endTime: "16:00",
+          duration: 30,
+          suggestion: "Rest break",
+          location: "Local park or café"
+        },
+        dinner: {
+          startTime: "18:30",
+          endTime: "20:00",
+          duration: 90,
+          suggestion: "Dinner",
+          location: "Restaurant district"
+        }
+      },
+      logistics: {
+        transportSuggestions: ["Use public transport between main locations"],
+        walkingDistances: ["Walking distances vary between activities"],
+        timeEstimates: ["Allow 15-30 minutes between activities for transitions"]
+      },
+      activities: dayActivities
+    });
+  }
+
+  return {
+    schedule,
+    tripOverview: 'Basic schedule with activities distributed evenly across days',
+    activityFitNotes: 'Activities arranged based on their predefined time slots'
+  };
+} 

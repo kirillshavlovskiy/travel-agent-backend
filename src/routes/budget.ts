@@ -1,4 +1,4 @@
-import { Router, Request, Response } from 'express';
+import express, { Router, Request, Response } from 'express';
 import { VacationBudgetAgent } from '../services/agents.js';
 import { PrismaClient } from '@prisma/client';
 import { cities } from '../data/cities.js';
@@ -8,12 +8,26 @@ import { AirlineInfo } from '../types.js';
 import { AmadeusSegment, AmadeusFare, AmadeusFareDetail, AmadeusFlightOffer } from '../types/amadeus.js';
 import { AIRCRAFT_CODES as AIRCRAFT_CODE_MAP } from '../constants/aircraft.js';
 import { normalizeCategory } from '../constants/categories.js';
+import { rateLimit } from 'express-rate-limit';
 import { logger } from '../utils/logger.js';
 
 const router = Router();
 const amadeusService = new AmadeusService();
 const agent = new VacationBudgetAgent(amadeusService);
 const prisma = new PrismaClient();
+
+// Add rate limiter
+const budgetLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 10, // limit each IP to 10 requests per windowMs
+  message: {
+    success: false,
+    error: 'Too many requests, please try again later',
+    timestamp: new Date().toISOString()
+  }
+});
+
+router.use(budgetLimiter);
 
 // Import AIRCRAFT_CODES from amadeus service
 const AIRCRAFT_CODES: { [key: string]: string } = {
@@ -274,83 +288,136 @@ const transformRequest = async (data: any): Promise<TransformedRequest> => {
 
 // Calculate budget endpoint
 router.post('/calculate', async (req: Request, res: Response) => {
-  const startTime = Date.now();
-  let progressInterval: NodeJS.Timeout | undefined;
-
   try {
-    logger.info('[Budget Calculation] Starting budget calculation', { 
-      body: req.body,
-      timestamp: new Date().toISOString()
+    logger.info('[Budget Route] ====== START BUDGET CALCULATION ======');
+    logger.info('[Budget Route] Received request:', {
+      body: JSON.stringify(req.body, null, 2),
+      headers: req.headers,
+      url: req.url,
+      method: req.method
     });
 
-    // Validate request body
-    if (!isValidBudgetRequest(req.body)) {
+    const { departureLocation, destinations, startDate, endDate, travelers, budgetLimit, currency } = req.body;
+
+    // Validate required fields
+    if (!departureLocation || !destinations || !startDate || !endDate || !travelers || !budgetLimit || !currency) {
+      logger.error('[Budget Route] Missing required fields:', {
+        hasDepartureLocation: !!departureLocation,
+        hasDestinations: !!destinations,
+        hasStartDate: !!startDate,
+        hasEndDate: !!endDate,
+        hasTravelers: !!travelers,
+        hasBudgetLimit: !!budgetLimit,
+        hasCurrency: !!currency
+      });
       return res.status(400).json({
-        error: 'Invalid request body',
+        success: false,
+        error: 'Missing required fields',
         timestamp: new Date().toISOString()
       });
     }
 
-    // Set up progress tracking
-    progressInterval = setInterval(() => {
-      const elapsed = Date.now() - startTime;
-      logger.info('[Budget Calculation] Still processing...', { 
-        elapsed,
-        requestBody: req.body
-      });
-    }, 5000);
+    // Calculate budget breakdown
+    const totalDays = Math.ceil((new Date(endDate).getTime() - new Date(startDate).getTime()) / (1000 * 60 * 60 * 24));
+    const numTravelers = parseInt(travelers);
 
-    // Transform request data
-    const transformedRequest = await transformRequest(req.body);
-
-    // Process flight and activity data in parallel
-    const [flightResult, activityResult] = await Promise.allSettled([
-      agent.handleTravelRequest(transformedRequest),
-      agent.generateActivities({
-        destination: transformedRequest.destinations[0].label,
-        days: transformedRequest.days,
-        budget: transformedRequest.budget || 0,
-        currency: transformedRequest.currency,
-        preferences: req.body.preferences || {}
-      })
-    ]);
-
-    clearInterval(progressInterval);
-
-    // Prepare response with available data
-    const response = {
-      success: true,
-      data: {
-        requestDetails: transformedRequest,
-        totalBudget: transformedRequest.budget,
-        flights: flightResult.status === 'fulfilled' ? flightResult.value?.data?.flights : undefined,
-        activities: activityResult.status === 'fulfilled' ? activityResult.value?.activities : [],
-        suggestedItineraries: activityResult.status === 'fulfilled' ? activityResult.value?.suggestedItineraries : {},
-      },
-      errors: {
-        flights: flightResult.status === 'rejected' ? flightResult.reason?.message : undefined,
-        activities: activityResult.status === 'rejected' ? activityResult.reason?.message : undefined
-      },
-      timestamp: new Date().toISOString()
+    const budgetBreakdown = {
+      total: budgetLimit,
+      perDay: budgetLimit / totalDays,
+      perPerson: budgetLimit / numTravelers,
+      perPersonPerDay: budgetLimit / (totalDays * numTravelers),
+      categories: {
+        flights: Math.round(budgetLimit * 0.4), // 40% for flights
+        accommodation: Math.round(budgetLimit * 0.3), // 30% for accommodation
+        activities: Math.round(budgetLimit * 0.15), // 15% for activities
+        food: Math.round(budgetLimit * 0.1), // 10% for food
+        transport: Math.round(budgetLimit * 0.05) // 5% for local transport
+      }
     };
 
-    const processingTime = Date.now() - startTime;
-    logger.info('[Budget Calculation] Completed', { 
-      processingTime,
-      resultSize: JSON.stringify(response).length,
-      hasFlights: !!response.data.flights,
-      hasActivities: !!response.data.activities?.length
+    logger.info('[Budget Route] Calculated budget breakdown:', budgetBreakdown);
+
+    // Search for flights using Amadeus
+    logger.info('[Budget Route] Starting flight search with Amadeus');
+    
+    // Get departure and destination airport codes
+    const departureAirport = getPrimaryAirportForCity(departureLocation.code);
+    const destinationAirport = getPrimaryAirportForCity(destinations[0].code);
+
+    logger.info('[Budget Route] Using airports:', {
+      departure: departureAirport,
+      destination: destinationAirport,
+      originalDeparture: departureLocation.code,
+      originalDestination: destinations[0].code
     });
 
-    return res.json(response);
+    // Search for flights
+    const flightResults = await amadeusService.searchFlights({
+      segments: [{
+        originLocationCode: departureAirport,
+        destinationLocationCode: destinationAirport,
+        departureDate: startDate.split('T')[0]
+      }],
+      travelClass: 'ECONOMY',
+      adults: numTravelers,
+      max: 100
+    });
+
+    logger.info('[Budget Route] Flight search completed:', {
+      resultsCount: flightResults?.length || 0,
+      hasDictionaries: !!flightResults?.[0]?.dictionaries
+    });
+
+    // Group flights by tier
+    const flightsByTier = {
+      budget: { references: [] },
+      medium: { references: [] },
+      premium: { references: [] }
+    };
+
+    flightResults.forEach(flight => {
+      const tier = amadeusService.determineTier(flight);
+      if (flightsByTier[tier]) {
+        flightsByTier[tier].references.push(flight);
+      }
+    });
+
+    logger.info('[Budget Route] Flights grouped by tier:', {
+      budget: flightsByTier.budget.references.length,
+      medium: flightsByTier.medium.references.length,
+      premium: flightsByTier.premium.references.length
+    });
+
+    return res.json({
+      success: true,
+      data: {
+        budgetBreakdown,
+        flights: flightsByTier,
+        requestDetails: {
+          departureLocation,
+          destinations,
+          startDate,
+          endDate,
+          travelers: numTravelers,
+          currency
+        },
+        totalBudget: budgetLimit,
+        timestamp: new Date().toISOString()
+      }
+    });
 
   } catch (error) {
-    if (progressInterval) clearInterval(progressInterval);
-    logger.error('[Budget Calculation] Failed:', error);
-    
+    logger.error('[Budget Route] Error processing budget calculation:', {
+      error: error instanceof Error ? {
+        message: error.message,
+        stack: error.stack
+      } : 'Unknown error',
+      timestamp: new Date().toISOString()
+    });
+
     return res.status(500).json({
-      error: 'Internal Server Error',
-      message: error instanceof Error ? error.message : 'An unexpected error occurred',
+      success: false,
+      error: error instanceof Error ? error.message : 'An unexpected error occurred',
       timestamp: new Date().toISOString()
     });
   }
