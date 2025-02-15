@@ -85,7 +85,7 @@ function calculateActivityScore(
       activity.description?.toLowerCase().includes(interestLower) ||
       activity.category?.toLowerCase().includes(interestLower)
     ) {
-      score += 2; // Increased weight for interest matches
+      score += 1;
       matchedPreferences.push(interest);
       scoringReasons.push(`Matches ${interest} interest`);
     }
@@ -103,7 +103,7 @@ function calculateActivityScore(
   // Match accessibility needs
   preferences.accessibility.forEach((need: string) => {
     if (activity.description?.toLowerCase().includes(need.toLowerCase())) {
-      score += 2; // Increased weight for accessibility matches
+      score += 1;
       matchedPreferences.push(need);
       scoringReasons.push(`Accommodates ${need}`);
     }
@@ -112,7 +112,7 @@ function calculateActivityScore(
   // Match dietary restrictions
   preferences.dietaryRestrictions.forEach((restriction: string) => {
     if (activity.description?.toLowerCase().includes(restriction.toLowerCase())) {
-      score += 2; // Increased weight for dietary matches
+      score += 1;
       matchedPreferences.push(restriction);
       scoringReasons.push(`Suitable for ${restriction} diet`);
     }
@@ -123,65 +123,6 @@ function calculateActivityScore(
     matchedPreferences,
     scoringReason: scoringReasons.join('. ')
   };
-}
-
-// Add function to resolve time slot conflicts
-function resolveTimeSlotConflicts(activities: Activity[]): Activity[] {
-  // Group activities by day and time slot
-  const byDayAndSlot = new Map<string, Activity[]>();
-  
-  activities.forEach(activity => {
-    const key = `${activity.dayNumber}-${activity.timeSlot}`;
-    if (!byDayAndSlot.has(key)) {
-      byDayAndSlot.set(key, []);
-    }
-    byDayAndSlot.get(key)?.push(activity);
-  });
-
-  // Resolve conflicts by keeping highest scoring activity in each slot
-  const resolved: Activity[] = [];
-  
-  byDayAndSlot.forEach((slotActivities, key) => {
-    if (slotActivities.length > 1) {
-      // Sort by score and selected status
-      const sorted = slotActivities.sort((a, b) => {
-        if (a.selected && !b.selected) return -1;
-        if (!a.selected && b.selected) return 1;
-        return (b.preferenceScore || 0) - (a.preferenceScore || 0);
-      });
-      
-      // Keep the highest scoring activity
-      resolved.push(sorted[0]);
-      
-      // Redistribute others to different time slots
-      const [day, slot] = key.split('-');
-      const dayNum = parseInt(day);
-      
-      sorted.slice(1).forEach(activity => {
-        const availableSlot = findAvailableTimeSlot(dayNum, resolved);
-        if (availableSlot) {
-          activity.timeSlot = availableSlot;
-          resolved.push(activity);
-        }
-      });
-    } else {
-      resolved.push(...slotActivities);
-    }
-  });
-
-  return resolved;
-}
-
-// Helper function to find available time slot
-function findAvailableTimeSlot(day: number, activities: Activity[]): string | null {
-  const slots = ['morning', 'afternoon', 'evening'];
-  const usedSlots = new Set(
-    activities
-      .filter(a => a.dayNumber === day)
-      .map(a => a.timeSlot)
-  );
-  
-  return slots.find(slot => !usedSlots.has(slot)) || null;
 }
 
 // Add deduplication function
@@ -535,6 +476,7 @@ router.post('/generate', async (req: Request, res: Response) => {
       });
     }
 
+    // Get initial activity suggestions from Perplexity
     const response = await perplexityClient.generateActivities({
       destination,
       days,
@@ -569,26 +511,13 @@ router.post('/generate', async (req: Request, res: Response) => {
       });
     }
 
-    // Calculate scores for all activities
-    const scoredActivities = activities.map(activity => {
-      const score = calculateActivityScore(activity, preferences);
-      return {
-        ...activity,
-        ...score,
-        selected: score.preferenceScore >= 4 // Auto-select high scoring activities
-      };
-    });
-
     // Process activities to ensure different time slots for same-day activities
-    const processedActivities = scoredActivities.map(activity => ({
+    const processedActivities = activities.map(activity => ({
       ...activity,
       id: `${activity.id || Date.now()}-${activity.timeSlot || 'unspecified'}-${activity.dayNumber || 1}`,
       timeSlot: activity.timeSlot || 'morning',
       dayNumber: activity.dayNumber || 1
     }));
-
-    // Resolve any time slot conflicts
-    const resolvedActivities = resolveTimeSlotConflicts(processedActivities);
 
     // Initialize grouped activities structure
     const groupedActivities: Record<number, Record<string, any[]>> = {};
@@ -601,7 +530,7 @@ router.post('/generate', async (req: Request, res: Response) => {
     }
 
     // Group activities by day and time slot
-    resolvedActivities.forEach(activity => {
+    processedActivities.forEach(activity => {
       const day = activity.dayNumber;
       const slot = activity.timeSlot;
       if (groupedActivities[day] && groupedActivities[day][slot]) {
@@ -620,36 +549,26 @@ router.post('/generate', async (req: Request, res: Response) => {
     }
 
     logger.info('Successfully processed activities:', {
-      totalActivities: resolvedActivities.length,
+      totalActivities: processedActivities.length,
       dayCount: Object.keys(groupedActivities).length,
-      sampleDay: groupedActivities[1],
-      scoringStats: {
-        highScoring: resolvedActivities.filter(a => a.preferenceScore >= 4).length,
-        mediumScoring: resolvedActivities.filter(a => a.preferenceScore >= 2 && a.preferenceScore < 4).length,
-        lowScoring: resolvedActivities.filter(a => a.preferenceScore < 2).length
-      }
+      sampleDay: groupedActivities[1]
     });
 
     return res.json({
       success: true,
-      activities: resolvedActivities,
+      activities: processedActivities,
       dailySchedule: groupedActivities,
       dailySummaries,
       dayHighlights,
       metadata: {
         originalCount: activities.length,
-        finalCount: resolvedActivities.length,
+        finalCount: processedActivities.length,
         dayCount: Object.keys(groupedActivities).length,
         expectedDays: days,
         destination,
         timestamp: new Date().toISOString(),
         hasAllDays: hasActivitiesForAllDays,
-        availabilityWarnings: activities.filter(a => !a.availability?.isAvailable).length,
-        scoringMetrics: {
-          averageScore: resolvedActivities.reduce((sum, a) => sum + (a.preferenceScore || 0), 0) / resolvedActivities.length,
-          selectedCount: resolvedActivities.filter(a => a.selected).length,
-          highScoringCount: resolvedActivities.filter(a => a.preferenceScore >= 4).length
-        }
+        availabilityWarnings: activities.filter(a => !a.availability?.isAvailable).length
       }
     });
 
