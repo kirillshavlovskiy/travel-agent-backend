@@ -107,6 +107,7 @@ interface GenerateActivitiesParams {
     accessibility: string[];
     dietaryRestrictions: string[];
   };
+  startDate?: string;
 }
 
 interface DailyItinerarySummary {
@@ -516,151 +517,239 @@ Return ONLY a valid JSON array of activities.`;
   }
 
   private async makePerplexityRequests(query: string): Promise<Activity[]> {
-    try {
-      const response = await axios.post(
-        this.baseUrl,
-        {
-          model: 'sonar',
-          messages: [
+    const MAX_RETRIES = 3;
+    const RETRY_DELAY = 5000;
+    const TIMEOUT = 120000; // 2 minutes
+
+    const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+    let retryCount = 0;
+
+    while (retryCount < MAX_RETRIES) {
+      try {
+        // Break down the request into smaller chunks if it's too long
+        const chunks = this.splitQueryIntoChunks(query);
+        const allActivities: Activity[] = [];
+
+        for (const chunk of chunks) {
+          const response = await axios.post(
+            this.baseUrl,
             {
-              role: 'system',
-              content: 'You are a helpful travel planning assistant.'
+              model: 'sonar',
+              messages: [
+                {
+                  role: 'system',
+                  content: 'You are a helpful travel planning assistant.'
+                },
+                {
+                  role: 'user',
+                  content: chunk
+                }
+              ],
+              temperature: 0.3,
+              max_tokens: 4000,
+              web_search: true
             },
             {
-              role: 'user',
-              content: query
+              headers: {
+                'Authorization': `Bearer ${this.apiKey}`,
+                'Content-Type': 'application/json'
+              },
+              timeout: TIMEOUT
             }
-          ],
-          temperature: 0.3,
-          max_tokens: 8000,
-          web_search: true
-        },
-        {
-          headers: {
-            'Authorization': `Bearer ${this.apiKey}`,
-            'Content-Type': 'application/json'
-          }
-        }
-      );
+          );
 
-      const content = response.data.choices[0]?.message?.content;
-      if (!content) {
-        logger.error('[Activity Generation] No content in Perplexity response');
-        return [];
+          const content = response.data.choices[0]?.message?.content;
+          if (!content) {
+            logger.error('[Activity Generation] No content in Perplexity response');
+            continue;
+          }
+
+          logger.debug('[Activity Generation] Raw content received:', { contentLength: content.length });
+
+          try {
+            // Parse and validate the content
+            const parsedActivities = await this.parseActivitiesContent(content);
+            if (parsedActivities.length > 0) {
+              allActivities.push(...parsedActivities);
+            }
+          } catch (parseError) {
+            logger.error('[Activity Generation] Failed to parse activities:', parseError);
+            continue;
+          }
+
+          // Add delay between chunks to avoid rate limiting
+          await sleep(1000);
+        }
+
+        if (allActivities.length > 0) {
+          return allActivities;
+        }
+
+        // If we got here with no activities, try again
+        logger.warn(`[Activity Generation] No valid activities found in response (attempt ${retryCount + 1}/${MAX_RETRIES})`);
+        retryCount++;
+        await sleep(RETRY_DELAY);
+        continue;
+
+      } catch (error) {
+        logger.error('[Activity Generation] Error calling Perplexity API', {
+          error: error instanceof Error ? error.message : 'Unknown error',
+          retryCount
+        });
+
+        if (retryCount < MAX_RETRIES - 1) {
+          retryCount++;
+          await sleep(RETRY_DELAY);
+          continue;
+        }
+        throw error;
       }
+    }
 
-      logger.debug('[Activity Generation] Raw content received:', { contentLength: content.length });
+    return [];
+  }
 
+  private splitQueryIntoChunks(query: string): string[] {
+    // If query is short enough, return as is
+    if (query.length <= 4000) {
+      return [query];
+    }
+
+    // Split the query into days if it's for multiple days
+    const dayMatches = query.match(/dayNumber: 1-(\d+)/);
+    if (dayMatches && dayMatches[1]) {
+      const totalDays = parseInt(dayMatches[1]);
+      const chunks: string[] = [];
+      
+      // Split into chunks of 2 days each
+      for (let i = 0; i < totalDays; i += 2) {
+        const endDay = Math.min(i + 2, totalDays);
+        const chunk = query.replace(
+          /dayNumber: 1-\d+/,
+          `dayNumber: ${i + 1}-${endDay}`
+        );
+        chunks.push(chunk);
+      }
+      
+      return chunks;
+    }
+
+    // If we can't split by days, return as is
+    return [query];
+  }
+
+  private async parseActivitiesContent(content: string): Promise<Activity[]> {
+    try {
+      // First try to parse the content directly
+      let parsedContent: any;
       try {
-        // First try to parse the content directly
-        let parsedContent: any;
-        try {
-          parsedContent = JSON.parse(content);
-        } catch (e) {
-          // If direct parsing fails, try to extract JSON from markdown or text
-          const jsonMatch = content.match(/```json\s*([\s\S]*?)\s*```/) || content.match(/\{[\s\S]*\}|\[[\s\S]*\]/);
-          if (!jsonMatch) {
-            logger.error('[Activity Generation] No JSON content found in response');
-            return [];
-          }
-
-          const jsonContent = jsonMatch[1] || jsonMatch[0];
-          // Clean the JSON string before parsing
-          const cleanedJson = jsonContent
-            .replace(/[\u0000-\u001F]+/g, '') // Remove control characters
-            .replace(/,\s*([}\]])/g, '$1') // Remove trailing commas
-            .replace(/([{,]\s*)(\w+):/g, '$1"$2":') // Ensure property names are quoted
-            .replace(/\n/g, ' ') // Remove newlines
-            .replace(/\s+/g, ' ') // Normalize spaces
-            .trim();
-
-          logger.debug('[Activity Generation] Attempting to parse cleaned JSON:', { cleanedJson });
-          parsedContent = JSON.parse(cleanedJson);
-        }
-
-        // Initialize activities array
-        let activities: Activity[] = [];
-
-        // Handle different response formats
-        if (Array.isArray(parsedContent)) {
-          activities = parsedContent;
-        } else if (parsedContent.activities && Array.isArray(parsedContent.activities)) {
-          activities = parsedContent.activities;
-        } else if (parsedContent.schedule && Array.isArray(parsedContent.schedule)) {
-          activities = parsedContent.schedule.reduce((acc: Activity[], day: any) => {
-            if (day.activities && Array.isArray(day.activities)) {
-              acc.push(...day.activities);
-            }
-            return acc;
-          }, []);
-        }
-
-        if (!activities || activities.length === 0) {
-          logger.error('[Activity Generation] No valid activities found in response');
+        parsedContent = JSON.parse(content);
+      } catch (e) {
+        // If direct parsing fails, try to extract JSON from markdown or text
+        const jsonMatch = content.match(/```json\s*([\s\S]*?)\s*```/) || content.match(/\{[\s\S]*\}|\[[\s\S]*\]/);
+        if (!jsonMatch) {
+          logger.error('[Activity Generation] No JSON content found in response');
           return [];
         }
-        
-        // Add duration validation and normalization
-        const normalizedActivities = activities.map((activity: Activity) => {
-          // Normalize duration to minutes
-          let duration = 0;
-          if (activity.duration) {
-            if (typeof activity.duration === 'number') {
-              duration = activity.duration;
-            } else if (typeof activity.duration === 'object') {
-              const durationObj = activity.duration as { min?: number; max?: number; fixedDurationInMinutes?: number };
-              if (durationObj.fixedDurationInMinutes) {
-                duration = durationObj.fixedDurationInMinutes;
-              } else if (durationObj.min && durationObj.max) {
-                duration = Math.floor((durationObj.min + durationObj.max) / 2);
-              }
-            } else if (typeof activity.duration === 'string') {
-              const durationStr = activity.duration as string;
-              const hourMatch = durationStr.match(/(\d+)\s*(?:hours?|hrs?)/i);
-              const minuteMatch = durationStr.match(/(\d+)\s*(?:minutes?|mins?)/i);
-              
-              if (hourMatch) {
-                duration += parseInt(hourMatch[1]) * 60;
-              }
-              if (minuteMatch) {
-                duration += parseInt(minuteMatch[1]);
-              }
-            }
+
+        const jsonContent = jsonMatch[1] || jsonMatch[0];
+        // Clean the JSON string before parsing
+        const cleanedJson = jsonContent
+          .replace(/[\u0000-\u001F]+/g, '') // Remove control characters
+          .replace(/,\s*([}\]])/g, '$1') // Remove trailing commas
+          .replace(/([{,]\s*)(\w+):/g, '$1"$2":') // Ensure property names are quoted
+          .replace(/\n/g, ' ') // Remove newlines
+          .replace(/\s+/g, ' ') // Normalize spaces
+          .trim();
+
+        logger.debug('[Activity Generation] Attempting to parse cleaned JSON:', { cleanedJson });
+        parsedContent = JSON.parse(cleanedJson);
+      }
+
+      // Initialize activities array
+      let activities: Activity[] = [];
+
+      // Handle different response formats
+      if (Array.isArray(parsedContent)) {
+        activities = parsedContent;
+      } else if (parsedContent.activities && Array.isArray(parsedContent.activities)) {
+        activities = parsedContent.activities;
+      } else if (parsedContent.schedule && Array.isArray(parsedContent.schedule)) {
+        activities = parsedContent.schedule.reduce((acc: Activity[], day: any) => {
+          if (day.activities && Array.isArray(day.activities)) {
+            acc.push(...day.activities);
           }
+          return acc;
+        }, []);
+      }
 
-          // Normalize price
-          const price = typeof activity.price === 'number' 
-            ? { amount: activity.price, currency: 'USD' }
-            : activity.price || { amount: 0, currency: 'USD' };
-
-          return {
-            ...activity,
-            id: activity.id || `${activity.name}-${activity.timeSlot}-${Date.now()}`.toLowerCase().replace(/\s+/g, '-'),
-            duration: duration || 120, // Default to 2 hours if no duration specified
-            price,
-            selected: false,
-            category: activity.category || 'Cultural & Historical'
-          };
-        });
-        
-        logger.info('[Activity Generation] Successfully processed activities', {
-          totalActivities: normalizedActivities.length,
-          firstActivity: normalizedActivities[0]?.name
-        });
-
-        return normalizedActivities;
-      } catch (error) {
-        logger.error('[Activity Generation] Failed to parse Perplexity response', { 
-          error: error instanceof Error ? error.message : 'Unknown error',
-          content 
-        });
+      if (!activities || activities.length === 0) {
+        logger.error('[Activity Generation] No valid activities found in response');
         return [];
       }
+
+      // Validate and normalize activities
+      return activities.map(activity => this.normalizeActivity(activity)).filter(Boolean) as Activity[];
+
     } catch (error) {
-      logger.error('[Activity Generation] Error calling Perplexity API', {
+      logger.error('[Activity Generation] Failed to parse activities:', error);
+      return [];
+    }
+  }
+
+  private normalizeActivity(activity: any): Activity | null {
+    try {
+      if (!activity.name) {
+        return null;
+      }
+
+      // Normalize duration
+      let duration = 0;
+      if (activity.duration) {
+        if (typeof activity.duration === 'number') {
+          duration = activity.duration;
+        } else if (typeof activity.duration === 'object') {
+          const durationObj = activity.duration as { min?: number; max?: number; fixedDurationInMinutes?: number };
+          if (durationObj.fixedDurationInMinutes) {
+            duration = durationObj.fixedDurationInMinutes;
+          } else if (durationObj.min && durationObj.max) {
+            duration = Math.floor((durationObj.min + durationObj.max) / 2);
+          }
+        } else if (typeof activity.duration === 'string') {
+          const durationStr = activity.duration as string;
+          const hourMatch = durationStr.match(/(\d+)\s*(?:hours?|hrs?)/i);
+          const minuteMatch = durationStr.match(/(\d+)\s*(?:minutes?|mins?)/i);
+          
+          if (hourMatch) {
+            duration += parseInt(hourMatch[1]) * 60;
+          }
+          if (minuteMatch) {
+            duration += parseInt(minuteMatch[1]);
+          }
+        }
+      }
+
+      // Normalize price
+      const price = typeof activity.price === 'number' 
+        ? { amount: activity.price, currency: 'USD' }
+        : activity.price || { amount: 0, currency: 'USD' };
+
+      return {
+        ...activity,
+        id: activity.id || `${activity.name}-${activity.timeSlot}-${Date.now()}`.toLowerCase().replace(/\s+/g, '-'),
+        duration: duration || 120, // Default to 2 hours if no duration specified
+        price,
+        selected: false,
+        category: activity.category || 'Cultural & Historical',
+        timeSlot: activity.timeSlot || 'morning',
+        dayNumber: activity.dayNumber || 1
+      };
+    } catch (error) {
+      logger.error('[Activity Generation] Failed to normalize activity:', {
+        activity: activity.name,
         error: error instanceof Error ? error.message : 'Unknown error'
       });
-      return [];
+      return null;
     }
   }
 
@@ -1459,7 +1548,7 @@ IMPORTANT: You MUST provide detailed commentary and highlights that explicitly r
   }
 
   private getDateForActivity(dayNumber: number, params: GenerateActivitiesParams): string {
-    const startDate = new Date(params.flightTimes?.arrival || Date.now());
+    const startDate = new Date(params.startDate || Date.now());
     const activityDate = new Date(startDate);
     activityDate.setDate(startDate.getDate() + (dayNumber - 1));
     return activityDate.toISOString().split('T')[0];

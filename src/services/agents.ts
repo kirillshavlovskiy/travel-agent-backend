@@ -30,7 +30,13 @@ interface TravelRequest {
   cabinClass?: 'ECONOMY' | 'PREMIUM_ECONOMY' | 'BUSINESS' | 'FIRST';
   days: number;
   category?: string;
-  userPreferences?: string;
+  userPreferences?: {
+    travelStyle: string;
+    pacePreference: string;
+    interests: string[];
+    accessibility: string[];
+    dietaryRestrictions: string[];
+  };
 }
 
 interface PerplexitySearchResult {
@@ -272,6 +278,7 @@ interface BudgetBreakdown {
     medium: CategoryTier<FlightReference>;
     premium: CategoryTier<FlightReference>;
   };
+  activities: any;
 }
 
 const SYSTEM_MESSAGE = `You are an AI travel budget expert. Your role is to:
@@ -580,6 +587,60 @@ export class VacationBudgetAgent {
     // Process the flight data we have
     const groupedFlights = this.groupFlightsByTier(flightData);
 
+    // Calculate number of days
+    const startDate = request.startDate ? new Date(request.startDate) : new Date();
+    const endDate = request.endDate ? new Date(request.endDate) : new Date();
+    const days = Math.ceil((endDate.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24));
+
+    // Get activities for the destination
+    logger.info('[VacationBudgetAgent] Generating activities...');
+    const activitiesResponse = await fetch('http://localhost:3001/api/activities/generate', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        destination: request.destinations[0].label,
+        days,
+        budget: request.budget || 500,
+        currency: request.currency || 'USD',
+        preferences: request.userPreferences || {
+          travelStyle: 'medium',
+          pacePreference: 'moderate',
+          interests: ['Cultural & Historical', 'Food & Entertainment'],
+          accessibility: [],
+          dietaryRestrictions: []
+        }
+      })
+    });
+
+    if (!activitiesResponse.ok) {
+      logger.error('[VacationBudgetAgent] Failed to generate activities:', await activitiesResponse.text());
+      throw new Error('Failed to generate activities');
+    }
+
+    const activitiesData = await activitiesResponse.json();
+    logger.info('[VacationBudgetAgent] Activities generated:', activitiesData);
+
+    // Process other categories with Perplexity (excluding flights and activities)
+    const categories = ['localTransportation', 'food'];
+    console.log(`[TIMING] Processing ${categories.length} categories with Perplexity`);
+
+    const results = await Promise.all(
+      categories.map(async (category) => {
+        const categoryStart = Date.now();
+        console.log(`[TIMING][${category}] Starting category processing`);
+
+        const prompt = this.constructPrompt({ category, request });
+        console.log(`[TIMING][${category}] Prompt constructed in ${Date.now() - categoryStart}ms`);
+
+        const data = await this.queryPerplexity(prompt, category);
+        console.log(`[TIMING][${category}] Perplexity query completed in ${Date.now() - categoryStart}ms`);
+
+        return { category, data };
+      })
+    );
+
     const response: BudgetBreakdown = {
       requestDetails: {
         departureLocation: request.departureLocation,
@@ -593,40 +654,22 @@ export class VacationBudgetAgent {
         budget: groupedFlights.budget || this.getDefaultCategoryData('flights').flights!.budget,
         medium: groupedFlights.medium || this.getDefaultCategoryData('flights').flights!.medium,
         premium: groupedFlights.premium || this.getDefaultCategoryData('flights').flights!.premium
-      }
+      },
+      activities: activitiesData.activities
     };
 
-    // Process other categories with Perplexity (excluding flights)
-    const categories = ['localTransportation', 'food', 'activities'];
-    console.log(`[TIMING] Processing ${categories.length} categories with Perplexity`);
-
-      const results = await Promise.all(
-        categories.map(async (category) => {
-          const categoryStart = Date.now();
-          console.log(`[TIMING][${category}] Starting category processing`);
-
-        const prompt = this.constructPrompt({ category, request });
-          console.log(`[TIMING][${category}] Prompt constructed in ${Date.now() - categoryStart}ms`);
-
-          const data = await this.queryPerplexity(prompt, category);
-          console.log(`[TIMING][${category}] Perplexity query completed in ${Date.now() - categoryStart}ms`);
-
-          return { category, data };
-        })
-      );
-
     // Add Perplexity category data to the response
-      results.forEach(({ category, data }) => {
+    results.forEach(({ category, data }) => {
       (response as any)[category] = data[category as keyof CategoryData];
     });
 
     const totalTime = Date.now() - this.startTime;
-      console.log(`[TIMING] Total budget calculation completed in ${totalTime}ms`);
-      if (totalTime > 25000) {
-        console.warn(`[TIMING] Warning: Budget calculation took longer than 25 seconds`);
-      }
+    console.log(`[TIMING] Total budget calculation completed in ${totalTime}ms`);
+    if (totalTime > 25000) {
+      console.warn(`[TIMING] Warning: Budget calculation took longer than 25 seconds`);
+    }
 
-      return response;
+    return response;
   }
 
   private determineFlightTier(flight: AmadeusFlightOffer): 'budget' | 'medium' | 'premium' {
@@ -1278,5 +1321,68 @@ For each activity you find, include:
     if (price < 30) return 'budget';
     if (price <= 100) return 'medium';
     return 'premium';
+  }
+
+  async calculateBudget(request: TravelRequest): Promise<CategoryData> {
+    try {
+      logger.info('[VacationBudgetAgent] Starting budget calculation:', request);
+
+      // Calculate number of days
+      const startDate = request.startDate ? new Date(request.startDate) : new Date();
+      const endDate = request.endDate ? new Date(request.endDate) : new Date();
+      const days = Math.ceil((endDate.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24));
+
+      // Get activities for the destination
+      const activitiesResponse = await fetch('http://localhost:3001/api/activities/generate', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          destination: request.destinations[0].label,
+          days,
+          budget: request.budget || 500,
+          currency: request.currency || 'USD',
+          preferences: request.userPreferences || {
+            travelStyle: 'medium',
+            pacePreference: 'moderate',
+            interests: ['Cultural & Historical', 'Food & Entertainment'],
+            accessibility: [],
+            dietaryRestrictions: []
+          }
+        })
+      });
+
+      if (!activitiesResponse.ok) {
+        logger.error('[VacationBudgetAgent] Failed to generate activities:', await activitiesResponse.text());
+        throw new Error('Failed to generate activities');
+      }
+
+      const activitiesData = await activitiesResponse.json();
+      logger.info('[VacationBudgetAgent] Activities generated:', activitiesData);
+
+      // Get flight data with proper parameters
+      const flightData = await this.flightService.searchFlights({
+        segments: [{
+          originLocationCode: request.departureLocation.code,
+          destinationLocationCode: request.destinations[0].code,
+          departureDate: request.startDate || ''
+        }],
+        travelClass: request.cabinClass || 'ECONOMY',
+        adults: request.travelers
+      });
+
+      // Group flights by tier
+      const groupedFlights = this.groupFlightsByTier(flightData);
+
+      // Return combined data
+      return {
+        flights: groupedFlights,
+        activities: activitiesData.activities
+      };
+    } catch (error) {
+      logger.error('[VacationBudgetAgent] Error calculating budget:', error);
+      throw error;
+    }
   }
 } 
