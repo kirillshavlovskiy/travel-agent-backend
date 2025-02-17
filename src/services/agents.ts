@@ -49,9 +49,13 @@ interface PerplexityResponse {
 }
 
 interface FlightReference {
+  id: string;
   airline: string;
   route: string;
-  price: number;
+  price: {
+    amount: number;
+    currency: string;
+  };
   outbound: string;
   inbound: string;
   duration: string;
@@ -59,6 +63,67 @@ interface FlightReference {
   flightNumber: string;
   tier: 'budget' | 'medium' | 'premium';
   referenceUrl: string;
+  details: {
+    outbound: {
+      duration: string;
+      segments: {
+        departure: {
+          airport: string;
+          terminal: string;
+          time: string;
+        };
+        arrival: {
+          airport: string;
+          terminal: string;
+          time: string;
+        };
+        duration: string;
+        flightNumber: string;
+        aircraft: {
+          code: string;
+        };
+        airline: {
+          code: string;
+          name: string;
+        };
+      }[];
+    };
+    inbound?: {
+      duration: string;
+      segments: {
+        departure: {
+          airport: string;
+          terminal: string;
+          time: string;
+        };
+        arrival: {
+          airport: string;
+          terminal: string;
+          time: string;
+        };
+        duration: string;
+        flightNumber: string;
+        aircraft: {
+          code: string;
+        };
+        airline: {
+          code: string;
+          name: string;
+        };
+      }[];
+    };
+    policies: {
+      cancellation: string;
+      changes: string;
+      refund: string;
+      checkedBags: number;
+      carryOn: number;
+      seatSelection: boolean;
+    };
+  };
+  cabinClass: string;
+  bookingClass: string;
+  airlineCode: string;
 }
 
 interface HotelReference {
@@ -598,9 +663,13 @@ export class VacationBudgetAgent {
 
     const route = `${firstSegment.departure.iataCode} to ${lastSegment.arrival.iataCode}`;
     const flightRef: FlightReference = {
+      id: `${firstSegment.carrierCode}${firstSegment.number}-${Date.now()}`,
       airline: firstSegment.carrierCode,
       route,
-      price: parseFloat(flight.price.total),
+      price: {
+        amount: parseFloat(flight.price.total),
+        currency: flight.price.currency
+      },
       outbound: firstSegment.departure.at,
       inbound: returnFirstSegment ? returnFirstSegment.departure.at : '',
       duration: `${flight.itineraries[0].duration}${returnSegments.length ? ` / ${flight.itineraries[1].duration}` : ''}`,
@@ -611,7 +680,68 @@ export class VacationBudgetAgent {
         route,
         outbound: firstSegment.departure.at,
         inbound: returnFirstSegment ? returnFirstSegment.departure.at : '',
-      } as FlightReference)
+      } as FlightReference),
+      details: {
+        outbound: {
+          duration: flight.itineraries[0].duration,
+          segments: segments.map(segment => ({
+            departure: {
+              airport: segment.departure.iataCode,
+              terminal: segment.departure.terminal,
+              time: segment.departure.at
+            },
+            arrival: {
+              airport: segment.arrival.iataCode,
+              terminal: segment.arrival.terminal,
+              time: segment.arrival.at
+            },
+            duration: segment.duration,
+            flightNumber: `${segment.carrierCode}${segment.number}`,
+            aircraft: {
+              code: segment.aircraft.code
+            },
+            airline: {
+              code: segment.carrierCode,
+              name: segment.carrierCode // You might want to add a mapping for full airline names
+            }
+          }))
+        },
+        inbound: returnSegments.length > 0 ? {
+          duration: flight.itineraries[1].duration,
+          segments: returnSegments.map(segment => ({
+            departure: {
+              airport: segment.departure.iataCode,
+              terminal: segment.departure.terminal,
+              time: segment.departure.at
+            },
+            arrival: {
+              airport: segment.arrival.iataCode,
+              terminal: segment.arrival.terminal,
+              time: segment.arrival.at
+            },
+            duration: segment.duration,
+            flightNumber: `${segment.carrierCode}${segment.number}`,
+            aircraft: {
+              code: segment.aircraft.code
+            },
+            airline: {
+              code: segment.carrierCode,
+              name: segment.carrierCode
+            }
+          }))
+        } : undefined,
+        policies: {
+          cancellation: flight.policies?.cancellation || 'Standard cancellation policy',
+          changes: flight.policies?.changes || 'Standard change policy',
+          refund: flight.policies?.refund || 'Standard refund policy',
+          checkedBags: flight.policies?.checkedBags || 1,
+          carryOn: flight.policies?.carryOn || 1,
+          seatSelection: flight.policies?.seatSelection || true
+        }
+      },
+      cabinClass: flight.travelerPricings[0].fareDetailsBySegment[0].cabin,
+      bookingClass: flight.travelerPricings[0].fareDetailsBySegment[0].class,
+      airlineCode: firstSegment.carrierCode
     };
 
     return flightRef;
@@ -739,9 +869,9 @@ export class VacationBudgetAgent {
     // Process the flight data we have
     const groupedFlights = this.groupFlightsByTier(flightData);
     response.flights = {
-      budget: groupedFlights.budget || this.getDefaultCategoryData('flights').flights!.budget,
-      medium: groupedFlights.medium || this.getDefaultCategoryData('flights').flights!.medium,
-      premium: groupedFlights.premium || this.getDefaultCategoryData('flights').flights!.premium
+        budget: groupedFlights.budget || this.getDefaultCategoryData('flights').flights!.budget,
+        medium: groupedFlights.medium || this.getDefaultCategoryData('flights').flights!.medium,
+        premium: groupedFlights.premium || this.getDefaultCategoryData('flights').flights!.premium
     };
 
     // Generate activities using the activities endpoint
@@ -937,7 +1067,7 @@ export class VacationBudgetAgent {
           index === self.findIndex(p => p.dayNumber === plan.dayNumber)
         );
 
-      const totalTime = Date.now() - this.startTime;
+    const totalTime = Date.now() - this.startTime;
       console.log(`[TIMING] Total budget calculation completed in ${totalTime}ms`);
       if (totalTime > 25000) {
         console.warn(`[TIMING] Warning: Budget calculation took longer than 25 seconds`);
@@ -1018,7 +1148,7 @@ For each activity found, provide details in this JSON format:
 
     // If we have destination and userPreferences, it's for single activity generation
     if (destination) {
-      return `Search for available activities in ${destination} with these requirements:
+    return `Search for available activities in ${destination} with these requirements:
 
 SEARCH PROCESS:
 1. Search both platforms:
@@ -1513,7 +1643,7 @@ For each activity you find, include:
       });
 
       // Ensure we have activities for all days
-      for (let day = 1; day <= days; day++) {
+    for (let day = 1; day <= days; day++) {
         if (!activitiesByDay.has(day)) {
           activitiesByDay.set(day, []);
         }
