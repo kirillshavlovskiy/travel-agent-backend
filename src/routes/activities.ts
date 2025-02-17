@@ -5,7 +5,7 @@ import { logger } from '../utils/logger.js';
 import { ViatorService } from '../services/viator.js';
 import { Activity } from '../services/perplexity.js';
 
-const router = Router();
+const activitiesRouter = Router();
 
 // Add new interface for activity scoring
 interface ActivityScore {
@@ -127,7 +127,7 @@ function calculateActivityScore(
 
 // Add deduplication function
 function deduplicateActivities(activities: Activity[]): Activity[] {
-      // Track seen activities by name and product code
+      // Only deduplicate exact duplicates (same name AND product code)
       const seen = new Set<string>();
       const uniqueActivities = activities.filter(activity => {
         const key = `${activity.name}|${activity.bookingInfo?.productCode || ''}`;
@@ -138,40 +138,13 @@ function deduplicateActivities(activities: Activity[]): Activity[] {
         return true;
       });
 
-      // Filter out activities that are too long for the trip duration
-      const validActivities = uniqueActivities.filter(activity => {
-    const durationInMinutes = typeof activity.duration === 'number' ? activity.duration : 0;
-        const durationInHours = durationInMinutes / 60;
-        
-        // Filter out activities longer than 24 hours
-        if (durationInHours > 24) {
-          logger.debug('Filtering out multi-day activity:', {
-            name: activity.name,
-            durationInMinutes,
-            durationInHours: Math.round(durationInHours * 10) / 10
-          });
-          return false;
-        }
-
-        // Also filter out suspiciously short activities (less than 15 minutes)
-        if (durationInMinutes < 15 && durationInMinutes !== 0) {
-          logger.debug('Filtering out suspiciously short activity:', {
-            name: activity.name,
-            durationInMinutes
-          });
-          return false;
-        }
-
-        return true;
-      });
-
       logger.info('Activities after deduplication:', {
         originalCount: activities.length,
-        uniqueCount: validActivities.length,
-        removedCount: activities.length - validActivities.length
+        uniqueCount: uniqueActivities.length,
+        removedCount: activities.length - uniqueActivities.length
       });
 
-      return validActivities;
+      return uniqueActivities;
 }
 
 // Add schedule optimization function
@@ -187,7 +160,7 @@ async function optimizeSchedule(activities: Activity[], days: number, destinatio
       unselected: unselectedActivities.length
     });
 
-    const query = `Create a ${days}-day schedule for ${destination} with these activities:
+    const query = `Create a detailed ${days}-day schedule for ${destination} with these activities:
 
 PRESELECTED ACTIVITIES (MUST BE INCLUDED):
 ${preselectedActivities.map(a => `- ${a.name} (${a.duration || 'N/A'} minutes, ${a.timeSlot}, Day ${a.dayNumber})`).join('\n')}
@@ -200,36 +173,63 @@ REQUIREMENTS:
 2. Create a balanced schedule across ${days} days
 3. Group nearby activities on the same day
 4. Consider activity durations and opening hours
-5. Allow 2-4 activities per day
+5. Allow 4-6 activities per day
 6. Mix different types of activities
+7. Include breaks and meal times
+8. Consider travel time between activities
 
 PROVIDE FOR EACH DAY:
-1. List of activities with time slots
-2. Reasoning for activity grouping and timing
-3. Travel logistics between activities
-4. Special considerations (opening hours, crowds, weather)
+1. Detailed timeline with specific start times
+2. Travel logistics between activities
+3. Suggested breaks and meal times
+4. Special considerations (crowds, weather, etc.)
+5. Alternative options if needed
 
 ALSO PROVIDE:
 1. Overall trip flow explanation
-2. Why certain activities were grouped together
-3. Alternative suggestions if any activities don't fit well
+2. Daily highlights and themes
+3. Transportation recommendations
+4. Dining suggestions
+5. Tips for timing and logistics
 
 Return as JSON with:
 {
   "schedule": [{
     "dayNumber": number,
     "dayPlanningLogic": "detailed reasoning for day's plan",
+    "timeline": [{
+      "startTime": "HH:MM",
+      "endTime": "HH:MM",
+      "activity": "activity name or break description",
+      "type": "activity|break|travel|meal",
+      "details": "specific details or recommendations"
+    }],
     "activities": [{
       "name": "activity name",
       "timeSlot": "morning|afternoon|evening",
       "startTime": "HH:MM",
       "commentary": "why this activity was chosen",
       "itineraryHighlight": "how it fits in the day's flow",
-      "scoringReason": "specific placement reasoning"
+      "logistics": "travel and timing details"
+    }],
+    "breaks": [{
+      "type": "meal|rest|travel",
+      "startTime": "HH:MM",
+      "duration": "minutes",
+      "suggestions": "specific recommendations"
     }]
   }],
   "tripOverview": "overall trip organization logic",
-  "activityFitNotes": "why activities were included/excluded"
+  "dailyHighlights": [{
+    "dayNumber": number,
+    "theme": "day's theme or focus",
+    "highlights": ["key moments or experiences"]
+  }],
+  "logisticsAdvice": {
+    "transportation": ["transportation recommendations"],
+    "timing": ["timing tips and considerations"],
+    "general": ["general logistics advice"]
+  }
 }`;
 
         const response = await perplexityClient.chat(query);
@@ -239,9 +239,11 @@ Return as JSON with:
           return createBasicSchedule(activities, days);
         }
 
-        logger.info('Schedule optimization reasoning:', {
+        logger.info('Schedule optimization complete:', {
           tripOverview: response.tripOverview,
-          activityFitNotes: response.activityFitNotes
+          dailyHighlights: response.dailyHighlights,
+          logisticsAdvice: response.logisticsAdvice,
+          daysScheduled: response.schedule.length
         });
 
     // Verify that all preselected activities are included in their specified slots
@@ -309,7 +311,8 @@ Return as JSON with:
     return {
       schedule: enrichedSchedule,
       tripOverview: response.tripOverview,
-      activityFitNotes: response.activityFitNotes
+      dailyHighlights: response.dailyHighlights,
+      logisticsAdvice: response.logisticsAdvice
     };
       } catch (error) {
         logger.error('Failed to optimize schedule:', error);
@@ -428,7 +431,7 @@ function createBasicSchedule(activities: Activity[], days: number) {
   };
 }
 
-router.post('/generate', async (req: Request, res: Response) => {
+activitiesRouter.post('/generate', async (req: Request, res: Response) => {
   try {
     // Add detailed request logging
     logger.info('Raw request body:', {
@@ -585,7 +588,7 @@ router.post('/generate', async (req: Request, res: Response) => {
   }
 });
 
-router.post('/enrich', async (req, res) => {
+activitiesRouter.post('/enrich', async (req, res) => {
   try {
     const { activityId, productCode, name } = req.body;
 
@@ -665,4 +668,4 @@ router.post('/enrich', async (req, res) => {
   }
 });
 
-export default router; 
+export { activitiesRouter }; 

@@ -107,7 +107,6 @@ interface GenerateActivitiesParams {
     accessibility: string[];
     dietaryRestrictions: string[];
   };
-  startDate?: string;
 }
 
 interface DailyItinerarySummary {
@@ -178,177 +177,28 @@ function calculateDistribution(activities: Activity[]): CategoryDistribution {
 
 function balanceActivities(activities: Activity[]): Activity[] {
   const totalActivities = activities.length;
-  const targetPerCategory = Math.ceil(totalActivities / ACTIVITY_CATEGORIES.length);
-  const targetPerTier = Math.ceil(totalActivities / PRICE_TIERS.length);
 
   logger.info('[Activity Balancing] Starting activity balancing', {
-    totalActivities,
-    targetPerCategory,
-    targetPerTier
+    totalActivities
   });
 
-  // First, clean similar activities
-  let cleanedActivities = cleanSimilarActivities(activities);
-
-  // Calculate current distribution
-  const distribution = calculateDistribution(cleanedActivities);
-  
-  logger.info('[Activity Balancing] Current distribution', { distribution });
-
-  // Group activities by category and tier
-  const groupedActivities = cleanedActivities.reduce((acc: Record<string, Record<typeof PRICE_TIERS[number], Activity[]>>, activity: Activity) => {
-    const category = activity.category;
-    const tier = determinePriceTier(activity.price);
-    
-    if (!acc[category]) {
-      acc[category] = { budget: [], medium: [], premium: [] };
+  // Only remove exact duplicates
+  const seen = new Set<string>();
+  const balancedActivities = activities.filter(activity => {
+    const key = `${activity.name}|${activity.bookingInfo?.productCode || ''}`;
+    if (seen.has(key)) {
+      return false;
     }
-    acc[category][tier].push(activity);
-    return acc;
-  }, {});
-
-  // Balance activities
-  const balancedActivities: Activity[] = [];
-  
-  // First pass: ensure minimum representation for each category
-  ACTIVITY_CATEGORIES.forEach((category: ActivityCategory) => {
-    const categoryActivities = groupedActivities[category.name] || { budget: [], medium: [], premium: [] };
-    const totalInCategory = Object.values(categoryActivities).flat().length;
-    
-    if (totalInCategory > targetPerCategory) {
-      // Remove excess activities, preferring to keep higher rated ones
-      const allCategoryActivities = Object.values(categoryActivities).flat()
-        .sort((a: Activity, b: Activity) => (b.rating || 0) - (a.rating || 0));
-      
-      balancedActivities.push(...allCategoryActivities.slice(0, targetPerCategory));
-    } else {
-      // Keep all activities in this category
-      balancedActivities.push(...Object.values(categoryActivities).flat());
-    }
+    seen.add(key);
+    return true;
   });
+
+  // Calculate distribution for logging purposes
+  const distribution = calculateDistribution(balancedActivities);
+  logger.info('[Activity Balancing] Activity distribution', { distribution });
 
   return balancedActivities;
 }
-
-const cleanSimilarActivities = (activities: Activity[]): Activity[] => {
-  logger.info('[Duplicate Cleaning] Starting process', {
-    totalActivities: activities.length
-  });
-
-  const duplicateGroups = new Map<string, Activity[]>();
-  
-  // Normalize activity names for comparison
-  const normalizeTitle = (title: string): string => {
-    return title
-      .toLowerCase()
-      // Remove common variations
-      .replace(/tickets?|tours?|guided|exclusive|semi-private|private|direct|entry/gi, '')
-      // Remove special characters and extra spaces
-      .replace(/[^\w\s]/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim();
-  };
-
-  // Group similar activities
-  for (const activity of activities) {
-    let foundMatch = false;
-    const normalizedName = normalizeTitle(activity.name);
-
-    // First check for exact matches after normalization
-    for (const [key, group] of duplicateGroups) {
-      const baseActivity = group[0];
-      const normalizedBaseName = normalizeTitle(baseActivity.name);
-
-      // Check for exact matches after normalization
-      if (normalizedName === normalizedBaseName) {
-        group.push(activity);
-        foundMatch = true;
-        logger.debug('[Duplicate Cleaning] Found exact normalized match', {
-          original: baseActivity.name,
-          duplicate: activity.name
-        });
-        break;
-      }
-
-      // If not exact match, check string similarity with higher threshold
-      const similarity = calculateStringSimilarity(normalizedName, normalizedBaseName);
-      
-      // Use stricter similarity threshold (0.85)
-      if (similarity > 0.85) {
-        // Additional verification: check if duration and location match
-        const durationMatch = activity.duration === baseActivity.duration;
-        const locationMatch = activity.location === baseActivity.location;
-        
-        if (durationMatch && locationMatch) {
-          group.push(activity);
-          foundMatch = true;
-          logger.debug('[Duplicate Cleaning] Found similar activity', {
-            original: baseActivity.name,
-            duplicate: activity.name,
-            similarity,
-            duration: activity.duration,
-            location: activity.location
-          });
-          break;
-        }
-      }
-    }
-
-    if (!foundMatch) {
-      const activityId = activity.id || `activity-${Math.random().toString(36).substr(2, 9)}`;
-      duplicateGroups.set(activityId, [activity]);
-    }
-  }
-
-  // Select best activity from each group
-  const cleanedActivities: Activity[] = [];
-  for (const [groupId, group] of duplicateGroups) {
-    if (group.length > 1) {
-      logger.info('[Duplicate Cleaning] Processing group', {
-        groupId,
-        count: group.length,
-        activities: group.map(a => ({
-          name: a.name,
-          rating: a.rating,
-          reviews: a.numberOfReviews,
-          price: a.price
-        }))
-      });
-
-      // Enhanced selection criteria
-      const bestActivity = group.reduce((best, current) => {
-        // If one has a rating and the other doesn't, prefer the rated one
-        if ((best.rating || 0) === 0 && (current.rating || 0) > 0) return current;
-        if ((current.rating || 0) === 0 && (best.rating || 0) > 0) return best;
-
-        // If both have ratings, use the shouldPreferActivity function
-        return shouldPreferActivity(current, best) ? current : best;
-      });
-
-      logger.info('[Duplicate Cleaning] Selected best activity', {
-        groupId,
-        selected: {
-          name: bestActivity.name,
-          rating: bestActivity.rating,
-          reviews: bestActivity.numberOfReviews,
-          price: bestActivity.price
-        }
-      });
-      
-      cleanedActivities.push(bestActivity);
-    } else {
-      cleanedActivities.push(group[0]);
-    }
-  }
-
-  logger.info('[Duplicate Cleaning] Completed', {
-    originalCount: activities.length,
-    cleanedCount: cleanedActivities.length,
-    duplicatesRemoved: activities.length - cleanedActivities.length
-  });
-
-  return cleanedActivities;
-};
 
 function getTimeSlotValue(timeSlot: string): number {
   switch (timeSlot.toLowerCase()) {
@@ -517,239 +367,151 @@ Return ONLY a valid JSON array of activities.`;
   }
 
   private async makePerplexityRequests(query: string): Promise<Activity[]> {
-    const MAX_RETRIES = 3;
-    const RETRY_DELAY = 5000;
-    const TIMEOUT = 120000; // 2 minutes
-
-    const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-    let retryCount = 0;
-
-    while (retryCount < MAX_RETRIES) {
-      try {
-        // Break down the request into smaller chunks if it's too long
-        const chunks = this.splitQueryIntoChunks(query);
-        const allActivities: Activity[] = [];
-
-        for (const chunk of chunks) {
-          const response = await axios.post(
-            this.baseUrl,
+    try {
+      const response = await axios.post(
+        this.baseUrl,
+        {
+          model: 'sonar',
+          messages: [
             {
-              model: 'sonar',
-              messages: [
-                {
-                  role: 'system',
-                  content: 'You are a helpful travel planning assistant.'
-                },
-                {
-                  role: 'user',
-                  content: chunk
-                }
-              ],
-              temperature: 0.3,
-              max_tokens: 4000,
-              web_search: true
+              role: 'system',
+              content: 'You are a helpful travel planning assistant.'
             },
             {
-              headers: {
-                'Authorization': `Bearer ${this.apiKey}`,
-                'Content-Type': 'application/json'
-              },
-              timeout: TIMEOUT
+              role: 'user',
+              content: query
             }
-          );
-
-          const content = response.data.choices[0]?.message?.content;
-          if (!content) {
-            logger.error('[Activity Generation] No content in Perplexity response');
-            continue;
+          ],
+          temperature: 0.3,
+          max_tokens: 8000,
+          web_search: true
+        },
+        {
+          headers: {
+            'Authorization': `Bearer ${this.apiKey}`,
+            'Content-Type': 'application/json'
           }
-
-          logger.debug('[Activity Generation] Raw content received:', { contentLength: content.length });
-
-          try {
-            // Parse and validate the content
-            const parsedActivities = await this.parseActivitiesContent(content);
-            if (parsedActivities.length > 0) {
-              allActivities.push(...parsedActivities);
-            }
-          } catch (parseError) {
-            logger.error('[Activity Generation] Failed to parse activities:', parseError);
-            continue;
-          }
-
-          // Add delay between chunks to avoid rate limiting
-          await sleep(1000);
         }
+      );
 
-        if (allActivities.length > 0) {
-          return allActivities;
-        }
-
-        // If we got here with no activities, try again
-        logger.warn(`[Activity Generation] No valid activities found in response (attempt ${retryCount + 1}/${MAX_RETRIES})`);
-        retryCount++;
-        await sleep(RETRY_DELAY);
-        continue;
-
-      } catch (error) {
-        logger.error('[Activity Generation] Error calling Perplexity API', {
-          error: error instanceof Error ? error.message : 'Unknown error',
-          retryCount
-        });
-
-        if (retryCount < MAX_RETRIES - 1) {
-          retryCount++;
-          await sleep(RETRY_DELAY);
-          continue;
-        }
-        throw error;
-      }
-    }
-
-    return [];
-  }
-
-  private splitQueryIntoChunks(query: string): string[] {
-    // If query is short enough, return as is
-    if (query.length <= 4000) {
-      return [query];
-    }
-
-    // Split the query into days if it's for multiple days
-    const dayMatches = query.match(/dayNumber: 1-(\d+)/);
-    if (dayMatches && dayMatches[1]) {
-      const totalDays = parseInt(dayMatches[1]);
-      const chunks: string[] = [];
-      
-      // Split into chunks of 2 days each
-      for (let i = 0; i < totalDays; i += 2) {
-        const endDay = Math.min(i + 2, totalDays);
-        const chunk = query.replace(
-          /dayNumber: 1-\d+/,
-          `dayNumber: ${i + 1}-${endDay}`
-        );
-        chunks.push(chunk);
-      }
-      
-      return chunks;
-    }
-
-    // If we can't split by days, return as is
-    return [query];
-  }
-
-  private async parseActivitiesContent(content: string): Promise<Activity[]> {
-    try {
-      // First try to parse the content directly
-      let parsedContent: any;
-      try {
-        parsedContent = JSON.parse(content);
-      } catch (e) {
-        // If direct parsing fails, try to extract JSON from markdown or text
-        const jsonMatch = content.match(/```json\s*([\s\S]*?)\s*```/) || content.match(/\{[\s\S]*\}|\[[\s\S]*\]/);
-        if (!jsonMatch) {
-          logger.error('[Activity Generation] No JSON content found in response');
-          return [];
-        }
-
-        const jsonContent = jsonMatch[1] || jsonMatch[0];
-        // Clean the JSON string before parsing
-        const cleanedJson = jsonContent
-          .replace(/[\u0000-\u001F]+/g, '') // Remove control characters
-          .replace(/,\s*([}\]])/g, '$1') // Remove trailing commas
-          .replace(/([{,]\s*)(\w+):/g, '$1"$2":') // Ensure property names are quoted
-          .replace(/\n/g, ' ') // Remove newlines
-          .replace(/\s+/g, ' ') // Normalize spaces
-          .trim();
-
-        logger.debug('[Activity Generation] Attempting to parse cleaned JSON:', { cleanedJson });
-        parsedContent = JSON.parse(cleanedJson);
-      }
-
-      // Initialize activities array
-      let activities: Activity[] = [];
-
-      // Handle different response formats
-      if (Array.isArray(parsedContent)) {
-        activities = parsedContent;
-      } else if (parsedContent.activities && Array.isArray(parsedContent.activities)) {
-        activities = parsedContent.activities;
-      } else if (parsedContent.schedule && Array.isArray(parsedContent.schedule)) {
-        activities = parsedContent.schedule.reduce((acc: Activity[], day: any) => {
-          if (day.activities && Array.isArray(day.activities)) {
-            acc.push(...day.activities);
-          }
-          return acc;
-        }, []);
-      }
-
-      if (!activities || activities.length === 0) {
-        logger.error('[Activity Generation] No valid activities found in response');
+      const content = response.data.choices[0]?.message?.content;
+      if (!content) {
+        logger.error('[Activity Generation] No content in Perplexity response');
         return [];
       }
 
-      // Validate and normalize activities
-      return activities.map(activity => this.normalizeActivity(activity)).filter(Boolean) as Activity[];
+      logger.debug('[Activity Generation] Raw content received:', { contentLength: content.length });
 
-    } catch (error) {
-      logger.error('[Activity Generation] Failed to parse activities:', error);
-      return [];
-    }
-  }
+      try {
+        // First try to parse the content directly
+        let parsedContent: any;
+        try {
+          parsedContent = JSON.parse(content);
+        } catch (e) {
+          // If direct parsing fails, try to extract JSON from markdown or text
+          const jsonMatch = content.match(/```json\s*([\s\S]*?)\s*```/) || content.match(/\{[\s\S]*\}|\[[\s\S]*\]/);
+          if (!jsonMatch) {
+            logger.error('[Activity Generation] No JSON content found in response');
+            return [];
+          }
 
-  private normalizeActivity(activity: any): Activity | null {
-    try {
-      if (!activity.name) {
-        return null;
-      }
+          const jsonContent = jsonMatch[1] || jsonMatch[0];
+          // Clean the JSON string before parsing
+          const cleanedJson = jsonContent
+            .replace(/[\u0000-\u001F]+/g, '') // Remove control characters
+            .replace(/,\s*([}\]])/g, '$1') // Remove trailing commas
+            .replace(/([{,]\s*)(\w+):/g, '$1"$2":') // Ensure property names are quoted
+            .replace(/\n/g, ' ') // Remove newlines
+            .replace(/\s+/g, ' ') // Normalize spaces
+            .trim();
 
-      // Normalize duration
-      let duration = 0;
-      if (activity.duration) {
-        if (typeof activity.duration === 'number') {
-          duration = activity.duration;
-        } else if (typeof activity.duration === 'object') {
-          const durationObj = activity.duration as { min?: number; max?: number; fixedDurationInMinutes?: number };
-          if (durationObj.fixedDurationInMinutes) {
-            duration = durationObj.fixedDurationInMinutes;
-          } else if (durationObj.min && durationObj.max) {
-            duration = Math.floor((durationObj.min + durationObj.max) / 2);
-          }
-        } else if (typeof activity.duration === 'string') {
-          const durationStr = activity.duration as string;
-          const hourMatch = durationStr.match(/(\d+)\s*(?:hours?|hrs?)/i);
-          const minuteMatch = durationStr.match(/(\d+)\s*(?:minutes?|mins?)/i);
-          
-          if (hourMatch) {
-            duration += parseInt(hourMatch[1]) * 60;
-          }
-          if (minuteMatch) {
-            duration += parseInt(minuteMatch[1]);
-          }
+          logger.debug('[Activity Generation] Attempting to parse cleaned JSON:', { cleanedJson });
+          parsedContent = JSON.parse(cleanedJson);
         }
+
+        // Initialize activities array
+        let activities: Activity[] = [];
+
+        // Handle different response formats
+        if (Array.isArray(parsedContent)) {
+          activities = parsedContent;
+        } else if (parsedContent.activities && Array.isArray(parsedContent.activities)) {
+          activities = parsedContent.activities;
+        } else if (parsedContent.schedule && Array.isArray(parsedContent.schedule)) {
+          activities = parsedContent.schedule.reduce((acc: Activity[], day: any) => {
+            if (day.activities && Array.isArray(day.activities)) {
+              acc.push(...day.activities);
+            }
+            return acc;
+          }, []);
+        }
+
+        if (!activities || activities.length === 0) {
+          logger.error('[Activity Generation] No valid activities found in response');
+          return [];
+        }
+        
+        // Add duration validation and normalization
+        const normalizedActivities = activities.map((activity: Activity) => {
+          // Normalize duration to minutes
+          let duration = 0;
+          if (activity.duration) {
+            if (typeof activity.duration === 'number') {
+              duration = activity.duration;
+            } else if (typeof activity.duration === 'object') {
+              const durationObj = activity.duration as { min?: number; max?: number; fixedDurationInMinutes?: number };
+              if (durationObj.fixedDurationInMinutes) {
+                duration = durationObj.fixedDurationInMinutes;
+              } else if (durationObj.min && durationObj.max) {
+                duration = Math.floor((durationObj.min + durationObj.max) / 2);
+              }
+            } else if (typeof activity.duration === 'string') {
+              const durationStr = activity.duration as string;
+              const hourMatch = durationStr.match(/(\d+)\s*(?:hours?|hrs?)/i);
+              const minuteMatch = durationStr.match(/(\d+)\s*(?:minutes?|mins?)/i);
+              
+              if (hourMatch) {
+                duration += parseInt(hourMatch[1]) * 60;
+              }
+              if (minuteMatch) {
+                duration += parseInt(minuteMatch[1]);
+              }
+            }
+          }
+
+          // Normalize price
+          const price = typeof activity.price === 'number' 
+            ? { amount: activity.price, currency: 'USD' }
+            : activity.price || { amount: 0, currency: 'USD' };
+
+          return {
+            ...activity,
+            id: activity.id || `${activity.name}-${activity.timeSlot}-${Date.now()}`.toLowerCase().replace(/\s+/g, '-'),
+            duration: duration || 120, // Default to 2 hours if no duration specified
+            price,
+            selected: false,
+            category: activity.category || 'Cultural & Historical'
+          };
+        });
+        
+        logger.info('[Activity Generation] Successfully processed activities', {
+          totalActivities: normalizedActivities.length,
+          firstActivity: normalizedActivities[0]?.name
+        });
+
+        return normalizedActivities;
+      } catch (error) {
+        logger.error('[Activity Generation] Failed to parse Perplexity response', { 
+          error: error instanceof Error ? error.message : 'Unknown error',
+          content 
+        });
+        return [];
       }
-
-      // Normalize price
-      const price = typeof activity.price === 'number' 
-        ? { amount: activity.price, currency: 'USD' }
-        : activity.price || { amount: 0, currency: 'USD' };
-
-      return {
-        ...activity,
-        id: activity.id || `${activity.name}-${activity.timeSlot}-${Date.now()}`.toLowerCase().replace(/\s+/g, '-'),
-        duration: duration || 120, // Default to 2 hours if no duration specified
-        price,
-        selected: false,
-        category: activity.category || 'Cultural & Historical',
-        timeSlot: activity.timeSlot || 'morning',
-        dayNumber: activity.dayNumber || 1
-      };
     } catch (error) {
-      logger.error('[Activity Generation] Failed to normalize activity:', {
-        activity: activity.name,
+      logger.error('[Activity Generation] Error calling Perplexity API', {
         error: error instanceof Error ? error.message : 'Unknown error'
       });
-      return null;
+      return [];
     }
   }
 
@@ -1548,7 +1310,7 @@ IMPORTANT: You MUST provide detailed commentary and highlights that explicitly r
   }
 
   private getDateForActivity(dayNumber: number, params: GenerateActivitiesParams): string {
-    const startDate = new Date(params.startDate || Date.now());
+    const startDate = new Date(params.flightTimes?.arrival || Date.now());
     const activityDate = new Date(startDate);
     activityDate.setDate(startDate.getDate() + (dayNumber - 1));
     return activityDate.toISOString().split('T')[0];

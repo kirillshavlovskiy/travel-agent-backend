@@ -3,14 +3,15 @@ import cors from 'cors';
 import cookieParser from 'cookie-parser';
 import session from 'express-session';
 import { config } from 'dotenv';
-import authRoutes from './src/routes/auth';
-import budgetRoutes from './src/routes/budget';
-import flightRoutes from './src/routes/flights';
-import hotelRoutes from './src/routes/hotels';
-import perplexityRoutes from './src/routes/perplexity';
-import activitiesRoutes from './src/routes/activities';
-import enrichmentRouter from './src/routes/enrichment';
-import locationsRouter from './src/routes/locations';
+import authRoutes from './src/routes/auth/index.js';
+import budgetRoutes from './src/routes/budget.js';
+import flightRoutes from './src/routes/flights.js';
+import hotelRoutes from './src/routes/hotels.js';
+import perplexityRoutes from './src/routes/perplexity.js';
+import { activitiesRouter } from './src/routes/activities.js';
+import enrichmentRouter from './src/routes/enrichment.js';
+import locationsRouter from './src/routes/locations.js';
+import { authMiddleware } from './src/middleware/auth.js';
 
 // Load environment variables
 config();
@@ -110,7 +111,7 @@ authenticatedRouter.use('/api/budget', budgetRoutes);
 authenticatedRouter.use('/api/flights', flightRoutes);
 authenticatedRouter.use('/api/hotels', hotelRoutes);
 authenticatedRouter.use('/api/perplexity', perplexityRoutes);
-authenticatedRouter.use('/api/activities', activitiesRoutes);
+authenticatedRouter.use('/api/activities', activitiesRouter);
 authenticatedRouter.use('/api/locations', locationsRouter);
 
 // Mount the authenticated router

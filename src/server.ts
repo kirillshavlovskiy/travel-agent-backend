@@ -1,6 +1,22 @@
 import express, { Request, Response, NextFunction } from 'express';
+import cors from 'cors';
+import cookieParser from 'cookie-parser';
+import session from 'express-session';
+import { config } from 'dotenv';
+import authRoutes from './routes/auth/index.js';
+import budgetRoutes from './routes/budget.js';
+import flightRoutes from './routes/flights.js';
+import hotelRoutes from './routes/hotels.js';
+import perplexityRoutes from './routes/perplexity.js';
+import { activitiesRouter } from './routes/activities.js';
+import enrichmentRouter from './routes/enrichment.js';
+import locationsRouter from './routes/locations.js';
+import { authMiddleware } from './middleware/auth.js';
 
 const app = express();
+
+// Enable JSON body parsing
+app.use(express.json());
 
 // Add timeout middleware with longer timeout for budget calculation
 app.use((req: Request, res: Response, next: NextFunction) => {
@@ -32,4 +48,7 @@ app.use((req: Request, res: Response, next: NextFunction) => {
   req.on('timeout', timeoutHandler);
   res.on('timeout', timeoutHandler);
   next();
-}); 
+});
+
+// Mount the activities router with auth middleware
+app.use('/api/activities', authMiddleware, activitiesRouter); 
