@@ -305,52 +305,17 @@ export class PerplexityService {
     }
   }
 
-  async generateActivities(params: {
-    destination: string;
-    days: number;
-    budget: number;
-    preferences: any;
-    currency?: string;
-  }) {
-    const { destination, days, budget, preferences } = params;
-    
-    // Generate initial prompt
-    const prompt = `Create a ${days}-day activity plan for ${destination} with the following requirements:
-
-BUDGET & QUALITY:
-- Daily budget: ${budget} ${params.currency || 'USD'} per person
-- Minimum rating: 4.0+ stars
-- Must have at least 50 reviews
-
-ACTIVITY CATEGORIES:
-- Cultural & Historical: museums, historic sites, monuments
-- Nature & Adventure: parks, tours, outdoor activities
-- Food & Entertainment: dining, shows, experiences
-- Shopping & Local Life: markets, neighborhoods, local culture
-
-TIME SLOTS:
-- Morning (9:00-13:00): Prefer cultural & historical
-- Afternoon (14:00-18:00): Prefer nature & adventure
-- Evening (19:00-23:00): Prefer food & entertainment
-
-CRITICAL RULES:
-1. Only include activities that take 1 day or less
-2. Group activities by area to minimize travel time
-3. Mix different types of activities each day
-4. Consider opening hours and seasonal factors
-5. Include variety in each day's schedule
-
-Return ONLY valid JSON with schedule array.`;
-
+  async generateActivities(params: GenerateActivitiesParams): Promise<any> {
     this.resetPerplexityApiCallCount();
     try {
       this.perplexityApiCallCount++;
       logger.info('[Perplexity] Generating activities:', {
-        destination: destination,
-        days: days,
-        budget: budget,
+        destination: params.destination,
+        days: params.days,
+        budget: params.budget,
         currency: params.currency,
-        hasPreferences: !!preferences,
+        hasPreferences: !!params.preferences,
+        hasFlightTimes: !!params.flightTimes,
         apiCallCount: this.perplexityApiCallCount
       });
 
@@ -372,8 +337,8 @@ Return ONLY valid JSON with schedule array.`;
             originalCount: 0,
             finalCount: 0,
             enrichedCount: 0,
-            daysPlanned: days,
-            destination: destination
+            daysPlanned: params.days,
+            destination: params.destination
           }
         };
       }
@@ -391,8 +356,8 @@ Return ONLY valid JSON with schedule array.`;
             originalCount: activities.length,
             finalCount: 0,
             enrichedCount: 0,
-            daysPlanned: days,
-            destination: destination
+            daysPlanned: params.days,
+            destination: params.destination
           }
         };
       }
@@ -431,8 +396,8 @@ Return ONLY valid JSON with schedule array.`;
             originalCount: activities.length,
             finalCount: balancedActivities.length,
             enrichedCount: 0,
-            daysPlanned: days,
-            destination: destination
+            daysPlanned: params.days,
+            destination: params.destination
           }
         };
       }
@@ -459,8 +424,8 @@ Return ONLY valid JSON with schedule array.`;
           originalCount: activities.length,
           finalCount: enrichedActivities.length,
           enrichedCount: enrichedActivities.filter(a => a.commentary && a.itineraryHighlight).length,
-          daysPlanned: days,
-          destination: destination,
+          daysPlanned: params.days,
+          destination: params.destination,
           availabilityChanges: enrichedActivities.filter(a => a.availability?.nextAvailableDate).length
         }
       };
@@ -497,31 +462,31 @@ Return ONLY valid JSON with schedule array.`;
         throw new Error('Perplexity API key is not configured');
       }
 
-      const response = await axios.post(
-        this.baseUrl,
-        {
-          model: 'sonar',
-          messages: [
-            {
-              role: 'system',
+        const response = await axios.post(
+          this.baseUrl,
+          {
+            model: 'sonar',
+            messages: [
+              {
+                role: 'system',
               content: 'You are a helpful travel planning assistant. For each time slot (morning, afternoon, evening), provide multiple activity options to allow for selection and optimization. Return ONLY valid JSON.'
-            },
-            {
-              role: 'user',
-              content: query
+              },
+              {
+                role: 'user',
+                content: query
+              }
+            ],
+          temperature: options?.temperature ?? 0.4, // Slightly increased for more variety
+            max_tokens: options?.max_tokens ?? 8000,
+            web_search: true
+          },
+          {
+            headers: {
+              'Authorization': `Bearer ${this.apiKey}`,
+              'Content-Type': 'application/json'
             }
-          ],
-          temperature: options?.temperature ?? 0.4,
-          max_tokens: options?.max_tokens ?? 8000,
-          web_search: true
-        },
-        {
-          headers: {
-            'Authorization': `Bearer ${this.apiKey}`,
-            'Content-Type': 'application/json'
           }
-        }
-      );
+        );
 
       const rawContent = response.data.choices[0]?.message?.content;
       if (!rawContent) {
@@ -537,17 +502,17 @@ Return ONLY valid JSON with schedule array.`;
 
       try {
         parsedContent = JSON.parse(cleanedContent);
-      } catch (e) {
+          } catch (e) {
         // If direct parsing fails, try to extract JSON object
         const jsonMatch = cleanedContent.match(/\{[\s\S]*\}/);
-        if (!jsonMatch) {
+            if (!jsonMatch) {
           logger.error('[Perplexity] No JSON content found in response');
           return { activities: [] };
         }
 
         try {
           parsedContent = JSON.parse(jsonMatch[0]);
-        } catch (parseError) {
+            } catch (parseError) {
           logger.error('[Perplexity] Failed to parse content:', { error: parseError, rawContent });
           return { activities: [] };
         }
@@ -556,47 +521,73 @@ Return ONLY valid JSON with schedule array.`;
       // Extract activities from schedule
       let activities: Activity[] = [];
       if (parsedContent.schedule && Array.isArray(parsedContent.schedule)) {
+        // First, extract preselected activities from the query
+        const preselectedMatch = query.match(/preselectedActivities":\s*(\[[\s\S]*?\])/);
+        const preselectedActivities: Activity[] = [];
+        if (preselectedMatch) {
+          try {
+            const preselectedJson = JSON.parse(preselectedMatch[1]);
+            preselectedActivities.push(...preselectedJson);
+            logger.info('[Perplexity] Found preselected activities:', {
+              count: preselectedActivities.length,
+              activities: preselectedActivities.map(a => ({
+                name: a.name,
+                dayNumber: a.dayNumber,
+                timeSlot: a.timeSlot
+              }))
+            });
+          } catch (e) {
+            logger.error('[Perplexity] Failed to parse preselected activities:', e);
+          }
+        }
+
+        // Process each day's activities
         activities = parsedContent.schedule.flatMap(day => {
-          const dayNumber = day.day || day.dayNumber;
-          const dayActivities = [];
+          const dayNumber = day.dayNumber;
+          const dayActivities = day.activities || [];
 
-          // Process morning activities
-          if (Array.isArray(day.morning)) {
-            dayActivities.push(...day.morning.map(activity => ({
-              ...activity,
+          // First, add preselected activities for this day
+          const dayPreselected = preselectedActivities.filter(a => a.dayNumber === dayNumber);
+          const preselectedTimeSlots = new Set(dayPreselected.map(a => a.timeSlot));
+
+          // Then add other activities from the schedule, skipping time slots that are already taken
+          const otherActivities = dayActivities
+            .filter(activity => !preselectedTimeSlots.has(activity.timeSlot))
+            .map(activity => ({
+              name: activity.name,
+              category: activity.category || determineCategoryFromDescription(activity.description || ''),
+              rating: activity.rating || 0,
+              numberOfReviews: activity.numberOfReviews || 0,
+              price: activity.price || { amount: 0, currency: 'USD' },
+              location: activity.location || '',
+              timeSlot: activity.timeSlot || this.getTimeSlot(activity.startTime || ''),
               dayNumber,
-              timeSlot: 'morning',
               selected: false,
+              duration: activity.duration || this.estimateDuration(activity.startTime || ''),
+              commentary: activity.commentary || '',
+              itineraryHighlight: activity.itineraryHighlight || '',
+              scoringReason: activity.scoringReason || '',
+              startTime: activity.startTime || '',
+              description: activity.description || '',
+              matchedPreferences: activity.matchedPreferences || [],
+              preferenceScore: activity.preferenceScore || 0
+            }));
+
+          // Combine preselected and other activities
+          return [
+            ...dayPreselected.map(activity => ({
+            ...activity,
               category: activity.category || 'Cultural & Historical',
-              price: typeof activity.price === 'number' ? { amount: activity.price, currency: 'USD' } : activity.price
-            })));
-          }
-
-          // Process afternoon activities
-          if (Array.isArray(day.afternoon)) {
-            dayActivities.push(...day.afternoon.map(activity => ({
-              ...activity,
-              dayNumber,
-              timeSlot: 'afternoon',
-              selected: false,
-              category: activity.category || 'Nature & Adventure',
-              price: typeof activity.price === 'number' ? { amount: activity.price, currency: 'USD' } : activity.price
-            })));
-          }
-
-          // Process evening activities
-          if (Array.isArray(day.evening)) {
-            dayActivities.push(...day.evening.map(activity => ({
-              ...activity,
-              dayNumber,
-              timeSlot: 'evening',
-              selected: false,
-              category: activity.category || 'Food & Entertainment',
-              price: typeof activity.price === 'number' ? { amount: activity.price, currency: 'USD' } : activity.price
-            })));
-          }
-
-          return dayActivities;
+              rating: activity.rating || 4.5,
+              numberOfReviews: activity.numberOfReviews || 1000,
+              price: activity.price || { amount: 0, currency: 'USD' },
+              selected: true,
+              commentary: activity.commentary || `Preselected activity for ${activity.timeSlot}`,
+              itineraryHighlight: activity.itineraryHighlight || `Part of the original plan`,
+              scoringReason: activity.scoringReason || 'Preselected by user'
+            })),
+            ...otherActivities
+          ];
         });
       }
 
@@ -604,6 +595,7 @@ Return ONLY valid JSON with schedule array.`;
         activitiesCount: activities.length,
         hasSchedule: !!parsedContent.schedule,
         hasTripOverview: !!parsedContent.tripOverview,
+        firstActivity: activities[0]?.name,
         preselectedCount: activities.filter(a => a.selected).length
       });
 
@@ -1814,7 +1806,7 @@ Return as JSON with:
   }
 
   private buildActivityQuery(params: GenerateActivitiesParams): string {
-    const { destination, days, budget, preferences } = params;
+    const { destination, days, budget, preferences, flightTimes } = params;
     
     return `Generate a detailed ${days}-day itinerary for ${destination} with these requirements:
 
@@ -1828,6 +1820,8 @@ ${preferences.dietaryRestrictions.length > 0 ? `- Dietary Restrictions: ${prefer
 CONSTRAINTS:
 - Budget: ${budget} ${params.currency}
 - Days: ${days}
+${flightTimes ? `- Arrival: ${flightTimes.arrival}
+- Departure: ${flightTimes.departure}` : ''}
 
 REQUIREMENTS:
 1. Suggest activities that match the interests and accessibility needs

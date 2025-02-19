@@ -5,7 +5,7 @@ import { logger } from '../utils/logger.js';
 import { ViatorService } from '../services/viator.js';
 import { Activity } from '../services/perplexity.js';
 
-const router = Router();
+const activitiesRouter = Router();
 
 // Add counter at the top of the file
 let perplexityCallCounter = 0;
@@ -452,144 +452,206 @@ function createBasicSchedule(activities: Activity[], days: number) {
   };
 }
 
-// Add price normalization helper
-function normalizePrice(price: any): { amount: number; currency: string } {
-  if (!price) {
-    return { amount: 0, currency: 'USD' };
-  }
-
-  return {
-    amount: typeof price === 'number' ? price : (price.amount || 0),
-    currency: price?.currency || 'USD'
-  };
-}
-
-router.post('/generate', async (req: Request, res: Response) => {
+activitiesRouter.post('/generate', async (req: Request, res: Response) => {
   try {
-    // Add detailed request logging
-    logger.info('[Activities] Processing generation request:', {
+    perplexityCallCounter = 0; // Reset counter at start of each request
+    logger.info('[Activities] Starting activity generation:', {
       destination: req.body.destination,
       days: req.body.days,
-      budget: req.body.budget,
-      currency: req.body.currency,
       hasPreferences: !!req.body.preferences,
-      timestamp: new Date().toISOString()
+      hasExistingActivities: !!req.body.existingActivities?.length,
+      skipPerplexityGeneration: !!req.body.skipPerplexityGeneration
     });
 
-    const { destination, days, budget, currency, preferences: rawPreferences } = req.body;
+    const { destination, days, budget, currency, flightTimes, preferences, existingActivities, skipPerplexityGeneration } = req.body;
 
-    // Validate required fields
-    if (!destination || !days || !budget || !currency) {
-      logger.warn('[Activities] Missing required fields:', {
-        hasDestination: !!destination,
-        hasDays: !!days,
-        hasBudget: !!budget,
-        hasCurrency: !!currency
-      });
-      return res.status(400).json({
-        error: 'Missing required fields',
-        timestamp: new Date().toISOString()
-      });
-    }
+    let activitiesToProcess;
 
-    // Validate and get preferences with defaults
-    const preferences = {
-      ...rawPreferences,
-      budget: {
-        limit: budget,
-        currency: currency || 'USD'
+    // If we have existing activities and skipPerplexityGeneration flag is true, use those
+    if (existingActivities && Array.isArray(existingActivities) && existingActivities.length > 0 && skipPerplexityGeneration) {
+      logger.info('[Activities] Using existing activities from budget calculation:', {
+        count: existingActivities.length
+      });
+      activitiesToProcess = existingActivities;
+    } else {
+      // Only make Perplexity call if we don't have existing activities or skipPerplexityGeneration is false
+      logger.info('[Activities] No existing activities or skipPerplexityGeneration=false, proceeding with generation');
+      perplexityCallCounter++; // Increment counter
+    const response = await perplexityClient.generateActivities({
+        destination: destination.label || destination,
+      days,
+      budget,
+      currency,
+        preferences,
+      flightTimes
+    });
+
+      activitiesToProcess = response?.activities || [];
+      if (activitiesToProcess.length === 0) {
+        logger.error('[Activities] No activities generated');
+      return res.status(500).json({
+        success: false,
+          error: 'No activities could be generated',
+        timestamp: new Date().toISOString(),
+          perplexityCalls: perplexityCallCounter
+        });
       }
-    };
-
-    // Get initial activity suggestions from Perplexity
-    const query = `Create a ${days}-day activity plan for ${destination} with the following requirements:
-
-BUDGET & QUALITY:
-- Daily budget: ${budget} ${currency} per person
-- Minimum rating: 4.0+ stars
-- Must have at least 50 reviews
-
-ACTIVITY CATEGORIES:
-- Cultural & Historical: museums, historic sites, monuments
-- Nature & Adventure: parks, tours, outdoor activities
-- Food & Entertainment: dining, shows, experiences
-- Shopping & Local Life: markets, neighborhoods, local culture
-
-TIME SLOTS:
-- Morning (9:00-13:00): Prefer cultural & historical
-- Afternoon (14:00-18:00): Prefer nature & adventure
-- Evening (19:00-23:00): Prefer food & entertainment
-
-CRITICAL RULES:
-1. Only include activities that take 1 day or less
-2. Group activities by area to minimize travel time
-3. Mix different types of activities each day
-4. Consider opening hours and seasonal factors
-5. Include variety in each day's schedule
-
-Return ONLY valid JSON with schedule array.`;
-
-    logger.debug('[Activities] Sending query to Perplexity API', { query });
-    const response = await perplexityClient.chat(query);
-    
-    const parsedData = response;
-    if (!parsedData.activities || !Array.isArray(parsedData.activities)) {
-      logger.error('[Activities] Invalid data structure', { parsedData });
-      throw new Error('Invalid response format: missing or invalid activities array');
     }
 
-    // Ensure all activities are unselected after regeneration
-    parsedData.activities = parsedData.activities.map(activity => ({
-      ...activity,
-      selected: false
-    }));
+    // 2. Enrich activities with Viator data
+    logger.info('[Activities] Starting Viator enrichment:', {
+      totalActivities: activitiesToProcess.length
+    });
 
-    // Enrich activities with Viator data
-    const viatorClient = new ViatorService(process.env.VIATOR_API_KEY || '');
     const enrichedActivities = await Promise.all(
-      parsedData.activities.map(async (activity: any) => {
+      activitiesToProcess.map(async (activity) => {
         try {
-          const searchResults = await viatorClient.searchActivity(`${activity.name} ${destination}`);
+          // Enhanced logging for Viator API calls
+          logger.info('[Viator API] Searching activity:', {
+            name: activity.name,
+            searchParams: {
+              query: activity.name,
+              type: 'activity',
+              destination: destination.label || destination
+            }
+          });
+
+          // First try to search for the activity by name to get product code
+          const searchResults = await viatorClient.searchActivity(activity.name);
+          
           if (!searchResults || searchResults.length === 0) {
-            logger.warn('[Activities] No Viator activities found for:', activity.name);
+            logger.warn('[Viator API] No results found:', {
+              name: activity.name,
+              searchType: 'name',
+              timestamp: new Date().toISOString()
+            });
             return activity;
           }
-          
-          const enrichedResults = await Promise.all(
-            searchResults.map(async (result) => {
-              const enriched = await viatorClient.enrichActivityDetails(result);
-              if (!enriched) return null;
 
-              // Use validated preferences for scoring
-              const score = calculateActivityScore(enriched, preferences);
-              
-              return {
-                ...enriched,
-                ...score,
-                images: enriched.images || [],
-                bookingInfo: {
-                  productCode: enriched.bookingInfo?.productCode || '',
-                  cancellationPolicy: enriched.bookingInfo?.cancellationPolicy || 'Standard cancellation policy',
-                  instantConfirmation: true,
-                  mobileTicket: true,
-                  languages: enriched.bookingInfo?.languages || ['English'],
-                  minParticipants: enriched.bookingInfo?.minParticipants || 1,
-                  maxParticipants: enriched.bookingInfo?.maxParticipants || 99
-                },
-                meetingPoint: enriched.meetingPoint || undefined,
-                highlights: enriched.highlights || [],
-                operatingHours: enriched.operatingHours || '',
-                isVerified: true,
-                verificationStatus: 'verified' as const
-              };
-            })
-          );
+          // Use the first search result
+          const bestMatch = searchResults[0];
+          const productCode = bestMatch.bookingInfo?.productCode;
 
-          const validResults = enrichedResults.filter(Boolean);
-          return validResults.length > 0 ? validResults[0] : activity;
+          if (!productCode) {
+            logger.warn('[Viator API] No product code in search result:', {
+              name: activity.name,
+              searchResult: bestMatch,
+      timestamp: new Date().toISOString()
+    });
+            return activity;
+          }
+
+          logger.info('[Viator API] Product found:', {
+            name: activity.name,
+            productCode,
+            matchScore: bestMatch.score || 'N/A',
+            timestamp: new Date().toISOString()
+          });
+
+          // Now get detailed product info
+          logger.info('[Viator API] Fetching product details:', {
+      productCode,
+            name: activity.name,
+            timestamp: new Date().toISOString()
+          });
+
+          const enriched = await viatorClient.getProductDetails(productCode);
+          if (!enriched) {
+            logger.warn('[Viator API] No details found:', {
+              name: activity.name,
+              productCode,
+              timestamp: new Date().toISOString()
+            });
+            return activity;
+          }
+
+          logger.info('[Viator API] Product details retrieved:', {
+            productCode,
+            name: activity.name,
+            details: {
+              hasBookingInfo: !!enriched.bookingInfo,
+              hasPricing: !!enriched.pricing,
+              hasReviews: !!enriched.reviews,
+              hasImages: enriched.images?.length || 0,
+              hasHighlights: enriched.highlights?.length || 0,
+              price: enriched.pricing?.summary?.fromPrice,
+              currency: enriched.pricing?.currency,
+              rating: enriched.reviews?.combinedAverageRating,
+              reviewCount: enriched.reviews?.totalReviews
+            },
+            timestamp: new Date().toISOString()
+          });
+
+          const enrichedActivity = {
+            ...activity,
+            bookingDetails: {
+              provider: 'Viator',
+              productCode,
+              // Use the productUrl directly from the API response
+              referenceUrl: enriched.productUrl || `https://www.viator.com/tours/${productCode}`,
+              cancellationPolicy: enriched.bookingInfo?.cancellationPolicy || 'Standard cancellation policy',
+              instantConfirmation: enriched.bookingInfo?.confirmationType === 'INSTANT' || true,
+              mobileTicket: enriched.bookingInfo?.mobileTicketing || true,
+              languages: enriched.bookingInfo?.languages || ['English'],
+              minParticipants: enriched.bookingInfo?.minParticipants || 1,
+              maxParticipants: enriched.bookingInfo?.maxParticipants || 15,
+              pickupIncluded: enriched.bookingInfo?.pickup?.included || false,
+              pickupLocation: enriched.bookingInfo?.pickup?.location || '',
+              accessibility: enriched.bookingInfo?.accessibility || 'Standard',
+              restrictions: enriched.bookingInfo?.restrictions || [],
+              // Add availability data
+              availability: {
+                startTimes: enriched.availability?.startTimes || [],
+                daysAvailable: enriched.availability?.daysAvailable || [],
+                nextAvailableDate: enriched.availability?.nextAvailableDate,
+                operatingHours: enriched.operatingHours || 'Operating hours not specified'
+              }
+            },
+            price: {
+              amount: enriched.pricing?.summary?.fromPrice || activity.price?.amount,
+              currency: enriched.pricing?.currency || activity.price?.currency || 'USD'
+            },
+            rating: enriched.reviews?.combinedAverageRating || activity.rating,
+            numberOfReviews: enriched.reviews?.totalReviews || activity.numberOfReviews,
+            // Select only the main image (480x320 or first available)
+            mainImage: enriched.images?.find(img => {
+              const variants = img.variants || [];
+              return variants.some(v => v.width === 480 && v.height === 320);
+            })?.variants?.find(v => v.width === 480 && v.height === 320)?.url || 
+            enriched.images?.[0]?.variants?.[0]?.url || '',
+            highlights: enriched.highlights || activity.highlights || [],
+            operatingHours: enriched.operatingHours || activity.operatingHours,
+            location: {
+              address: enriched.location?.address || activity.location?.address,
+              coordinates: enriched.location?.coordinates || activity.location?.coordinates
+            }
+          };
+
+          logger.info('[Activities] Successfully enriched activity:', {
+            name: activity.name,
+          productCode,
+            hasBookingDetails: true,
+            hasViatorData: true,
+            mainImage: enrichedActivity.mainImage,
+            selectedTimeSlot: enrichedActivity.timeSlot,
+            availability: {
+              operatingHours: enrichedActivity.bookingDetails.availability.operatingHours,
+              selectedStartTime: enrichedActivity.startTime || 
+                (enrichedActivity.timeSlot === 'morning' ? '09:00' :
+                 enrichedActivity.timeSlot === 'afternoon' ? '14:00' : '19:00')
+            },
+            bookingUrl: enrichedActivity.bookingDetails.referenceUrl,
+            enrichmentStatus: {
+              hasRating: !!enrichedActivity.rating,
+              hasReviews: !!enrichedActivity.numberOfReviews,
+              hasHighlights: !!enrichedActivity.highlights?.length
+            }
+          });
+
+          return enrichedActivity;
         } catch (error) {
           logger.error('[Activities] Failed to enrich activity:', {
-            activity: activity.name,
+            name: activity.name,
             error: error instanceof Error ? error.message : 'Unknown error'
           });
           return activity;
@@ -597,35 +659,42 @@ Return ONLY valid JSON with schedule array.`;
       })
     );
 
-    // Deduplicate activities
-    const dedupedActivities = deduplicateActivities(enrichedActivities);
+    const enrichedCount = enrichedActivities.filter(a => a.bookingDetails?.provider === 'Viator').length;
+    logger.info('[Activities] Completed Viator enrichment:', {
+      totalActivities: activitiesToProcess.length,
+      enrichedCount,
+      successRate: `${(enrichedCount / activitiesToProcess.length * 100).toFixed(1)}%`
+    });
 
-    // Optimize schedule
-    const optimizedSchedule = await optimizeSchedule(dedupedActivities, days, destination);
+    // 3. Optimize schedule with enriched activities
+    logger.info('[Activities] Starting schedule optimization');
+    perplexityCallCounter++; // Increment counter for schedule optimization
+    const optimizedSchedule = await optimizeSchedule(enrichedActivities, days, destination.label || destination);
 
-    res.json({
-      activities: dedupedActivities,
-      suggestedItineraries: optimizedSchedule.schedule.reduce((acc, day) => {
-        const tier = preferences.travelStyle.toLowerCase();
-        if (!acc[tier]) acc[tier] = [];
-        acc[tier].push(day);
-        return acc;
-      }, {} as Record<string, any[]>),
+    // 4. Return final response with Perplexity call counter
+    return res.json({
+      success: true,
+      activities: enrichedActivities,
       schedule: optimizedSchedule.schedule,
-      tripOverview: optimizedSchedule.tripOverview,
+      dailyPlans: optimizedSchedule.schedule,
       dailyHighlights: optimizedSchedule.dailyHighlights || [],
-      logisticsAdvice: optimizedSchedule.logisticsAdvice || {}
+      metadata: {
+        originalCount: activitiesToProcess.length,
+        enrichedCount,
+        finalCount: enrichedActivities.length,
+        daysPlanned: days,
+        destination,
+        perplexityCalls: perplexityCallCounter,
+        timestamp: new Date().toISOString()
+      }
     });
   } catch (error) {
-    logger.error('[Activities] Generation error:', {
-      error: error instanceof Error ? error.message : 'Unknown error',
-      stack: error instanceof Error ? error.stack : undefined
-    });
+    logger.error('[Activities] Error:', error);
     res.status(500).json({
-      error: error instanceof Error ? error.message : 'Failed to generate activities',
+      error: error instanceof Error ? error.message : 'Failed to generate activity',
       timestamp: new Date().toISOString()
     });
   }
 });
 
-export default router;
+export { activitiesRouter };
