@@ -256,6 +256,10 @@ export class AmadeusService {
     lastRequestTime: Date.now()
   };
 
+  // Add location cache
+  private locationCache: Map<string, { data: AmadeusLocation[]; timestamp: number }> = new Map();
+  private readonly CACHE_TTL = 24 * 60 * 60 * 1000; // 24 hours in milliseconds
+
   constructor() {
     const clientId = process.env.AMADEUS_CLIENT_ID;
     const clientSecret = process.env.AMADEUS_CLIENT_SECRET;
@@ -756,30 +760,54 @@ export class AmadeusService {
     }
   }
 
+  private isCacheValid(timestamp: number): boolean {
+    return Date.now() - timestamp < this.CACHE_TTL;
+  }
+
   async searchLocations(keyword: string): Promise<AmadeusLocation[]> {
-    try {
-      logger.info('Searching locations with keyword', { keyword });
-
-      const response = await this.amadeus.referenceData.locations.get({
+    // Check cache first
+    const cacheKey = keyword.toLowerCase();
+    const cached = this.locationCache.get(cacheKey);
+    
+    if (cached && this.isCacheValid(cached.timestamp)) {
+      logger.info('Returning cached location data', { 
         keyword,
-        subType: 'CITY,AIRPORT',
-        view: 'LIGHT'
+        cacheAge: Math.round((Date.now() - cached.timestamp) / 1000 / 60) + ' minutes'
       });
-
-      const locations = JSON.parse(response.body);
-      
-      logger.info('Location search successful', {
-        count: locations.data?.length || 0
-      });
-
-      return locations.data || [];
-    } catch (error) {
-      logger.error('Failed to search locations', {
-        error: error instanceof Error ? error.message : 'Unknown error',
-        stack: error instanceof Error ? error.stack : undefined,
-        keyword
-      });
-      throw error;
+      return cached.data;
     }
+
+    return this.executeWithRateLimit(async () => {
+      try {
+        logger.info('Searching locations with keyword', { keyword });
+
+        const response = await this.amadeus.referenceData.locations.get({
+          keyword,
+          subType: 'CITY,AIRPORT',
+          view: 'LIGHT'
+        });
+
+        const locations = JSON.parse(response.body);
+        
+        logger.info('Location search successful', {
+          count: locations.data?.length || 0
+        });
+
+        // Cache the results
+        this.locationCache.set(cacheKey, {
+          data: locations.data || [],
+          timestamp: Date.now()
+        });
+
+        return locations.data || [];
+      } catch (error) {
+        logger.error('Failed to search locations', {
+          error: error instanceof Error ? error.message : 'Unknown error',
+          stack: error instanceof Error ? error.stack : undefined,
+          keyword
+        });
+        throw error;
+      }
+    });
   }
 } 

@@ -885,26 +885,39 @@ export class VacationBudgetAgent {
         preferences: request.preferences
       });
 
-      // Call the perplexity client directly
-      const activitiesData = await perplexityClient.generateActivities({
-        destination: request.destinations[0].label,
-        days,
-        budget: request.budgetLimit,
-        currency: 'USD',
-        preferences: {
-          travelStyle: request.preferences?.travelStyle || 'medium',
-          pacePreference: request.preferences?.pacePreference || 'moderate',
-          interests: request.preferences?.interests || ['Cultural & Historical'],
-          accessibility: Array.isArray(request.preferences?.accessibility) 
-            ? request.preferences.accessibility 
-            : ['Standard'],
-          dietaryRestrictions: request.preferences?.dietaryRestrictions || []
+      // Call the activities/generate endpoint
+      const activitiesResponse = await fetch('http://localhost:3001/api/activities/generate', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer internal'
         },
-        flightTimes: {
-          arrival: flightData[0]?.itineraries[0]?.segments[0]?.arrival?.at,
-          departure: flightData[0]?.itineraries[1]?.segments[0]?.departure?.at
-        }
+        body: JSON.stringify({
+          destination: request.destinations[0].label,
+          days,
+          budget: request.budgetLimit,
+          currency: 'USD',
+          flightTimes: {
+            arrival: flightData[0]?.itineraries[0]?.segments[0]?.arrival?.at,
+            departure: flightData[0]?.itineraries[1]?.segments[0]?.departure?.at
+          },
+          preferences: {
+            travelStyle: request.preferences?.travelStyle || 'medium',
+            pacePreference: request.preferences?.pacePreference || 'moderate',
+            interests: request.preferences?.interests || ['Cultural & Historical'],
+            accessibility: Array.isArray(request.preferences?.accessibility) 
+              ? request.preferences.accessibility 
+              : ['Standard'],
+            dietaryRestrictions: request.preferences?.dietaryRestrictions || []
+          }
+        })
       });
+
+      if (!activitiesResponse.ok) {
+        throw new Error(`Failed to generate activities: ${await activitiesResponse.text()}`);
+      }
+
+      const activitiesData = await activitiesResponse.json();
 
       if (!activitiesData?.activities) {
         throw new Error('No activities could be generated');

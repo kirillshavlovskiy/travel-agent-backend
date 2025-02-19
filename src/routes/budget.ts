@@ -8,6 +8,7 @@ import { AirlineInfo } from '../types.js';
 import { AmadeusSegment, AmadeusFare, AmadeusFareDetail, AmadeusFlightOffer } from '../types/amadeus.js';
 import { AIRCRAFT_CODES as AIRCRAFT_CODE_MAP } from '../constants/aircraft.js';
 import { normalizeCategory } from '../constants/categories.js';
+import { logger } from '../utils/logger.js';
 
 const router = Router();
 const amadeusService = new AmadeusService();
@@ -188,6 +189,7 @@ router.get('/locations', (req: Request, res: Response) => {
 
 // Helper function to get primary airport code for a city
 function getPrimaryAirportForCity(cityCode: string): string {
+  try {
   const cityAirports = airports.filter(airport => airport.cityCode === cityCode);
   if (cityAirports.length > 0) {
     // Return the first airport as primary (they are ordered by importance in the data)
@@ -200,6 +202,10 @@ function getPrimaryAirportForCity(cityCode: string): string {
   }
   console.warn(`[Budget Route] No airport found for city: ${cityCode}`);
   return cityCode; // Fallback to city code
+  } catch (error) {
+    console.error('[Budget Route] Error getting airport code:', error);
+    return cityCode; // Return the city code as fallback
+  }
 }
 
 // Calculate budget endpoint
@@ -236,16 +242,6 @@ router.post('/calculate', async (req: Request, res: Response) => {
     if (!req.body.travelers) missingFields.push('number of travelers');
 
     if (missingFields.length > 0) {
-      console.error('[Budget Route] Missing fields:', {
-        missingFields,
-        receivedFields: {
-          departureLocation: req.body.departureLocation,
-          startDate: req.body.startDate,
-          endDate: req.body.endDate,
-          destinations: req.body.destinations,
-          travelers: req.body.travelers
-        }
-      });
       return res.status(400).json({
         success: false,
         error: `Missing required fields: ${missingFields.join(', ')}`,
@@ -256,7 +252,6 @@ router.post('/calculate', async (req: Request, res: Response) => {
     // Ensure proper data types
     const travelers = parseInt(String(req.body.travelers));
     if (isNaN(travelers)) {
-      console.error('[Budget Route] Invalid travelers value:', req.body.travelers);
       return res.status(400).json({
         success: false,
         error: 'Invalid travelers value: must be a number',
@@ -265,12 +260,8 @@ router.post('/calculate', async (req: Request, res: Response) => {
     }
 
     // Get destination city details
-    try {
       const locations = await amadeusService.searchLocations(req.body.destinations[0].code);
       if (!locations || locations.length === 0) {
-      console.error('[Budget Route] Invalid destination city:', {
-          receivedCity: req.body.destinations[0]
-      });
       return res.status(400).json({
         success: false,
         error: 'Invalid destination city',
@@ -287,9 +278,6 @@ router.post('/calculate', async (req: Request, res: Response) => {
     // Get origin airport code
       const originLocations = await amadeusService.searchLocations(req.body.departureLocation.code);
       if (!originLocations || originLocations.length === 0) {
-        console.error('[Budget Route] Invalid origin location:', {
-          receivedLocation: req.body.departureLocation
-        });
         return res.status(400).json({
           success: false,
           error: 'Invalid origin location',
@@ -299,8 +287,6 @@ router.post('/calculate', async (req: Request, res: Response) => {
 
       // Use the first matching location's IATA code
       const originAirportCode = originLocations[0].iataCode;
-
-      // Get destination airport code - we already have it from the location search above
       const destinationAirportCode = locations[0].iataCode;
 
     // Race between the actual work and the timeout
@@ -337,65 +323,11 @@ router.post('/calculate', async (req: Request, res: Response) => {
       days: Math.ceil((new Date(req.body.endDate).getTime() - new Date(req.body.startDate).getTime()) / (1000 * 60 * 60 * 24))
     };
 
-        // Initialize agentResult
-        let agentResult: any = {
-          flights: {
-            budget: {
-              min: 0,
-              max: 0,
-              average: 0,
-              confidence: 0,
-              source: 'Amadeus API',
-              references: []
-            },
-            medium: {
-              min: 0,
-              max: 0,
-              average: 0,
-              confidence: 0,
-              source: 'Amadeus API',
-              references: []
-            },
-            premium: {
-              min: 0,
-              max: 0,
-              average: 0,
-              confidence: 0,
-              source: 'Amadeus API',
-              references: []
-            }
-          },
-          activities: {
-            budget: {
-              min: 0,
-              max: 0,
-              average: 0,
-              confidence: 0,
-              source: 'Activities API',
-              references: []
-            },
-            medium: {
-              min: 0,
-              max: 0,
-              average: 0,
-              confidence: 0,
-              source: 'Activities API',
-              references: []
-            },
-            premium: {
-              min: 0,
-              max: 0,
-              average: 0,
-              confidence: 0,
-              source: 'Activities API',
-              references: []
-            }
-          }
-        };
+        let agentResult;
+        let activitiesData;
 
         // First search for real-time flights with Amadeus
         console.log('[Budget Route] Searching for real-time flights with Amadeus...');
-        try {
           const formattedDepartureDate = transformedRequest.startDate.split('T')[0];
           const formattedReturnDate = transformedRequest.endDate.split('T')[0];
 
@@ -428,13 +360,13 @@ router.post('/calculate', async (req: Request, res: Response) => {
               return result;
             } catch (error) {
               console.warn(`[Budget Route] Search failed for ${cabinClass}:`, error);
-              return [];
+            return [];
             }
           });
 
-          // Wait for all searches to complete
+        // Wait for all searches to complete
           const allFlights = (await Promise.all(searchPromises)).flat();
-
+          
           if (allFlights.length === 0) {
             console.warn('[Budget Route] No flights found for any cabin class');
           } else {
@@ -452,77 +384,105 @@ router.post('/calculate', async (req: Request, res: Response) => {
               }
             });
 
-            // Add flight data to the transformed request
-            transformedRequest.flightData = allFlights;
-          }
-
-          // Call VacationBudgetAgent with flight data
-          console.log('[Budget Route] Calling VacationBudgetAgent with flight data...');
-          agentResult = await agent.handleTravelRequest({
-            ...transformedRequest,
-            preferences: req.body.preferences,
-            budgetLimit: req.body.budgetLimit
-          });
-
-          // Log the agent result
-          console.log('[Budget Route] VacationBudgetAgent result:', {
-            hasFlights: !!agentResult.flights,
-            hasActivities: !!agentResult.activities,
-            flightTiers: Object.keys(agentResult.flights || {}),
-            activityTiers: Object.keys(agentResult.activities || {})
-          });
-
-        } catch (error) {
-          console.error('[Budget Route] Error searching flights:', error);
-          // If flight search fails, call agent without flight data
-          console.log('[Budget Route] Calling budget agent without flight data...');
-          agentResult = await agent.handleTravelRequest({
-            ...transformedRequest,
-            preferences: req.body.preferences,
-            budgetLimit: req.body.budgetLimit
-          });
+          // Add flight data to the transformed request
+          transformedRequest.flightData = allFlights;
         }
 
+        // Call VacationBudgetAgent with flight data
+        console.log('[Budget Route] Calling VacationBudgetAgent with flight data...');
+        agentResult = await agent.handleTravelRequest({
+          ...transformedRequest,
+          preferences: req.body.preferences,
+          budgetLimit: req.body.budgetLimit
+        });
+
+        // Extract activities from agent result
+        const initialActivities = agentResult.activities?.budget?.references || [];
+
+        // Pass the generated activities to activities/generate endpoint
+        const activitiesResponse = await fetch('http://localhost:3001/api/activities/generate', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer internal'
+          },
+          body: JSON.stringify({
+            destination: destinationCity,
+            days: transformedRequest.days,
+            budget: transformedRequest.budget,
+            currency: transformedRequest.currency,
+            flightTimes: {
+              arrival: agentResult.flights?.budget?.references?.[0]?.details?.outbound?.segments?.slice(-1)[0]?.arrival?.time,
+              departure: agentResult.flights?.budget?.references?.[0]?.details?.inbound?.segments?.[0]?.departure?.time
+            },
+            preferences: req.body.preferences,
+            existingActivities: initialActivities,
+            skipPerplexityGeneration: true
+          }),
+          signal: AbortSignal.timeout(300000)
+        });
+
+        if (!activitiesResponse.ok) {
+          const errorText = await activitiesResponse.text();
+          logger.error('[Budget] Failed to generate activities:', errorText);
+          throw new Error('Failed to generate activities');
+        }
+
+        // Read the response as a stream to handle large responses
+        const reader = activitiesResponse.body?.getReader();
+        const decoder = new TextDecoder();
+
+        if (reader) {
+          let result = '';
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            result += decoder.decode(value, { stream: true });
+          }
+          try {
+            activitiesData = JSON.parse(result);
+            } catch (error) {
+            logger.error('[Budget] Failed to parse activities response:', error);
+            throw new Error('Failed to parse activities response');
+          }
+        } else {
+          activitiesData = await activitiesResponse.json();
+        }
+
+        // Log the activities response for debugging
+        logger.info('[Budget] Activities response:', {
+          hasActivities: !!activitiesData.activities?.length,
+          hasSchedule: !!activitiesData.schedule?.length,
+          hasDailyPlans: !!activitiesData.dailyPlans?.length,
+          hasDailyHighlights: !!activitiesData.dailyHighlights?.length,
+          responseSize: JSON.stringify(activitiesData).length
+        });
+
+        // Return combined result with enriched activities
         return {
+          success: true,
+          data: {
           ...(agentResult || {}),
+            activities: activitiesData.activities || [],
+            schedule: activitiesData.schedule || [],
+            dailyPlans: activitiesData.dailyPlans || [],
+            dailyHighlights: activitiesData.dailyHighlights || [],
           totalBudget: transformedRequest.budget,
-          requestDetails: transformedRequest
+            requestDetails: transformedRequest,
+            metadata: {
+              ...activitiesData.metadata,
+              perplexityCalls: activitiesData.metadata?.perplexityCalls || 0
+            }
+          },
+          timestamp: new Date().toISOString()
         };
       })(),
       timeoutPromise
     ]);
 
     console.log('[Budget Route] ====== END BUDGET CALCULATION ======');
-    return res.json({
-      success: true,
-      data: result,
-      timestamp: new Date().toISOString()
-    });
-    } catch (error) {
-      console.error('[Budget Route] Error processing budget calculation:', {
-        error: error instanceof Error ? {
-          message: error.message,
-          stack: error.stack,
-          name: error.name
-        } : error,
-        timestamp: new Date().toISOString()
-      });
+    return res.json(result);
 
-      // Handle timeout specifically
-      if (error instanceof Error && error.message === 'Request timeout') {
-        return res.status(504).json({
-          success: false,
-          error: 'Request timed out. Please try again with a shorter date range or fewer destinations.',
-          timestamp: new Date().toISOString()
-        });
-      }
-
-      return res.status(500).json({
-        success: false,
-        error: error instanceof Error ? error.message : 'An unexpected error occurred',
-        timestamp: new Date().toISOString()
-      });
-    }
   } catch (error: unknown) {
     console.error('[Budget Route] Error processing budget calculation:', {
       error: error instanceof Error ? {

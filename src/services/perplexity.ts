@@ -258,271 +258,74 @@ export interface PerplexityApiResponse {
 }
 
 export class PerplexityService {
+  private perplexityApiCallCount = 0;
   private readonly apiKey: string;
   private readonly baseUrl: string;
 
   constructor() {
     this.apiKey = process.env.PERPLEXITY_API_KEY || '';
     this.baseUrl = 'https://api.perplexity.ai/chat/completions';
+    this.resetPerplexityApiCallCount();
     
     if (!this.apiKey) {
       throw new Error('PERPLEXITY_API_KEY environment variable is required');
     }
   }
 
-  private buildActivityQuery(params: GenerateActivitiesParams): string {
-    const { destination, days, budget, currency, preferences } = params;
-
-    // Map user interests to activity categories with weights
-    const categoryMapping = {
-      'History': 'Cultural & Historical',
-      'Culture': 'Cultural & Historical',
-      'Nature': 'Nature & Adventure',
-      'Adventure': 'Nature & Adventure',
-      'Food': 'Food & Entertainment',
-      'Entertainment': 'Food & Entertainment',
-      'Shopping': 'Lifestyle & Local',
-      'Local': 'Lifestyle & Local',
-      'Art': 'Cultural & Historical',
-      'Sports': 'Nature & Adventure',
-      'Nightlife': 'Food & Entertainment',
-      'Relaxation': 'Lifestyle & Local'
-    } as const;
-
-    // Calculate category weights based on user interests
-    const categoryWeights = preferences.interests.reduce((acc, interest) => {
-      const category = categoryMapping[interest as keyof typeof categoryMapping];
-      if (category) {
-        acc[category] = (acc[category] || 0) + 1;
-      }
-      return acc;
-    }, {} as Record<string, number>);
-
-    return `Plan diverse activities in ${destination} for ${days} days with a budget of ${budget} ${currency}.
-
-USER PREFERENCES:
-Travel Style: ${preferences.travelStyle}
-Pace: ${preferences.pacePreference}
-Interests: ${preferences.interests.join(', ')}
-${preferences.accessibility.length ? `Accessibility Needs: ${preferences.accessibility.join(', ')}\n` : ''}${preferences.dietaryRestrictions.length ? `Dietary Restrictions: ${preferences.dietaryRestrictions.join(', ')}` : ''}
-
-CATEGORY PRIORITIES:
-${Object.entries(categoryWeights)
-  .sort(([, a], [, b]) => b - a)
-  .map(([category, weight]) => `- ${category}: ${weight} (based on user interests)`)
-  .join('\n')}
-
-TIME SLOTS:
-- Morning (9:00-13:00): Provide 2-3 cultural & historical options
-- Afternoon (14:00-18:00): Provide 2-3 nature & adventure options
-- Evening (19:00-23:00): Provide 2-3 food & entertainment options
-
-CRITICAL REQUIREMENTS:
-1. For EACH time slot, provide MULTIPLE activity options (2-3 per slot)
-2. Ensure activities in the same time slot are different but complementary
-3. Include variety in difficulty levels and prices within each time slot
-4. Consider travel time between potential activities
-5. Account for opening hours and seasonal factors
-6. Suggest alternatives for popular attractions
-
-BALANCE REQUIREMENTS:
-- CRITICAL: Suggest DIFFERENT types of activities - avoid similar or duplicate experiences
-- Mix activities across different categories each day
-- Include at least one activity from each selected interest
-- Prioritize activities matching user's travel style
-- Account for accessibility needs in activity selection
-- Consider dietary restrictions for food-related activities
-
-CRITICAL RULES:
-1. ONLY suggest activities that exist on Viator.com
-2. Use EXACT names from Viator listings
-3. Ensure activities flow logically within each day
-4. Account for travel time between locations
-5. Don't schedule overlapping activities
-6. Consider accessibility requirements
-7. Match dietary restrictions
-8. Align with travel style preference
-9. Set selected to false for all activities
-10. Include preference-matching commentary
-
-OUTPUT FORMAT:
-Return ONLY a valid JSON array of activities, each with:
-{
-  "name": "EXACT Viator activity name",
-  "description": "Brief activity description",
-  "duration": "in hours",
-  "price": "in ${currency}",
-  "category": "one of the main categories",
-  "location": "specific area/neighborhood",
-  "timeSlot": "morning/afternoon/evening",
-  "dayNumber": 1-${days},
-  "expectedDuration": "in minutes",
-  "commentary": "2-3 sentences explaining why this matches user preferences",
-  "itineraryHighlight": "1-2 sentences on how this fits with other activities",
-  "selected": false,
-  "matchedPreferences": ["list of matched user preferences"]
-}
-
-Return ONLY a valid JSON array of activities.`;
+  public getPerplexityApiCallCount(): number {
+    return this.perplexityApiCallCount;
   }
 
-  private async makePerplexityRequests(query: string): Promise<Activity[]> {
+  public resetPerplexityApiCallCount(): void {
+    this.perplexityApiCallCount = 0;
+  }
+
+  private getDateForActivity(dayNumber: number, startDate?: string): string {
     try {
-      const response = await axios.post(
-        this.baseUrl,
-        {
-          model: 'sonar',
-          messages: [
-            {
-              role: 'system',
-              content: 'You are a helpful travel planning assistant.'
-            },
-            {
-              role: 'user',
-              content: query
-            }
-          ],
-          temperature: 0.3,
-          max_tokens: 8000,
-          web_search: true
-        },
-        {
-          headers: {
-            'Authorization': `Bearer ${this.apiKey}`,
-            'Content-Type': 'application/json'
-          }
-        }
-      );
-
-      const content = response.data.choices[0]?.message?.content;
-      if (!content) {
-        logger.error('[Activity Generation] No content in Perplexity response');
-        return [];
+      if (!startDate) {
+        const date = new Date();
+        date.setDate(date.getDate() + (dayNumber - 1));
+        return date.toISOString().split('T')[0];
       }
 
-      logger.debug('[Activity Generation] Raw content received:', { contentLength: content.length });
-
-      try {
-        // First try to parse the content directly
-        let parsedContent: any;
-        try {
-          parsedContent = JSON.parse(content);
-        } catch (e) {
-          // If direct parsing fails, try to extract JSON from markdown or text
-          const jsonMatch = content.match(/```json\s*([\s\S]*?)\s*```/) || content.match(/\{[\s\S]*\}|\[[\s\S]*\]/);
-          if (!jsonMatch) {
-            logger.error('[Activity Generation] No JSON content found in response');
-            return [];
-          }
-
-          const jsonContent = jsonMatch[1] || jsonMatch[0];
-          // Clean the JSON string before parsing
-          const cleanedJson = jsonContent
-            .replace(/[\u0000-\u001F]+/g, '') // Remove control characters
-            .replace(/,\s*([}\]])/g, '$1') // Remove trailing commas
-            .replace(/([{,]\s*)(\w+):/g, '$1"$2":') // Ensure property names are quoted
-            .replace(/\n/g, ' ') // Remove newlines
-            .replace(/\s+/g, ' ') // Normalize spaces
-            .trim();
-
-          logger.debug('[Activity Generation] Attempting to parse cleaned JSON:', { cleanedJson });
-          parsedContent = JSON.parse(cleanedJson);
-        }
-
-        // Initialize activities array
-        let activities: Activity[] = [];
-
-        // Handle different response formats
-        if (Array.isArray(parsedContent)) {
-          activities = parsedContent;
-        } else if (parsedContent.activities && Array.isArray(parsedContent.activities)) {
-          activities = parsedContent.activities;
-        } else if (parsedContent.schedule && Array.isArray(parsedContent.schedule)) {
-          activities = parsedContent.schedule.reduce((acc: Activity[], day: any) => {
-            if (day.activities && Array.isArray(day.activities)) {
-              acc.push(...day.activities);
-            }
-            return acc;
-          }, []);
-        }
-
-        if (!activities || activities.length === 0) {
-          logger.error('[Activity Generation] No valid activities found in response');
-          return [];
-        }
-        
-        // Add duration validation and normalization
-        const normalizedActivities = activities.map((activity: Activity) => {
-          // Normalize duration to minutes
-          let duration = 0;
-          if (activity.duration) {
-            if (typeof activity.duration === 'number') {
-              duration = activity.duration;
-            } else if (typeof activity.duration === 'object') {
-              const durationObj = activity.duration as { min?: number; max?: number; fixedDurationInMinutes?: number };
-              if (durationObj.fixedDurationInMinutes) {
-                duration = durationObj.fixedDurationInMinutes;
-              } else if (durationObj.min && durationObj.max) {
-                duration = Math.floor((durationObj.min + durationObj.max) / 2);
-              }
-            } else if (typeof activity.duration === 'string') {
-              const durationStr = activity.duration as string;
-              const hourMatch = durationStr.match(/(\d+)\s*(?:hours?|hrs?)/i);
-              const minuteMatch = durationStr.match(/(\d+)\s*(?:minutes?|mins?)/i);
-              
-              if (hourMatch) {
-                duration += parseInt(hourMatch[1]) * 60;
-              }
-              if (minuteMatch) {
-                duration += parseInt(minuteMatch[1]);
-              }
-            }
-          }
-
-          // Normalize price
-          const price = typeof activity.price === 'number' 
-            ? { amount: activity.price, currency: 'USD' }
-            : activity.price || { amount: 0, currency: 'USD' };
-
-          return {
-            ...activity,
-            id: activity.id || `${activity.name}-${activity.timeSlot}-${Date.now()}`.toLowerCase().replace(/\s+/g, '-'),
-            duration: duration || 120, // Default to 2 hours if no duration specified
-            price,
-            selected: false,
-            category: activity.category || 'Cultural & Historical'
-          };
-        });
-        
-        logger.info('[Activity Generation] Successfully processed activities', {
-          totalActivities: normalizedActivities.length,
-          firstActivity: normalizedActivities[0]?.name
-        });
-
-        return normalizedActivities;
+      const date = new Date(startDate);
+      if (isNaN(date.getTime())) {
+        throw new Error(`Invalid start date: ${startDate}`);
+      }
+      
+      date.setDate(date.getDate() + (dayNumber - 1));
+      return date.toISOString().split('T')[0];
       } catch (error) {
-        logger.error('[Activity Generation] Failed to parse Perplexity response', { 
-          error: error instanceof Error ? error.message : 'Unknown error',
-          content 
-        });
-        return [];
-      }
-    } catch (error) {
-      logger.error('[Activity Generation] Error calling Perplexity API', {
+      logger.error('[Perplexity] Error calculating activity date:', {
+        dayNumber,
+        startDate,
         error: error instanceof Error ? error.message : 'Unknown error'
       });
-      return [];
+      return new Date().toISOString().split('T')[0];
     }
   }
 
   async generateActivities(params: GenerateActivitiesParams): Promise<any> {
+    this.resetPerplexityApiCallCount();
     try {
+      this.perplexityApiCallCount++;
+      logger.info('[Perplexity] Generating activities:', {
+        destination: params.destination,
+        days: params.days,
+        budget: params.budget,
+        currency: params.currency,
+        hasPreferences: !!params.preferences,
+        hasFlightTimes: !!params.flightTimes,
+        apiCallCount: this.perplexityApiCallCount
+      });
+
       logger.info('Received activity generation request', params);
 
       // 1. Initial activity generation
       const query = this.buildActivityQuery(params);
       logger.debug('Sending query to Perplexity API', { query });
-      const activities = await this.makePerplexityRequests(query);
+      const chatResponse = await this.chat(query);
+      const activities = chatResponse.activities || [];
       
       if (!activities || activities.length === 0) {
         logger.error('No activities generated from initial request');
@@ -566,7 +369,7 @@ Return ONLY a valid JSON array of activities.`;
       // 3. Enrich activities with detailed information
       const enrichedActivities: Activity[] = [];
       for (const activity of balancedActivities) {
-        const date = this.getDateForActivity(activity.dayNumber, params);
+        const date = this.getDateForActivity(activity.dayNumber, params.flightTimes?.arrival);
         const enrichedActivity = await this.enrichActivity(activity, params, date);
         
         if (enrichedActivity) {
@@ -611,7 +414,7 @@ Return ONLY a valid JSON array of activities.`;
         logger.warn('Failed to generate day highlights');
       }
 
-      const response = {
+      const finalResponse = {
         success: true,
         activities: enrichedActivities,
         dailySummaries: dailySummaries || [],
@@ -631,36 +434,30 @@ Return ONLY a valid JSON array of activities.`;
         activitiesCount: enrichedActivities.length,
         hasSummaries: !!dailySummaries,
         hasHighlights: !!dayHighlights,
-        metadata: response.metadata
+        metadata: finalResponse.metadata
       });
 
-      return response;
+      return finalResponse;
 
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
-      logger.error('Failed to generate activities', {
-        error: errorMessage,
-        stack: error instanceof Error ? error.stack : undefined
+      logger.error('[Perplexity] Error generating activities:', {
+        error: error instanceof Error ? error.message : 'Unknown error',
+        stack: error instanceof Error ? error.stack : undefined,
+        apiCallCount: this.perplexityApiCallCount
       });
-      
-      return {
-        success: false,
-        error: errorMessage,
-        activities: [],
-        metadata: {
-          originalCount: 0,
-          finalCount: 0,
-          enrichedCount: 0,
-          daysPlanned: params.days,
-          destination: params.destination
-        }
-      };
+      throw error;
     }
   }
 
   // For initial activity planning - uses sonar model
   async chat(query: string, options?: { web_search?: boolean; temperature?: number; max_tokens?: number }): Promise<PerplexityApiResponse> {
     try {
+      this.perplexityApiCallCount++;
+      logger.info('[Perplexity] Making API call:', {
+        promptLength: query.length,
+        apiCallCount: this.perplexityApiCallCount
+      });
+
       if (!this.apiKey) {
         throw new Error('Perplexity API key is not configured');
       }
@@ -809,8 +606,12 @@ Return ONLY a valid JSON array of activities.`;
         activityFitNotes: parsedContent.activityFitNotes
       };
     } catch (error) {
-      logger.error('[Perplexity] Error calling API:', error);
-      return { activities: [] };
+      logger.error('[Perplexity] Error in chat:', {
+        error: error instanceof Error ? error.message : 'Unknown error',
+        stack: error instanceof Error ? error.stack : undefined,
+        apiCallCount: this.perplexityApiCallCount
+      });
+      throw error;
     }
   }
 
@@ -1309,13 +1110,6 @@ IMPORTANT: You MUST provide detailed commentary and highlights that explicitly r
     return parts.join(', ');
   }
 
-  private getDateForActivity(dayNumber: number, params: GenerateActivitiesParams): string {
-    const startDate = new Date(params.flightTimes?.arrival || Date.now());
-    const activityDate = new Date(startDate);
-    activityDate.setDate(startDate.getDate() + (dayNumber - 1));
-    return activityDate.toISOString().split('T')[0];
-  }
-
   private determineOptimalTimeSlot(
     activity: Activity,
     verification: TimeSlotVerification | undefined,
@@ -1785,10 +1579,11 @@ Return as JSON with:
       "commentary": "why this activity was chosen",
       "itineraryHighlight": "how it fits in the day's flow",
       "scoringReason": "specific placement reasoning"
-    }]
+    }],
+    "dayPlanningLogic": "string"
   }],
-  "tripOverview": "overall trip organization logic",
-  "activityFitNotes": "why activities were included/excluded"
+  "tripOverview": "string",
+  "activityFitNotes": "string"
 }`;
 
       const response = await this.chat(query);
@@ -2009,231 +1804,70 @@ Return as JSON with:
       activityFitNotes: 'Activities arranged based on time slots with alternatives for flexibility'
     };
   }
-}
 
-// Create and export a singleton instance
-export const perplexityClient = new PerplexityService(); 
+  private buildActivityQuery(params: GenerateActivitiesParams): string {
+    const { destination, days, budget, preferences, flightTimes } = params;
+    
+    return `Generate a detailed ${days}-day itinerary for ${destination} with these requirements:
 
-const optimizeSchedule = async (activities: any[], days: number, destination: string): Promise<any> => {
-  try {
-    const query = `Create a detailed ${days}-day schedule for ${destination} with these activities:
-${activities.map(a => `- ${a.name} (${a.duration || 'N/A'} minutes)`).join('\n')}
+PREFERENCES:
+- Travel Style: ${preferences.travelStyle}
+- Pace: ${preferences.pacePreference}
+- Interests: ${preferences.interests.join(', ')}
+${preferences.accessibility.length > 0 ? `- Accessibility Needs: ${preferences.accessibility.join(', ')}` : ''}
+${preferences.dietaryRestrictions.length > 0 ? `- Dietary Restrictions: ${preferences.dietaryRestrictions.join(', ')}` : ''}
+
+CONSTRAINTS:
+- Budget: ${budget} ${params.currency}
+- Days: ${days}
+${flightTimes ? `- Arrival: ${flightTimes.arrival}
+- Departure: ${flightTimes.departure}` : ''}
 
 REQUIREMENTS:
-1. Create a balanced schedule across ${days} days
-2. Group activities geographically to minimize travel time
-3. Include specific break times and suggestions
-4. Plan efficient routes between locations
-5. Consider opening hours and crowd patterns
-6. Include meeting points and end points for each day
-
-FOR EACH DAY PROVIDE:
-1. Theme: Main focus/theme of the day
-2. Main Area: Primary geographical area being explored
-3. Commentary: Detailed explanation of the day's flow
-4. Highlights: Key points and special considerations
-5. Timeline: Chronological sequence with:
-   - Meeting point location and time
-   - Each activity with exact location
-   - Break times and suggested locations
-   - Transport between locations
-   - End point location and time
-6. Logistics:
-   - Transport suggestions between activities
-   - Walking distances and routes
-   - Time estimates for transitions
-   - Break recommendations
-7. Breaks Schedule:
-   - Morning break suggestions
-   - Lunch break with restaurant options
-   - Afternoon break ideas
-   - Dinner recommendations
+1. Suggest activities that match the interests and accessibility needs
+2. Balance activities across days based on the preferred pace
+3. Consider travel style when suggesting activity types
+4. Include price estimates and durations
+5. Suggest optimal time slots (morning/afternoon/evening)
+6. Consider location proximity for efficient planning
+7. Account for opening hours and crowd patterns
+8. Include breaks and meal times
 
 Return as JSON with this EXACT structure:
 {
+  "activities": [{
+    "name": "string",
+    "description": "string",
+    "category": "Cultural & Historical|Nature & Adventure|Food & Entertainment|Lifestyle & Local",
+    "duration": number (in minutes),
+    "price": {
+      "amount": number,
+      "currency": "USD"
+    },
+    "location": "string",
+    "timeSlot": "morning|afternoon|evening",
+    "dayNumber": number,
+    "rating": number (0-5),
+    "numberOfReviews": number,
+    "commentary": "string explaining fit with preferences",
+    "itineraryHighlight": "string explaining placement in schedule"
+  }],
   "schedule": [{
     "dayNumber": number,
-    "theme": "string",
-    "mainArea": "string",
-    "commentary": "string",
-    "highlights": ["string"],
-    "mapData": {
-      "center": {
-        "latitude": number,
-        "longitude": number
-      },
-      "bounds": {
-        "north": number,
-        "south": number,
-        "east": number,
-        "west": number
-      },
-      "locations": [{
+    "activities": [{
         "name": "string",
-        "coordinates": {
-          "latitude": number,
-          "longitude": number
-        },
-        "address": "string",
-        "type": "activity|break|transport|landmark",
-        "category": "string",
-        "description": "string",
-        "duration": number,
-        "timeSlot": "string",
-        "order": number,
-        "locationType": "string"
-      }],
-      "routes": [{
-        "from": "string",
-        "to": "string",
-        "mode": "walking|transit|driving",
-        "duration": number,
-        "distance": "string"
-      }]
-    },
-    "breaks": {
-      "morning": {
-        "startTime": "string",
-        "endTime": "string",
-        "duration": number,
-        "suggestion": "string",
-        "location": "string"
-      },
-      "lunch": {
-        "startTime": "string",
-        "endTime": "string",
-        "duration": number,
-        "suggestion": "string",
-        "location": "string"
-      },
-      "afternoon": {
-        "startTime": "string",
-        "endTime": "string",
-        "duration": number,
-        "suggestion": "string",
-        "location": "string"
-      },
-      "dinner": {
-        "startTime": "string",
-        "endTime": "string",
-        "duration": number,
-        "suggestion": "string",
-        "location": "string"
-      }
-    },
-    "logistics": {
-      "transportSuggestions": ["string"],
-      "walkingDistances": ["string"],
-      "timeEstimates": ["string"]
-    }
+      "timeSlot": "morning|afternoon|evening",
+      "startTime": "HH:MM",
+      "commentary": "string",
+      "itineraryHighlight": "string"
+    }],
+    "dayPlanningLogic": "string"
   }],
   "tripOverview": "string",
   "activityFitNotes": "string"
 }`;
-
-    const response = await perplexityClient.chat(query);
-    
-    if (!response?.schedule) {
-      logger.warn('Creating basic schedule due to optimization failure');
-      return createBasicSchedule(activities, days);
-    }
-
-    logger.info('Schedule optimization complete with detailed planning', {
-      days: response.schedule.length,
-      hasMapData: response.schedule.every(day => day.mapData),
-      hasBreaks: response.schedule.every(day => day.breaks),
-      hasLogistics: response.schedule.every(day => day.logistics)
-    });
-
-    return {
-      schedule: response.schedule,
-      tripOverview: response.tripOverview,
-      activityFitNotes: response.activityFitNotes
-    };
-  } catch (error) {
-    logger.error('Failed to optimize schedule:', error);
-    return createBasicSchedule(activities, days);
   }
-};
+}
 
-// Update createBasicSchedule to match the new structure
-function createBasicSchedule(activities: Activity[], days: number) {
-  const schedule = [];
-  const activitiesPerDay = Math.ceil(activities.length / days);
-
-  for (let day = 1; day <= days; day++) {
-    const dayActivities = activities
-      .slice((day - 1) * activitiesPerDay, day * activitiesPerDay)
-      .map(activity => ({
-        ...activity,
-        startTime: activity.timeSlot === 'morning' ? '09:00' :
-                  activity.timeSlot === 'afternoon' ? '14:00' : '19:00'
-      }));
-
-    schedule.push({
-      dayNumber: day,
-      theme: `Day ${day} Exploration`,
-      mainArea: "City Center",
-      commentary: `Day ${day} activities arranged by time slots`,
-      highlights: [`Day ${day} main activities`],
-      mapData: {
-        center: { latitude: 0, longitude: 0 },
-        bounds: { north: 0, south: 0, east: 0, west: 0 },
-        locations: dayActivities.map((activity, index) => ({
-          name: activity.name,
-          coordinates: { latitude: 0, longitude: 0 },
-          address: activity.location || '',
-          type: 'activity',
-          category: activity.category,
-          description: activity.description || '',
-          duration: activity.duration || 120,
-          timeSlot: activity.timeSlot,
-          order: index + 1
-        })),
-        routes: []
-      },
-      breaks: {
-        morning: {
-          startTime: "10:30",
-          endTime: "11:00",
-          duration: 30,
-          suggestion: "Coffee break",
-          location: "Nearby café"
-        },
-        lunch: {
-          startTime: "12:30",
-          endTime: "13:30",
-          duration: 60,
-          suggestion: "Lunch break",
-          location: "Local restaurant"
-        },
-        afternoon: {
-          startTime: "15:30",
-          endTime: "16:00",
-          duration: 30,
-          suggestion: "Rest break",
-          location: "Local park or café"
-        },
-        dinner: {
-          startTime: "18:30",
-          endTime: "20:00",
-          duration: 90,
-          suggestion: "Dinner",
-          location: "Restaurant district"
-        }
-      },
-      logistics: {
-        transportSuggestions: ["Use public transport between main locations"],
-        walkingDistances: ["Walking distances vary between activities"],
-        timeEstimates: ["Allow 15-30 minutes between activities for transitions"]
-      },
-      activities: dayActivities
-    });
-  }
-
-  return {
-    schedule,
-    tripOverview: 'Basic schedule with activities distributed evenly across days',
-    activityFitNotes: 'Activities arranged based on their predefined time slots'
-  };
-} 
+// Create and export a singleton instance
+export const perplexityClient = new PerplexityService(); 
