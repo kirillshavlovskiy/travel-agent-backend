@@ -8,7 +8,7 @@ import budgetRoutes from './src/routes/budget.js';
 import flightRoutes from './src/routes/flights.js';
 import hotelRoutes from './src/routes/hotels.js';
 import perplexityRoutes from './src/routes/perplexity.js';
-import { activitiesRouter } from './src/routes/activities.js';
+import activitiesRouter from './src/routes/activities.js';
 import enrichmentRouter from './src/routes/enrichment.js';
 import locationsRouter from './src/routes/locations.js';
 import { authMiddleware } from './src/middleware/auth.js';

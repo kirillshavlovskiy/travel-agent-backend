@@ -5,7 +5,7 @@ import { logger } from '../utils/logger.js';
 import { ViatorService } from '../services/viator.js';
 import { Activity } from '../services/perplexity.js';
 
-const activitiesRouter = Router();
+const router = Router();
 
 // Add counter at the top of the file
 let perplexityCallCounter = 0;
@@ -464,139 +464,168 @@ function normalizePrice(price: any): { amount: number; currency: string } {
   };
 }
 
-activitiesRouter.post('/generate', async (req: Request, res: Response) => {
+router.post('/generate', async (req: Request, res: Response) => {
   try {
-    perplexityCallCounter = 0; // Reset counter at start of each request
-    
-    // Log initial request
+    // Add detailed request logging
     logger.info('[Activities] Processing generation request:', {
       destination: req.body.destination,
-      interests: req.body.interests,
-      currency: req.body.currency || 'USD',
+      days: req.body.days,
+      budget: req.body.budget,
+      currency: req.body.currency,
+      hasPreferences: !!req.body.preferences,
       timestamp: new Date().toISOString()
     });
 
-    const { destination, days, budget, preferences, existingActivities, skipPerplexityGeneration } = req.body;
-    const currency = req.body.currency || 'USD';
+    const { destination, days, budget, currency, preferences: rawPreferences } = req.body;
 
-    let activitiesToProcess;
-
-    // If we have existing activities and skipPerplexityGeneration flag is true, use those
-    if (existingActivities && Array.isArray(existingActivities) && existingActivities.length > 0 && skipPerplexityGeneration) {
-      logger.info('[Activities] Using existing activities from budget calculation:', {
-        count: existingActivities.length
+    // Validate required fields
+    if (!destination || !days || !budget || !currency) {
+      logger.warn('[Activities] Missing required fields:', {
+        hasDestination: !!destination,
+        hasDays: !!days,
+        hasBudget: !!budget,
+        hasCurrency: !!currency
       });
-      
-      // Normalize prices of existing activities
-      activitiesToProcess = existingActivities.map(activity => ({
-        ...activity,
-        price: normalizePrice(activity.price)
-      }));
-    } else {
-      // Only make Perplexity call if we don't have existing activities or skipPerplexityGeneration is false
-      logger.info('[Activities] No existing activities or skipPerplexityGeneration=false, proceeding with generation');
-      perplexityCallCounter++;
-      
-      const response = await perplexityClient.generateActivities({
-        destination: destination.label || destination,
-        days,
-        budget,
-        currency: 'USD', // Always request USD prices
-        preferences
+      return res.status(400).json({
+        error: 'Missing required fields',
+        timestamp: new Date().toISOString()
       });
-
-      activitiesToProcess = response?.activities?.map(activity => ({
-        ...activity,
-        price: normalizePrice(activity.price)
-      })) || [];
     }
 
-    // Log pre-enrichment prices
-    logger.info('[Activities] Pre-enrichment prices:', {
-      activities: activitiesToProcess.map(a => ({
-        name: a.name,
-        price: a.price
-      })),
-      timestamp: new Date().toISOString()
-    });
+    // Validate and get preferences with defaults
+    const preferences = {
+      ...rawPreferences,
+      budget: {
+        limit: budget,
+        currency: currency || 'USD'
+      }
+    };
+
+    // Get initial activity suggestions from Perplexity
+    const query = `Create a ${days}-day activity plan for ${destination} with the following requirements:
+
+BUDGET & QUALITY:
+- Daily budget: ${budget} ${currency} per person
+- Minimum rating: 4.0+ stars
+- Must have at least 50 reviews
+
+ACTIVITY CATEGORIES:
+- Cultural & Historical: museums, historic sites, monuments
+- Nature & Adventure: parks, tours, outdoor activities
+- Food & Entertainment: dining, shows, experiences
+- Shopping & Local Life: markets, neighborhoods, local culture
+
+TIME SLOTS:
+- Morning (9:00-13:00): Prefer cultural & historical
+- Afternoon (14:00-18:00): Prefer nature & adventure
+- Evening (19:00-23:00): Prefer food & entertainment
+
+CRITICAL RULES:
+1. Only include activities that take 1 day or less
+2. Group activities by area to minimize travel time
+3. Mix different types of activities each day
+4. Consider opening hours and seasonal factors
+5. Include variety in each day's schedule
+
+Return ONLY valid JSON with schedule array.`;
+
+    logger.debug('[Activities] Sending query to Perplexity API', { query });
+    const response = await perplexityClient.chat(query);
+    
+    const parsedData = response;
+    if (!parsedData.activities || !Array.isArray(parsedData.activities)) {
+      logger.error('[Activities] Invalid data structure', { parsedData });
+      throw new Error('Invalid response format: missing or invalid activities array');
+    }
+
+    // Ensure all activities are unselected after regeneration
+    parsedData.activities = parsedData.activities.map(activity => ({
+      ...activity,
+      selected: false
+    }));
 
     // Enrich activities with Viator data
+    const viatorClient = new ViatorService(process.env.VIATOR_API_KEY || '');
     const enrichedActivities = await Promise.all(
-      activitiesToProcess.map(async (activity) => {
+      parsedData.activities.map(async (activity: any) => {
         try {
-          const productCode = activity.bookingInfo?.productCode || 
-                            activity.referenceUrl?.match(/\-([a-zA-Z0-9]+)(?:\?|$)/)?.[1];
-
-          if (!productCode) {
-            return {
-              ...activity,
-              price: normalizePrice(activity.price)
-            };
+          const searchResults = await viatorClient.searchActivity(`${activity.name} ${destination}`);
+          if (!searchResults || searchResults.length === 0) {
+            logger.warn('[Activities] No Viator activities found for:', activity.name);
+            return activity;
           }
-
-          const enriched = await viatorClient.getProductDetails(productCode);
           
-          if (!enriched) {
-            return {
-              ...activity,
-              price: normalizePrice(activity.price)
-            };
-          }
+          const enrichedResults = await Promise.all(
+            searchResults.map(async (result) => {
+              const enriched = await viatorClient.enrichActivityDetails(result);
+              if (!enriched) return null;
 
-          // Use normalized price from Viator service
-          return {
-            ...activity,
-            price: enriched.price || normalizePrice(activity.price),
-            pricingDetails: enriched.pricing
-          };
+              // Use validated preferences for scoring
+              const score = calculateActivityScore(enriched, preferences);
+              
+              return {
+                ...enriched,
+                ...score,
+                images: enriched.images || [],
+                bookingInfo: {
+                  productCode: enriched.bookingInfo?.productCode || '',
+                  cancellationPolicy: enriched.bookingInfo?.cancellationPolicy || 'Standard cancellation policy',
+                  instantConfirmation: true,
+                  mobileTicket: true,
+                  languages: enriched.bookingInfo?.languages || ['English'],
+                  minParticipants: enriched.bookingInfo?.minParticipants || 1,
+                  maxParticipants: enriched.bookingInfo?.maxParticipants || 99
+                },
+                meetingPoint: enriched.meetingPoint || undefined,
+                highlights: enriched.highlights || [],
+                operatingHours: enriched.operatingHours || '',
+                isVerified: true,
+                verificationStatus: 'verified' as const
+              };
+            })
+          );
+
+          const validResults = enrichedResults.filter(Boolean);
+          return validResults.length > 0 ? validResults[0] : activity;
         } catch (error) {
-          const err = error as Error;
-          logger.error('[Activities] Enrichment error:', {
-            name: activity.name,
-            error: err.message,
-            timestamp: new Date().toISOString()
+          logger.error('[Activities] Failed to enrich activity:', {
+            activity: activity.name,
+            error: error instanceof Error ? error.message : 'Unknown error'
           });
-          return {
-            ...activity,
-            price: normalizePrice(activity.price)
-          };
+          return activity;
         }
       })
     );
 
-    // Calculate price statistics
-    const activitiesWithPrices = enrichedActivities.filter(a => (a.price?.amount || 0) > 0);
-    const totalPrice = activitiesWithPrices.reduce((sum, a) => sum + (a.price?.amount || 0), 0);
-    const averagePrice = activitiesWithPrices.length > 0 ? totalPrice / activitiesWithPrices.length : 0;
+    // Deduplicate activities
+    const dedupedActivities = deduplicateActivities(enrichedActivities);
 
-    // Log final price statistics
-    logger.info('[Activities] Generation complete:', {
-      totalActivities: enrichedActivities.length,
-      activitiesWithPrices: activitiesWithPrices.length,
-      totalPrice,
-      averagePrice,
-      currency: 'USD',
-      timestamp: new Date().toISOString()
-    });
+    // Optimize schedule
+    const optimizedSchedule = await optimizeSchedule(dedupedActivities, days, destination);
 
     res.json({
-      activities: enrichedActivities,
-      metadata: {
-        totalActivities: enrichedActivities.length,
-        enrichedCount: activitiesWithPrices.length,
-        totalPrice,
-        averagePrice,
-        currency: 'USD'
-      }
+      activities: dedupedActivities,
+      suggestedItineraries: optimizedSchedule.schedule.reduce((acc, day) => {
+        const tier = preferences.travelStyle.toLowerCase();
+        if (!acc[tier]) acc[tier] = [];
+        acc[tier].push(day);
+        return acc;
+      }, {} as Record<string, any[]>),
+      schedule: optimizedSchedule.schedule,
+      tripOverview: optimizedSchedule.tripOverview,
+      dailyHighlights: optimizedSchedule.dailyHighlights || [],
+      logisticsAdvice: optimizedSchedule.logisticsAdvice || {}
     });
   } catch (error) {
-    const err = error as Error;
     logger.error('[Activities] Generation error:', {
-      error: err.message,
+      error: error instanceof Error ? error.message : 'Unknown error',
+      stack: error instanceof Error ? error.stack : undefined
+    });
+    res.status(500).json({
+      error: error instanceof Error ? error.message : 'Failed to generate activities',
       timestamp: new Date().toISOString()
     });
-    res.status(500).json({ error: 'Failed to generate activities' });
   }
 });
 
-export { activitiesRouter };
+export default router;
