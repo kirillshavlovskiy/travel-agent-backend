@@ -569,48 +569,7 @@ export class ViatorService {
           const productDetails = await this.getProductDetails(productCode);
           
           if (productDetails) {
-            const ratingStr = productDetails.reviews?.combinedAverageRating 
-              ? `★ ${productDetails.reviews.combinedAverageRating.toFixed(1)} (${productDetails.reviews.totalReviews} reviews)` 
-              : '';
-
-            return [{
-              name: productDetails.title,
-              description: productDetails.description + (ratingStr ? `\n\n${ratingStr}` : ''),
-              duration: productDetails.duration?.fixedDurationInMinutes,
-              price: {
-                amount: productDetails.pricing?.summary?.fromPrice,
-                currency: productDetails.pricing?.currency
-              },
-              rating: productDetails.reviews?.combinedAverageRating,
-              numberOfReviews: productDetails.reviews?.totalReviews,
-              ratingDisplay: ratingStr,
-              images: productDetails.images?.map((img: any) => {
-                const variants = img.variants || [];
-                const preferredVariant = variants.find((v: ViatorImageVariant) => v.width === 480 && v.height === 320);
-                return preferredVariant ? preferredVariant.url : variants[0]?.url;
-              }).filter(Boolean),
-              bookingInfo: {
-                productCode: productCode,
-                cancellationPolicy: productDetails.cancellationPolicy?.description || 'Standard cancellation policy',
-                instantConfirmation: true,
-                mobileTicket: true,
-                languages: ['English'],
-                minParticipants: 1,
-                maxParticipants: 99
-              },
-              highlights: productDetails.highlights || [],
-              location: productDetails.location?.address || '',
-              category: this.determineCategory({
-                name: productDetails.title,
-                description: productDetails.description,
-                productCode: productCode,
-                price: {
-                  amount: productDetails.pricing?.summary?.fromPrice,
-                  currency: productDetails.pricing?.currency
-                }
-              }),
-              referenceUrl: `https://www.viator.com/tours/${productCode}`
-            }];
+            return [this.formatProductResponse(productDetails)];
           }
         } catch (error) {
           logger.warn('Direct product lookup failed, falling back to search:', error);
@@ -656,56 +615,126 @@ export class ViatorService {
         return null;
       }
 
-      return response.data.products.results.map((product: any) => {
-        const ratingStr = product.reviews?.combinedAverageRating 
-          ? `★ ${product.reviews.combinedAverageRating.toFixed(1)} (${product.reviews.totalReviews} reviews)` 
-          : '';
-
-        const categoryInfo: CategoryDetermination = {
-          name: product.title,
-          description: product.description,
-          productCode: product.productCode,
-          price: {
-            amount: product.pricing?.summary?.fromPrice,
-            currency: product.pricing?.currency
-          }
-        };
-
-        return {
-          name: product.title,
-          description: product.description + (ratingStr ? `\n\n${ratingStr}` : ''),
-          duration: product.duration?.fixedDurationInMinutes,
-          price: {
-            amount: product.pricing?.summary?.fromPrice,
-            currency: product.pricing?.currency
-          },
-          rating: product.reviews?.combinedAverageRating,
-          numberOfReviews: product.reviews?.totalReviews,
-          ratingDisplay: ratingStr,
-          images: product.images?.map((img: any) => {
-            const variants = img.variants || [];
-            const preferredVariant = variants.find((v: ViatorImageVariant) => v.width === 480 && v.height === 320);
-            return preferredVariant ? preferredVariant.url : variants[0]?.url;
-          }).filter(Boolean),
-          bookingInfo: {
-            productCode: product.productCode,
-            cancellationPolicy: product.bookingInfo?.cancellationPolicy || 'Standard cancellation policy',
-            instantConfirmation: true,
-            mobileTicket: true,
-            languages: ['English'],
-            minParticipants: 1,
-            maxParticipants: 99
-          },
-          highlights: product.highlights || [],
-          location: product.location?.address || '',
-          category: this.determineCategory(categoryInfo),
-          referenceUrl: product.productUrl || `https://www.viator.com/tours/${product.productCode}`
-        };
-      });
+      return response.data.products.results.map(this.formatProductResponse.bind(this));
     } catch (error) {
       logger.error('Error searching activity:', error);
       throw error;
     }
+  }
+
+  private formatProductResponse(product: any) {
+    const ratingStr = product.reviews?.combinedAverageRating 
+      ? `★ ${product.reviews.combinedAverageRating.toFixed(1)} (${product.reviews.totalReviews} reviews)` 
+      : '';
+
+    // Extract location information from multiple possible fields
+    const locationSources = this.extractLocation(product);
+
+    // Get the most appropriate URL
+    const bookingUrl = this.constructBookingUrl(product);
+
+    // Extract availability information
+    const availability = this.extractAvailability(product);
+
+    return {
+      name: product.title,
+      description: product.description + (ratingStr ? `\n\n${ratingStr}` : ''),
+      duration: product.duration?.fixedDurationInMinutes,
+      price: {
+        amount: product.pricing?.summary?.fromPrice,
+        currency: product.pricing?.currency,
+        priceType: product.pricing?.summary?.priceType || 'FROM',
+        specialOffer: product.pricing?.summary?.specialOffer || null,
+        retailPrice: product.pricing?.summary?.retailPrice || null
+      },
+      rating: product.reviews?.combinedAverageRating,
+      numberOfReviews: product.reviews?.totalReviews,
+      ratingDisplay: ratingStr,
+      images: this.extractImages(product),
+      bookingInfo: {
+        productCode: product.productCode,
+        cancellationPolicy: product.bookingInfo?.cancellationPolicy || 'Standard cancellation policy',
+        instantConfirmation: product.confirmationType === 'INSTANT',
+        mobileTicket: product.bookingInfo?.mobileTicketing || true,
+        languages: product.bookingInfo?.languages || ['English'],
+        minParticipants: product.bookingInfo?.minParticipants || 1,
+        maxParticipants: product.bookingInfo?.maxParticipants || 99,
+        availability
+      },
+      highlights: product.highlights || [],
+      location: {
+        address: locationSources[0] || '',
+        sources: locationSources
+      },
+      category: this.determineCategory({
+        name: product.title,
+        description: product.description,
+        productCode: product.productCode,
+        price: {
+          amount: product.pricing?.summary?.fromPrice,
+          currency: product.pricing?.currency
+        }
+      }),
+      referenceUrl: bookingUrl
+    };
+  }
+
+  private extractLocation(product: any): string[] {
+    const locationSources = [
+      product.location?.address,
+      product.location?.meetingPoint,
+      product.location?.coordinates?.description,
+      product.destinations?.[0]?.name,
+      product.location?.description,
+      product.title,
+      product.description
+    ].filter(Boolean).map((loc: string) => loc.toLowerCase());
+
+    const descriptionLocations = product.description?.match(/\b(?:in|at|near|around)\s+([A-Z][a-zA-Z\s]+(?:,\s*[A-Z][a-zA-Z\s]+)*)/g) || [];
+    
+    return [...new Set([
+      ...locationSources, 
+      ...descriptionLocations.map((loc: string) => loc.replace(/^(?:in|at|near|around)\s+/, ''))
+    ])];
+  }
+
+  private constructBookingUrl(product: any): string {
+    // Use the direct product URL if available
+    if (product.productUrl) {
+      return product.productUrl;
+    }
+
+    // Construct URL from destination and product info if available
+    if (product.destinations?.[0]?.ref) {
+      const destinationName = product.destinations[0].name.split(',')[0];
+      const titleSlug = product.title.replace(/[^a-zA-Z0-9]+/g, '-');
+      return `https://www.viator.com/tours/${destinationName}/${titleSlug}/d${product.destinations[0].ref}-${product.productCode}`;
+    }
+
+    // Fallback to basic product URL
+    return `https://www.viator.com/tours/${product.productCode}`;
+  }
+
+  private extractAvailability(product: any): any {
+    return {
+      available: product.available || true,
+      startDate: product.bookingInfo?.startDate,
+      endDate: product.bookingInfo?.endDate,
+      operatingDays: product.bookingInfo?.operatingDays || [],
+      operatingHours: product.bookingInfo?.operatingHours,
+      seasonality: product.bookingInfo?.seasonality,
+      availabilityType: product.confirmationType || 'INSTANT'
+    };
+  }
+
+  private extractImages(product: any): string[] {
+    return (product.images || [])
+      .map((img: any) => {
+        const variants = img.variants || [];
+        const preferredVariant = variants.find((v: ViatorImageVariant) => v.width === 480 && v.height === 320);
+        return preferredVariant ? preferredVariant.url : variants[0]?.url;
+      })
+      .filter(Boolean);
   }
 
   private async performSearch(searchTerm: string): Promise<ViatorSearchResponse> {
@@ -746,7 +775,7 @@ export class ViatorService {
     return response.data;
   }
 
-  private async getProductDetails(productCode: string): Promise<any> {
+  async getProductDetails(productCode: string): Promise<any> {
     try {
       const response = await axios.get(
         `${this.baseUrl}/products/${productCode}`,

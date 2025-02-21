@@ -462,36 +462,36 @@ export class PerplexityService {
         throw new Error('Perplexity API key is not configured');
       }
 
-        const response = await axios.post(
-          this.baseUrl,
-          {
-            model: 'sonar',
-            messages: [
-              {
-                role: 'system',
-              content: 'You are a helpful travel planning assistant. For each time slot (morning, afternoon, evening), provide multiple activity options to allow for selection and optimization. Return ONLY valid JSON.'
-              },
-              {
-                role: 'user',
-                content: query
-              }
-            ],
-          temperature: options?.temperature ?? 0.4, // Slightly increased for more variety
-            max_tokens: options?.max_tokens ?? 8000,
-            web_search: true
-          },
-          {
-            headers: {
-              'Authorization': `Bearer ${this.apiKey}`,
-              'Content-Type': 'application/json'
+      const response = await axios.post(
+        this.baseUrl,
+        {
+          model: 'sonar',
+          messages: [
+            {
+              role: 'system',
+              content: 'You are a helpful travel planning assistant. Generate activities for the requested destination, ensuring variety in categories and time slots. Return ONLY valid JSON.'
+            },
+            {
+              role: 'user',
+              content: query
             }
+          ],
+          temperature: options?.temperature ?? 0.4,
+          max_tokens: options?.max_tokens ?? 8000,
+          web_search: true
+        },
+        {
+          headers: {
+            'Authorization': `Bearer ${this.apiKey}`,
+            'Content-Type': 'application/json'
           }
-        );
+        }
+      );
 
       const rawContent = response.data.choices[0]?.message?.content;
       if (!rawContent) {
-        logger.error('[Perplexity] No content in response');
-        return { activities: [] };
+        logger.warn('[Perplexity] No content in response');
+        throw new Error('No content in response');
       }
 
       logger.debug('[Perplexity] Raw response:', { rawContent });
@@ -502,108 +502,43 @@ export class PerplexityService {
 
       try {
         parsedContent = JSON.parse(cleanedContent);
-          } catch (e) {
-        // If direct parsing fails, try to extract JSON object
-        const jsonMatch = cleanedContent.match(/\{[\s\S]*\}/);
-            if (!jsonMatch) {
-          logger.error('[Perplexity] No JSON content found in response');
-          return { activities: [] };
+      } catch (e) {
+        // If direct parsing fails, try to extract JSON array
+        const jsonMatch = cleanedContent.match(/\[\s*\{[\s\S]*\}\s*\]/) || cleanedContent.match(/\{[\s\S]*\}/);
+        if (!jsonMatch) {
+          logger.error('[Activity Generation] No JSON array found in response');
+          throw new Error('Failed to parse response as JSON');
         }
-
+        const jsonContent = jsonMatch[0];
+        
         try {
-          parsedContent = JSON.parse(jsonMatch[0]);
-            } catch (parseError) {
-          logger.error('[Perplexity] Failed to parse content:', { error: parseError, rawContent });
-          return { activities: [] };
+          const activities = JSON.parse(jsonContent);
+          parsedContent = {
+            activities: Array.isArray(activities) ? activities : [activities],
+            dailySummaries: []
+          };
+        } catch (e) {
+          logger.error('[Activity Generation] Failed to parse JSON:', e);
+          throw new Error('Failed to parse extracted JSON');
         }
       }
 
-      // Extract activities from schedule
-      let activities: Activity[] = [];
-      if (parsedContent.schedule && Array.isArray(parsedContent.schedule)) {
-        // First, extract preselected activities from the query
-        const preselectedMatch = query.match(/preselectedActivities":\s*(\[[\s\S]*?\])/);
-        const preselectedActivities: Activity[] = [];
-        if (preselectedMatch) {
-          try {
-            const preselectedJson = JSON.parse(preselectedMatch[1]);
-            preselectedActivities.push(...preselectedJson);
-            logger.info('[Perplexity] Found preselected activities:', {
-              count: preselectedActivities.length,
-              activities: preselectedActivities.map(a => ({
-                name: a.name,
-                dayNumber: a.dayNumber,
-                timeSlot: a.timeSlot
-              }))
-            });
-          } catch (e) {
-            logger.error('[Perplexity] Failed to parse preselected activities:', e);
-          }
-        }
-
-        // Process each day's activities
-        activities = parsedContent.schedule.flatMap(day => {
-          const dayNumber = day.dayNumber;
-          const dayActivities = day.activities || [];
-
-          // First, add preselected activities for this day
-          const dayPreselected = preselectedActivities.filter(a => a.dayNumber === dayNumber);
-          const preselectedTimeSlots = new Set(dayPreselected.map(a => a.timeSlot));
-
-          // Then add other activities from the schedule, skipping time slots that are already taken
-          const otherActivities = dayActivities
-            .filter(activity => !preselectedTimeSlots.has(activity.timeSlot))
-            .map(activity => ({
-              name: activity.name,
-              category: activity.category || determineCategoryFromDescription(activity.description || ''),
-              rating: activity.rating || 0,
-              numberOfReviews: activity.numberOfReviews || 0,
-              price: activity.price || { amount: 0, currency: 'USD' },
-              location: activity.location || '',
-              timeSlot: activity.timeSlot || this.getTimeSlot(activity.startTime || ''),
-              dayNumber,
-              selected: false,
-              duration: activity.duration || this.estimateDuration(activity.startTime || ''),
-              commentary: activity.commentary || '',
-              itineraryHighlight: activity.itineraryHighlight || '',
-              scoringReason: activity.scoringReason || '',
-              startTime: activity.startTime || '',
-              description: activity.description || '',
-              matchedPreferences: activity.matchedPreferences || [],
-              preferenceScore: activity.preferenceScore || 0
-            }));
-
-          // Combine preselected and other activities
-          return [
-            ...dayPreselected.map(activity => ({
-            ...activity,
-              category: activity.category || 'Cultural & Historical',
-              rating: activity.rating || 4.5,
-              numberOfReviews: activity.numberOfReviews || 1000,
-              price: activity.price || { amount: 0, currency: 'USD' },
-              selected: true,
-              commentary: activity.commentary || `Preselected activity for ${activity.timeSlot}`,
-              itineraryHighlight: activity.itineraryHighlight || `Part of the original plan`,
-              scoringReason: activity.scoringReason || 'Preselected by user'
-            })),
-            ...otherActivities
-          ];
-        });
+      if (!parsedContent.activities || !Array.isArray(parsedContent.activities) || parsedContent.activities.length === 0) {
+        logger.error('[Activity Generation] No activities found in parsed content');
+        throw new Error('No activities found in response');
       }
 
-      logger.info('[Perplexity] Successfully parsed response', {
-        activitiesCount: activities.length,
-        hasSchedule: !!parsedContent.schedule,
-        hasTripOverview: !!parsedContent.tripOverview,
-        firstActivity: activities[0]?.name,
-        preselectedCount: activities.filter(a => a.selected).length
+      // Ensure activities are properly distributed across days and time slots
+      const activities = this.distributeActivities(parsedContent.activities);
+
+      logger.info('[Activity Generation] Successfully generated activities:', {
+        totalActivities: activities.length,
+        uniqueActivities: new Set(activities.map(a => a.name)).size
       });
 
       return {
-        schedule: parsedContent.schedule,
         activities,
-        tripOverview: parsedContent.tripOverview,
-        activityFitNotes: parsedContent.activityFitNotes
+        dailySummaries: []
       };
     } catch (error) {
       logger.error('[Perplexity] Error in chat:', {
@@ -613,6 +548,33 @@ export class PerplexityService {
       });
       throw error;
     }
+  }
+
+  private distributeActivities(activities: Activity[]): Activity[] {
+    // Group activities by day and time slot
+    const distribution = activities.reduce((acc, activity) => {
+      if (!acc[activity.dayNumber]) {
+        acc[activity.dayNumber] = {
+          morning: [],
+          afternoon: [],
+          evening: []
+        };
+      }
+      acc[activity.dayNumber][activity.timeSlot].push(activity);
+      return acc;
+    }, {} as Record<number, Record<string, Activity[]>>);
+
+    // Ensure each day has activities in each time slot
+    const distributedActivities: Activity[] = [];
+    Object.entries(distribution).forEach(([day, slots]) => {
+      ['morning', 'afternoon', 'evening'].forEach(slot => {
+        if (slots[slot].length > 0) {
+          distributedActivities.push(...slots[slot]);
+        }
+      });
+    });
+
+    return distributedActivities;
   }
 
   private cleanJsonString(str: string): string {
@@ -1806,65 +1768,55 @@ Return as JSON with:
   }
 
   private buildActivityQuery(params: GenerateActivitiesParams): string {
-    const { destination, days, budget, preferences, flightTimes } = params;
-    
-    return `Generate a detailed ${days}-day itinerary for ${destination} with these requirements:
+    const {
+      destination,
+      days,
+      budget,
+      currency,
+      preferences,
+      flightTimes
+    } = params;
 
-PREFERENCES:
-- Travel Style: ${preferences.travelStyle}
-- Pace: ${preferences.pacePreference}
-- Interests: ${preferences.interests.join(', ')}
-${preferences.accessibility.length > 0 ? `- Accessibility Needs: ${preferences.accessibility.join(', ')}` : ''}
-${preferences.dietaryRestrictions.length > 0 ? `- Dietary Restrictions: ${preferences.dietaryRestrictions.join(', ')}` : ''}
+    return `Generate ${days * 3} unique activities for a ${days}-day trip to ${destination} with a total budget of ${budget} ${currency}.
 
-CONSTRAINTS:
-- Budget: ${budget} ${params.currency}
-- Days: ${days}
-${flightTimes ? `- Arrival: ${flightTimes.arrival}
-- Departure: ${flightTimes.departure}` : ''}
+IMPORTANT REQUIREMENTS:
+1. CRITICAL: Only suggest activities that are EXACTLY available on the Viator platform (https://www.viator.com)
+2. Use EXACT activity names as listed on Viator - do not modify or paraphrase them
+3. Each activity must be a real, bookable Viator experience
+4. Include specific Viator activity details like exact duration, price range, and category
+5. Generate ${days * 3} high-quality activities that match the criteria (3 activities per day)
+6. Ensure activities are evenly distributed across days and time slots (morning/afternoon/evening)
 
-REQUIREMENTS:
-1. Suggest activities that match the interests and accessibility needs
-2. Balance activities across days based on the preferred pace
-3. Consider travel style when suggesting activity types
-4. Include price estimates and durations
-5. Suggest optimal time slots (morning/afternoon/evening)
-6. Consider location proximity for efficient planning
-7. Account for opening hours and crowd patterns
-8. Include breaks and meal times
+Travel Style: ${preferences.travelStyle}
+Pace: ${preferences.pacePreference}
+Interests: ${preferences.interests.join(', ')}
+${preferences.accessibility.length ? `Accessibility Needs: ${preferences.accessibility.join(', ')}` : ''}
+${preferences.dietaryRestrictions.length ? `Dietary Restrictions: ${preferences.dietaryRestrictions.join(', ')}` : ''}
+${flightTimes ? `
+Flight Arrival: ${flightTimes.arrival}
+Flight Departure: ${flightTimes.departure}` : ''}
 
-Return as JSON with this EXACT structure:
+For each activity, provide:
+1. Exact Viator activity name (do not modify)
+2. Category from Viator's classification
+3. Suggested time slot (morning/afternoon/evening)
+4. Day number (1 to ${days})
+5. Expected duration from Viator listing
+6. Price range from Viator (in ${currency})
+
+Return as JSON with this structure:
 {
   "activities": [{
-    "name": "string",
-    "description": "string",
-    "category": "Cultural & Historical|Nature & Adventure|Food & Entertainment|Lifestyle & Local",
-    "duration": number (in minutes),
+    "name": "EXACT Viator activity name",
+    "category": "Viator category",
+    "timeSlot": "morning/afternoon/evening",
+    "dayNumber": number,
+    "duration": "X hours Y minutes",
     "price": {
       "amount": number,
-      "currency": "USD"
-    },
-    "location": "string",
-    "timeSlot": "morning|afternoon|evening",
-    "dayNumber": number,
-    "rating": number (0-5),
-    "numberOfReviews": number,
-    "commentary": "string explaining fit with preferences",
-    "itineraryHighlight": "string explaining placement in schedule"
-  }],
-  "schedule": [{
-    "dayNumber": number,
-    "activities": [{
-        "name": "string",
-      "timeSlot": "morning|afternoon|evening",
-      "startTime": "HH:MM",
-      "commentary": "string",
-      "itineraryHighlight": "string"
-    }],
-    "dayPlanningLogic": "string"
-  }],
-  "tripOverview": "string",
-  "activityFitNotes": "string"
+      "currency": "${currency}"
+    }
+  }]
 }`;
   }
 }

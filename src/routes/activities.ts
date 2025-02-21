@@ -150,199 +150,105 @@ function deduplicateActivities(activities: Activity[]): Activity[] {
       return uniqueActivities;
 }
 
-// Add schedule optimization function
-async function optimizeSchedule(activities: Activity[], days: number, destination: string): Promise<any> {
-  try {
-    // First, separate preselected activities from the rest
-    const preselectedActivities = activities.filter(a => a.selected);
-    const unselectedActivities = activities.filter(a => !a.selected);
-
-    logger.info('Optimizing schedule with enriched activities:', {
-      totalActivities: activities.length,
-      preselected: preselectedActivities.length,
-      unselected: unselectedActivities.length,
-      enrichedCount: activities.filter(a => a.bookingDetails?.provider === 'Viator').length
-    });
-
-    const query = `Create a detailed ${days}-day schedule for ${destination} with these activities:
-
-PRESELECTED ACTIVITIES (MUST BE INCLUDED):
-${preselectedActivities.map(a => {
-  const details = a.bookingDetails || {};
-  return `- ${a.name} (${a.duration || 'N/A'} minutes, ${a.timeSlot}, Day ${a.dayNumber})
-    * Operating Hours: ${details.operatingHours || 'Not specified'}
-    * Location: ${details.pickupLocation || a.location || 'Not specified'}
-    * Booking Required: ${details.instantConfirmation ? 'Yes' : 'No'}`;
-}).join('\n')}
-
-AVAILABLE ACTIVITIES TO FILL GAPS:
-${unselectedActivities.map(a => {
-  const details = a.bookingDetails || {};
-  return `- ${a.name} (${a.duration || 'N/A'} minutes)
-    * Operating Hours: ${details.operatingHours || 'Not specified'}
-    * Location: ${details.pickupLocation || a.location || 'Not specified'}`;
-}).join('\n')}
-
-REQUIREMENTS:
-1. CRITICAL: Include ALL preselected activities in their specified days and time slots
-2. Create a balanced schedule across ${days} days
-3. Group nearby activities on the same day
-4. Consider activity durations and operating hours
-5. Allow 4-6 activities per day
-6. Mix different types of activities
-7. Include breaks and meal times
-8. Consider travel time between activities
-
-PROVIDE FOR EACH DAY:
-1. Detailed timeline with specific start times
-2. Travel logistics between activities
-3. Suggested breaks and meal times
-4. Special considerations (crowds, weather, etc.)
-5. Alternative options if needed
-
-ALSO PROVIDE:
-1. Overall trip flow explanation
-2. Daily highlights and themes
-3. Transportation recommendations
-4. Dining suggestions
-5. Tips for timing and logistics
-
-Return as JSON with:
-{
-  "schedule": [{
-    "dayNumber": number,
-    "dayPlanningLogic": "detailed reasoning for day's plan",
-    "timeline": [{
-      "startTime": "HH:MM",
-      "endTime": "HH:MM",
-      "activity": "activity name or break description",
-      "type": "activity|break|travel|meal",
-      "details": "specific details or recommendations"
-    }],
-    "activities": [{
-      "name": "activity name",
-      "timeSlot": "morning|afternoon|evening",
-      "startTime": "HH:MM",
-      "commentary": "why this activity was chosen",
-      "itineraryHighlight": "how it fits in the day's flow",
-      "logistics": "travel and timing details"
-    }],
-    "breaks": [{
-      "type": "meal|rest|travel",
-      "startTime": "HH:MM",
-      "duration": "minutes",
-      "suggestions": "specific recommendations"
-    }]
-  }],
-  "tripOverview": "overall trip organization logic",
-  "dailyHighlights": [{
-    "dayNumber": number,
-    "theme": "day's theme or focus",
-    "highlights": ["key moments or experiences"]
-  }],
-  "logisticsAdvice": {
-    "transportation": ["transportation recommendations"],
-    "timing": ["timing tips and considerations"],
-    "general": ["general logistics advice"]
-  }
-}`;
-
-        const response = await perplexityClient.chat(query);
-        
-        if (!response?.schedule) {
-          logger.warn('Creating basic schedule due to optimization failure');
-          return createBasicSchedule(activities, days);
-        }
-
-        logger.info('Schedule optimization complete:', {
-          tripOverview: response.tripOverview,
-          dailyHighlights: response.dailyHighlights,
-          logisticsAdvice: response.logisticsAdvice,
-          daysScheduled: response.schedule.length
-        });
-
-    // Verify that all preselected activities are included in their specified slots
-    const missingPreselected = preselectedActivities.filter(preselected => {
-      return !response.schedule.some(day => 
-        day.dayNumber === preselected.dayNumber &&
-        day.activities.some(activity => 
-          activity.name === preselected.name && 
-          activity.timeSlot === preselected.timeSlot
-        )
-      );
-    });
-
-    if (missingPreselected.length > 0) {
-      logger.warn('Some preselected activities missing from schedule:', {
-        missing: missingPreselected.map(a => ({
-          name: a.name,
-          day: a.dayNumber,
-          timeSlot: a.timeSlot,
-          hasViatorData: !!a.bookingDetails?.provider
-        }))
-      });
-      return createBasicSchedule(activities, days);
-    }
-
-    // Map the schedule activities back to our enriched activities
-    const enrichedSchedule = response.schedule.map((day: any) => ({
-      ...day,
-      activities: day.activities.map((scheduledActivity: any) => {
-        // Find the matching enriched activity
-        const enrichedActivity = activities.find(a => 
-          a.name === scheduledActivity.name && 
-          (a.dayNumber === day.dayNumber || !scheduledActivity.dayNumber) &&
-          (a.timeSlot === scheduledActivity.timeSlot || !scheduledActivity.timeSlot)
-        );
-
-        if (enrichedActivity) {
-          return {
-            ...enrichedActivity,
-            ...scheduledActivity,
-            // Preserve enriched data
-            bookingDetails: enrichedActivity.bookingDetails,
-            viatorData: enrichedActivity.viatorData,
-            isEnriched: true, // Add flag to track enrichment
-            // Add schedule-specific data
-            dayNumber: day.dayNumber,
-            timeSlot: scheduledActivity.timeSlot || enrichedActivity.timeSlot,
-            startTime: scheduledActivity.startTime,
-            selected: enrichedActivity.selected || false,
-            commentary: scheduledActivity.commentary || enrichedActivity.commentary,
-            itineraryHighlight: scheduledActivity.itineraryHighlight || enrichedActivity.itineraryHighlight
-          };
-        }
-
-        // If no matching enriched activity found, return as is with enrichment flag
-        return {
-          ...scheduledActivity,
-          isEnriched: false
-        };
-      })
-    }));
-
-    logger.info('Schedule enrichment complete:', {
-      daysScheduled: enrichedSchedule.length,
-      totalActivities: enrichedSchedule.reduce((sum, day) => sum + day.activities.length, 0),
-      enrichedActivities: enrichedSchedule.reduce((sum, day) => 
-        sum + day.activities.filter(a => a.isEnriched || a.bookingDetails?.provider === 'Viator').length, 0
-      )
-    });
-
-    return {
-      schedule: enrichedSchedule,
-      tripOverview: response.tripOverview,
-      dailyHighlights: response.dailyHighlights || [],
-      logisticsAdvice: response.logisticsAdvice
-    };
-      } catch (error) {
-        logger.error('Failed to optimize schedule:', error);
-        return createBasicSchedule(activities, days);
-      }
+// Add interface for grouped activities
+interface GroupedActivities {
+  [key: number]: {
+    [key: string]: Activity[];
+  };
 }
 
-// Update createBasicSchedule to handle preselected activities
+// Add helper function to initialize day slots
+function initializeDaySlots(days: number): GroupedActivities {
+  const slots = {};
+  for (let day = 1; day <= days; day++) {
+    slots[day] = {
+      morning: [],
+      afternoon: [],
+      evening: []
+    };
+  }
+  return slots;
+}
+
+// Add interface for location validation
+interface LocationValidationResult {
+  isMatch: boolean;
+  locationSources: string[];
+  destinationParts: string[];
+}
+
+// Add function for location validation
+function validateLocation(bestMatch: any, destination: any): LocationValidationResult {
+  const destinationName = (destination.label || destination).toLowerCase();
+  const destinationParts = destinationName.split(/[,\s]+/)
+    .filter((part: string) => part.length > 3) // Filter out short words and airport codes
+    .map((part: string) => part.toLowerCase());
+
+  // Get all possible location fields from the best match
+  const locationSources = [
+    bestMatch.location?.address,
+    bestMatch.location?.meetingPoint,
+    bestMatch.location?.coordinates?.description,
+    bestMatch.destinations?.[0]?.name,
+    bestMatch.location?.description,
+    bestMatch.title,
+    bestMatch.description
+  ].filter(Boolean).map((loc: string) => loc.toLowerCase());
+
+  // Extract location mentions from description
+  const descriptionLocations = bestMatch.description?.match(/\b(?:in|at|near|around)\s+([A-Z][a-zA-Z\s]+(?:,\s*[A-Z][a-zA-Z\s]+)*)/g) || [];
+  const extractedLocations = descriptionLocations.map((loc: string) => 
+    loc.replace(/^(?:in|at|near|around)\s+/, '').toLowerCase()
+  );
+
+  const allLocationSources = [...new Set([...locationSources, ...extractedLocations])];
+
+  // Check if any location source contains any part of the destination
+  const isLocationMatch = allLocationSources.some(loc => 
+    destinationParts.some(part => loc.includes(part))
+  );
+
+          return {
+    isMatch: isLocationMatch,
+    locationSources: allLocationSources,
+    destinationParts
+  };
+}
+
+// Update the activity grouping logic
+function groupActivitiesByDayAndSlot(activities: Activity[], days: number): GroupedActivities {
+  // Initialize the structure with all days and time slots
+  const slots: GroupedActivities = {};
+  for (let day = 1; day <= days; day++) {
+    slots[day] = {
+      morning: [],
+      afternoon: [],
+      evening: []
+    };
+  }
+  
+  // Group activities
+  activities.forEach(activity => {
+    const day = activity.dayNumber || 1;
+    const slot = activity.timeSlot || 'morning';
+    
+    // Ensure the day and slot exist
+    if (!slots[day]) {
+      slots[day] = { morning: [], afternoon: [], evening: [] };
+    }
+    if (!slots[day][slot]) {
+      slots[day][slot] = [];
+    }
+    
+    slots[day][slot].push(activity);
+  });
+  
+  return slots;
+}
+
+// Update the schedule creation to use the new grouping
 function createBasicSchedule(activities: Activity[], days: number) {
+  const groupedActivities = groupActivitiesByDayAndSlot(activities, days);
       const schedule = [];
   const preselectedByDay = new Map<number, Activity[]>();
   const unselectedActivities = activities.filter(a => !a.selected);
@@ -452,6 +358,101 @@ function createBasicSchedule(activities: Activity[], days: number) {
   };
 }
 
+// Add interface for schedule optimization result
+interface OptimizedSchedule {
+  schedule: any[];
+  dailyHighlights?: any[];
+  tripOverview?: string;
+}
+
+// Add the optimizeSchedule function
+async function optimizeSchedule(
+  activities: Activity[],
+  days: number,
+  destination: string
+): Promise<OptimizedSchedule> {
+  try {
+    // First, separate preselected activities from the rest
+    const preselectedActivities = activities.filter(a => a.selected);
+    const unselectedActivities = activities.filter(a => !a.selected);
+
+    logger.info('Optimizing schedule with enriched activities:', {
+      totalActivities: activities.length,
+      preselected: preselectedActivities.length,
+      unselected: unselectedActivities.length,
+      enrichedCount: activities.filter(a => a.bookingDetails?.provider === 'Viator').length
+    });
+
+    // Create a basic schedule if no optimization is needed
+    if (preselectedActivities.length === 0 && unselectedActivities.length === 0) {
+      logger.warn('No activities to optimize, creating basic schedule');
+      return createBasicSchedule(activities, days);
+    }
+
+    // Group activities by day and time slot
+    const groupedActivities = groupActivitiesByDayAndSlot(activities, days);
+
+    // Create schedule structure
+    const schedule = [];
+    for (let day = 1; day <= days; day++) {
+      const dayActivities = groupedActivities[day];
+      
+      schedule.push({
+        dayNumber: day,
+        theme: `Day ${day} Exploration`,
+        mainArea: "City Center",
+        commentary: `Day ${day} activities arranged by time slots`,
+        highlights: [`Day ${day} main activities`],
+        activities: [
+          ...dayActivities.morning,
+          ...dayActivities.afternoon,
+          ...dayActivities.evening
+        ].map(activity => ({
+          ...activity,
+          startTime: activity.timeSlot === 'morning' ? '09:00' :
+                    activity.timeSlot === 'afternoon' ? '14:00' : '19:00'
+        }))
+      });
+    }
+
+    return {
+      schedule,
+      tripOverview: 'Schedule optimized with balanced activities across days',
+      dailyHighlights: schedule.map(day => ({
+        dayNumber: day.dayNumber,
+        theme: day.theme,
+        highlights: day.highlights
+      }))
+    };
+  } catch (error) {
+    logger.error('Failed to optimize schedule:', error);
+    return createBasicSchedule(activities, days);
+  }
+}
+
+// Update the activity mapping in the enrichment process
+interface EnrichedActivityResult {
+  name: string;
+  description: string;
+  bookingDetails?: {
+    provider: string;
+    productCode: string;
+    referenceUrl: string;
+    [key: string]: any;
+  };
+  [key: string]: any;
+}
+
+// Add type for the activity parameter in the map function
+interface ActivityToProcess {
+  name: string;
+  description?: string;
+  timeSlot?: string;
+  dayNumber?: number;
+  selected?: boolean;
+  [key: string]: any;
+}
+
 activitiesRouter.post('/generate', async (req: Request, res: Response) => {
   try {
     perplexityCallCounter = 0; // Reset counter at start of each request
@@ -504,7 +505,7 @@ activitiesRouter.post('/generate', async (req: Request, res: Response) => {
     });
 
     const enrichedActivities = await Promise.all(
-      activitiesToProcess.map(async (activity) => {
+      activitiesToProcess.map(async (activity: ActivityToProcess): Promise<EnrichedActivityResult> => {
         try {
           // Enhanced logging for Viator API calls
           logger.info('[Viator API] Searching activity:', {
@@ -517,11 +518,12 @@ activitiesRouter.post('/generate', async (req: Request, res: Response) => {
           });
 
           // First try to search for the activity by name to get product code
-          const searchResults = await viatorClient.searchActivity(activity.name);
+          const searchResults = await viatorClient.searchActivity(`${activity.name} in ${destination.label || destination}`);
           
           if (!searchResults || searchResults.length === 0) {
             logger.warn('[Viator API] No results found:', {
               name: activity.name,
+              destination: destination.label || destination,
               searchType: 'name',
               timestamp: new Date().toISOString()
             });
@@ -530,6 +532,20 @@ activitiesRouter.post('/generate', async (req: Request, res: Response) => {
 
           // Use the first search result
           const bestMatch = searchResults[0];
+          
+          const locationValidation = validateLocation(bestMatch, destination);
+
+          if (!locationValidation.isMatch) {
+            logger.warn('[Viator API] Activity location mismatch:', {
+              name: activity.name,
+              expectedDestination: destinationName,
+              destinationParts: locationValidation.destinationParts,
+              actualLocations: locationValidation.locationSources,
+              timestamp: new Date().toISOString()
+            });
+            return activity;
+          }
+          
           const productCode = bestMatch.bookingInfo?.productCode;
 
           if (!productCode) {
@@ -629,23 +645,29 @@ activitiesRouter.post('/generate', async (req: Request, res: Response) => {
 
           logger.info('[Activities] Successfully enriched activity:', {
             name: activity.name,
-          productCode,
+            productCode,
             hasBookingDetails: true,
             hasViatorData: true,
-            mainImage: enrichedActivity.mainImage,
-            selectedTimeSlot: enrichedActivity.timeSlot,
+            selectedTimeSlot: activity.timeSlot,
+            pricing: {
+              basePrice: enriched.pricing?.summary?.fromPrice,
+              currency: enriched.pricing?.currency,
+              priceType: enriched.pricing?.summary?.priceType,
+              perTraveler: enriched.pricing?.summary?.perTraveler,
+              specialOffer: enriched.pricing?.summary?.specialOffer
+            },
+            rating: {
+              score: enriched.reviews?.combinedAverageRating,
+              totalReviews: enriched.reviews?.totalReviews,
+              verificationStatus: activity.verificationStatus
+            },
             availability: {
               operatingHours: enrichedActivity.bookingDetails.availability.operatingHours,
               selectedStartTime: enrichedActivity.startTime || 
                 (enrichedActivity.timeSlot === 'morning' ? '09:00' :
                  enrichedActivity.timeSlot === 'afternoon' ? '14:00' : '19:00')
             },
-            bookingUrl: enrichedActivity.bookingDetails.referenceUrl,
-            enrichmentStatus: {
-              hasRating: !!enrichedActivity.rating,
-              hasReviews: !!enrichedActivity.numberOfReviews,
-              hasHighlights: !!enrichedActivity.highlights?.length
-            }
+            bookingUrl: enrichedActivity.bookingDetails.referenceUrl
           });
 
           return enrichedActivity;
