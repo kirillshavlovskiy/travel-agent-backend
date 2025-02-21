@@ -469,7 +469,7 @@ export class PerplexityService {
           messages: [
             {
               role: 'system',
-              content: 'You are a helpful travel planning assistant. Generate activities for the requested destination, ensuring variety in categories and time slots. Return ONLY valid JSON.'
+              content: 'You are a helpful travel planning assistant. For each day and time slot (morning, afternoon, evening), provide AT LEAST ONE and UP TO THREE activities. Each time slot MUST have at least one activity. Return ONLY valid JSON.'
             },
             {
               role: 'user',
@@ -490,8 +490,8 @@ export class PerplexityService {
 
       const rawContent = response.data.choices[0]?.message?.content;
       if (!rawContent) {
-        logger.warn('[Perplexity] No content in response');
-        throw new Error('No content in response');
+        logger.error('[Perplexity] No content in response');
+        return { activities: [] };
       }
 
       logger.debug('[Perplexity] Raw response:', { rawContent });
@@ -502,43 +502,70 @@ export class PerplexityService {
 
       try {
         parsedContent = JSON.parse(cleanedContent);
-      } catch (e) {
-        // If direct parsing fails, try to extract JSON array
-        const jsonMatch = cleanedContent.match(/\[\s*\{[\s\S]*\}\s*\]/) || cleanedContent.match(/\{[\s\S]*\}/);
-        if (!jsonMatch) {
-          logger.error('[Activity Generation] No JSON array found in response');
-          throw new Error('Failed to parse response as JSON');
-        }
-        const jsonContent = jsonMatch[0];
-        
-        try {
-          const activities = JSON.parse(jsonContent);
-          parsedContent = {
-            activities: Array.isArray(activities) ? activities : [activities],
-            dailySummaries: []
-          };
-        } catch (e) {
-          logger.error('[Activity Generation] Failed to parse JSON:', e);
-          throw new Error('Failed to parse extracted JSON');
+      } catch (parseError) {
+        logger.error('[Activity Generation] JSON parsing failed:', {
+          error: parseError instanceof Error ? parseError.message : 'Unknown error',
+          cleanedContent: cleanedContent.substring(0, 200) + '...'
+        });
+
+        // Try to extract and parse just the activities array
+        const arrayMatch = cleanedContent.match(/\[\s*\{[\s\S]*?\}\s*\]/);
+        if (arrayMatch) {
+          try {
+            const activities = JSON.parse(arrayMatch[0]);
+            parsedContent = { activities };
+            logger.info('[Activity Generation] Successfully extracted activities array');
+          } catch (arrayError) {
+            logger.error('[Activity Generation] Failed to parse activities array:', {
+              error: arrayError instanceof Error ? arrayError.message : 'Unknown error'
+            });
+            throw new Error('Failed to parse activities data');
+          }
+        } else {
+          throw new Error('No valid activities data found in response');
         }
       }
 
-      if (!parsedContent.activities || !Array.isArray(parsedContent.activities) || parsedContent.activities.length === 0) {
-        logger.error('[Activity Generation] No activities found in parsed content');
-        throw new Error('No activities found in response');
+      // Validate the structure and content
+      if (!parsedContent.activities || !Array.isArray(parsedContent.activities)) {
+        logger.error('[Activity Generation] Invalid response structure:', {
+          parsedContent: JSON.stringify(parsedContent).substring(0, 200) + '...'
+        });
+        throw new Error('Invalid response structure: missing activities array');
       }
 
-      // Ensure activities are properly distributed across days and time slots
-      const activities = this.distributeActivities(parsedContent.activities);
+      // Filter out activities with invalid or missing required fields
+      const validActivities = parsedContent.activities.filter((activity: any) => {
+        const isValid = 
+          activity.name &&
+          activity.category &&
+          activity.timeSlot &&
+          activity.dayNumber &&
+          ['morning', 'afternoon', 'evening'].includes(activity.timeSlot);
 
-      logger.info('[Activity Generation] Successfully generated activities:', {
-        totalActivities: activities.length,
-        uniqueActivities: new Set(activities.map(a => a.name)).size
+        if (!isValid) {
+          logger.warn('[Activity Generation] Filtered out invalid activity:', {
+            activity: JSON.stringify(activity).substring(0, 200)
+          });
+        }
+
+        return isValid;
+      });
+
+      if (validActivities.length === 0) {
+        logger.error('[Activity Generation] No valid activities after filtering');
+        throw new Error('No valid activities found in response');
+      }
+
+      // Log successful parsing
+      logger.info('[Activity Generation] Successfully parsed response', {
+        originalCount: parsedContent.activities.length,
+        validCount: validActivities.length
       });
 
       return {
-        activities,
-        dailySummaries: []
+        activities: validActivities,
+        dailySummaries: parsedContent.dailySummaries || []
       };
     } catch (error) {
       logger.error('[Perplexity] Error in chat:', {
@@ -550,65 +577,41 @@ export class PerplexityService {
     }
   }
 
-  private distributeActivities(activities: Activity[]): Activity[] {
-    // Group activities by day and time slot
-    const distribution = activities.reduce((acc, activity) => {
-      if (!acc[activity.dayNumber]) {
-        acc[activity.dayNumber] = {
-          morning: [],
-          afternoon: [],
-          evening: []
-        };
-      }
-      acc[activity.dayNumber][activity.timeSlot].push(activity);
-      return acc;
-    }, {} as Record<number, Record<string, Activity[]>>);
-
-    // Ensure each day has activities in each time slot
-    const distributedActivities: Activity[] = [];
-    Object.entries(distribution).forEach(([day, slots]) => {
-      ['morning', 'afternoon', 'evening'].forEach(slot => {
-        if (slots[slot].length > 0) {
-          distributedActivities.push(...slots[slot]);
-        }
-      });
-    });
-
-    return distributedActivities;
-  }
-
   private cleanJsonString(str: string): string {
-    // First remove markdown code blocks
-    let cleaned = str.replace(/```(?:json)?\s*|\s*```/g, '');
-    
-    // Extract just the JSON object if there's surrounding text
-    const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
-    if (jsonMatch) {
+    try {
+      // First remove markdown code blocks if present
+      let cleaned = str.replace(/```json\n?|\n?```/g, '');
+      
+      // Remove any comments (both single line and multi-line)
+      cleaned = cleaned.replace(/\/\*[\s\S]*?\*\/|\/\/.*/g, '');
+      
+      // Remove any trailing commas in objects and arrays
+      cleaned = cleaned.replace(/,(\s*[}\]])/g, '$1');
+      
+      // Remove any non-JSON content before and after the JSON structure
+      const jsonMatch = cleaned.match(/\{[\s\S]*\}|\[[\s\S]*\]/);
+      if (!jsonMatch) {
+        throw new Error('No valid JSON structure found');
+      }
       cleaned = jsonMatch[0];
-    }
 
-    // Clean up the JSON string
-    return cleaned
-      .replace(/[\u0000-\u001F]+/g, '') // Remove control characters
-      .replace(/,\s*([}\]])/g, '$1') // Remove trailing commas
-      .replace(/([{,]\s*)(\w+):/g, '$1"$2":') // Ensure property names are quoted
-      .replace(/\n/g, ' ') // Remove newlines
-      .replace(/\s+/g, ' ') // Normalize spaces
-      .replace(/(\d+)\+/g, '$1') // Remove + from numbers
-      .replace(/'/g, "'") // Fix curly quotes
-      .replace(/"/g, '"') // Fix curly quotes
-      .replace(/\\/g, '\\\\') // Escape backslashes
-      .replace(/(?<=\{|\[|,)\s*"([^"]+)":\s*"([^"]+)"/g, (_, key, value) => {
-        // Clean up key-value pairs
-        const cleanValue = value
-          .replace(/\$/g, '') // Remove dollar signs
-          .replace(/\s*per person\s*/gi, '') // Remove "per person"
-          .replace(/\s*\(External\)\s*/gi, '') // Remove "(External)"
-          .replace(/Free/gi, '0') // Convert "Free" to 0
-          .trim();
-        return `"${key}":"${cleanValue}"`;
-      })
-      .trim();
+      // Clean up any remaining whitespace and newlines
+      cleaned = cleaned.trim();
+
+      logger.debug('[JSON Cleaning] Cleaned JSON string:', {
+        originalLength: str.length,
+        cleanedLength: cleaned.length,
+        sample: cleaned.substring(0, 100) + '...'
+      });
+
+      return cleaned;
+    } catch (error) {
+      logger.error('[JSON Cleaning] Error cleaning JSON string:', {
+        error: error instanceof Error ? error.message : 'Unknown error',
+        originalString: str.substring(0, 100) + '...'
+      });
+      throw error;
+    }
   }
 
   private getTimeSlot(time: string): string {
@@ -858,14 +861,9 @@ IMPORTANT: You MUST provide detailed commentary and highlights that explicitly r
   }
 
   private async cleanAndBalanceActivities(activities: Activity[], params: GenerateActivitiesParams): Promise<Activity[]> {
-    const { preferences } = params;
     logger.info('Starting activity balancing', {
-      initialCount: activities.length,
-      preferences: {
-        interests: preferences.interests,
-        travelStyle: preferences.travelStyle,
-        pacePreference: preferences.pacePreference
-      }
+      totalActivities: activities.length,
+      days: params.days
     });
 
     // Group activities by day
@@ -875,12 +873,12 @@ IMPORTANT: You MUST provide detailed commentary and highlights that explicitly r
       return acc;
     }, {} as Record<number, Activity[]>);
 
-    // Calculate minimum activities per day based on pace preference
-    const minActivitiesPerDay = {
-      'relaxed': 2,
-      'moderate': 3,
-      'intensive': 4
-    }[preferences.pacePreference] || 2; // Ensure at least 2 activities per day
+    // Calculate minimum and maximum activities per time slot based on pace preference
+    const activityLimits = {
+      'relaxed': { min: 1, max: 2 },
+      'moderate': { min: 1, max: 3 },
+      'intensive': { min: 2, max: 3 }
+    }[params.preferences.pacePreference] || { min: 1, max: 3 };
 
     const balancedActivities = Object.entries(activitiesByDay).flatMap(([day, dayActivities]) => {
       logger.info(`Processing day ${day}`, {
@@ -888,27 +886,27 @@ IMPORTANT: You MUST provide detailed commentary and highlights that explicitly r
         activitiesCount: dayActivities.length
       });
 
-      // Score activities based on preferences with less aggressive scoring
+      // Score activities based on preferences
       const scoredActivities = dayActivities.map(activity => {
         let score = 0;
         
         // Base score for all activities
         score += 1;
         
-        // Score based on matching interests (reduced weight)
-        preferences.interests.forEach(interest => {
+        // Score based on matching interests
+        params.preferences.interests.forEach(interest => {
           if (activity.commentary?.toLowerCase().includes(interest.toLowerCase()) ||
               activity.description?.toLowerCase().includes(interest.toLowerCase())) {
             score += 0.5;
           }
         });
 
-        // Score based on travel style match (reduced weight)
-        if (activity.tier?.toLowerCase() === preferences.travelStyle.toLowerCase()) {
+        // Score based on travel style match
+        if (activity.tier?.toLowerCase() === params.preferences.travelStyle.toLowerCase()) {
           score += 0.5;
         }
 
-        // Score based on rating (maintain importance)
+        // Score based on rating
         if (activity.rating && activity.rating >= 4.0) {
           score += 1;
         }
@@ -916,73 +914,56 @@ IMPORTANT: You MUST provide detailed commentary and highlights that explicitly r
         return { ...activity, preferenceScore: score };
       });
 
-      // Get unique categories for this day
-      const categories = new Set(scoredActivities.map(a => a.category));
-      const selectedActivities: Activity[] = [];
-      
-      // First, ensure at least one activity from different categories
-      categories.forEach(category => {
-        const categoryActivities = scoredActivities
-          .filter(a => a.category === category)
-          .sort((a, b) => {
-            const scoreCompare = (b.preferenceScore || 0) - (a.preferenceScore || 0);
-            if (scoreCompare !== 0) return scoreCompare;
-            return (b.rating || 0) - (a.rating || 0);
-          });
-        
-        if (categoryActivities.length > 0) {
-          selectedActivities.push(categoryActivities[0]);
-        }
-      });
-
-      // If we don't have minimum activities yet, add more based on score
-      while (selectedActivities.length < minActivitiesPerDay && scoredActivities.length > selectedActivities.length) {
-        const remainingActivities = scoredActivities
-          .filter(a => !selectedActivities.includes(a))
-          .sort((a, b) => {
-            const scoreCompare = (b.preferenceScore || 0) - (a.preferenceScore || 0);
-            if (scoreCompare !== 0) return scoreCompare;
-            return (b.rating || 0) - (a.rating || 0);
-          });
-
-        if (remainingActivities.length > 0) {
-          selectedActivities.push(remainingActivities[0]);
-        } else {
-          break;
-        }
-      }
-
-      // Try to distribute activities across time slots if possible
+      // Group activities by time slot
       const timeSlots = ['morning', 'afternoon', 'evening'] as const;
       const activitiesByTimeSlot = new Map<typeof timeSlots[number], Activity[]>();
       
-      selectedActivities.forEach(activity => {
+      // Initialize time slots
+      timeSlots.forEach(slot => {
+        activitiesByTimeSlot.set(slot, []);
+      });
+
+      // First pass: Group activities by time slot
+      scoredActivities.forEach(activity => {
         const slot = activity.timeSlot as typeof timeSlots[number];
-        if (!activitiesByTimeSlot.has(slot)) {
-          activitiesByTimeSlot.set(slot, []);
-        }
         activitiesByTimeSlot.get(slot)?.push(activity);
       });
 
-      // Rebalance time slots if needed
-      if (selectedActivities.length >= minActivitiesPerDay) {
-        const emptySlots = timeSlots.filter(slot => !activitiesByTimeSlot.has(slot));
-        if (emptySlots.length > 0) {
-          const overloadedSlots = Array.from(activitiesByTimeSlot.entries())
-            .filter(([_, acts]) => acts.length > 1)
-            .sort(([_, a], [__, b]) => b.length - a.length);
+      // Second pass: Balance activities across time slots
+      const balancedTimeSlots = new Map<typeof timeSlots[number], Activity[]>();
+      
+      timeSlots.forEach(slot => {
+        const slotActivities = activitiesByTimeSlot.get(slot) || [];
+        
+        // Sort activities by score
+        const sortedActivities = slotActivities.sort((a, b) => {
+          const scoreCompare = (b.preferenceScore || 0) - (a.preferenceScore || 0);
+          if (scoreCompare !== 0) return scoreCompare;
+          return (b.rating || 0) - (a.rating || 0);
+        });
 
-          for (const emptySlot of emptySlots) {
-            if (overloadedSlots.length > 0) {
-              const [overloadedSlot, activities] = overloadedSlots[0];
-              const activityToMove = activities[activities.length - 1];
-              activityToMove.timeSlot = emptySlot;
+        // Keep top N activities based on limits
+        const selectedActivities = sortedActivities.slice(0, activityLimits.max);
+        
+        // If we don't have minimum activities, try to borrow from other slots
+        if (selectedActivities.length < activityLimits.min) {
+          const otherSlots = timeSlots.filter(t => t !== slot);
+          for (const otherSlot of otherSlots) {
+            const otherActivities = activitiesByTimeSlot.get(otherSlot) || [];
+            if (otherActivities.length > activityLimits.min) {
+              const activityToMove = otherActivities[otherActivities.length - 1];
+              activityToMove.timeSlot = slot;
+              selectedActivities.push(activityToMove);
+              if (selectedActivities.length >= activityLimits.min) break;
             }
           }
         }
-      }
 
-      return selectedActivities;
+        balancedTimeSlots.set(slot, selectedActivities);
+      });
+
+      // Combine all balanced activities for this day
+      return Array.from(balancedTimeSlots.values()).flat();
     });
 
     logger.info('Completed activity balancing', {
@@ -1777,15 +1758,15 @@ Return as JSON with:
       flightTimes
     } = params;
 
-    return `Generate ${days * 3} unique activities for a ${days}-day trip to ${destination} with a total budget of ${budget} ${currency}.
+    return `Generate a list of activities for a ${days}-day trip to ${destination} with a total budget of ${budget} ${currency}.
 
 IMPORTANT REQUIREMENTS:
 1. CRITICAL: Only suggest activities that are EXACTLY available on the Viator platform (https://www.viator.com)
 2. Use EXACT activity names as listed on Viator - do not modify or paraphrase them
 3. Each activity must be a real, bookable Viator experience
 4. Include specific Viator activity details like exact duration, price range, and category
-5. Generate ${days * 3} high-quality activities that match the criteria (3 activities per day)
-6. Ensure activities are evenly distributed across days and time slots (morning/afternoon/evening)
+5. CRITICAL: For each day and time slot (morning/afternoon/evening), provide AT LEAST ONE and UP TO THREE activities
+6. CRITICAL: Every time slot must have at least one activity suggestion
 
 Travel Style: ${preferences.travelStyle}
 Pace: ${preferences.pacePreference}
@@ -1803,6 +1784,8 @@ For each activity, provide:
 4. Day number (1 to ${days})
 5. Expected duration from Viator listing
 6. Price range from Viator (in ${currency})
+
+CRITICAL: Ensure you provide multiple activity options for each time slot to allow for flexibility and optimization.
 
 Return as JSON with this structure:
 {

@@ -645,7 +645,7 @@ activitiesRouter.post('/generate', async (req: Request, res: Response) => {
 
           logger.info('[Activities] Successfully enriched activity:', {
             name: activity.name,
-            productCode,
+          productCode,
             hasBookingDetails: true,
             hasViatorData: true,
             selectedTimeSlot: activity.timeSlot,
