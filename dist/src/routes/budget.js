@@ -4,6 +4,9 @@ import { PrismaClient } from '@prisma/client';
 import { cities } from '../data/cities.js';
 import { airports } from '../data/airports.js';
 import { AmadeusService } from '../services/amadeus.js';
+import { normalizeCategory } from '../constants/categories.js';
+import { logger } from '../utils/logger.js';
+import { optimizeSchedule } from './activities.js';
 const router = Router();
 const amadeusService = new AmadeusService();
 const agent = new VacationBudgetAgent(amadeusService);
@@ -80,18 +83,76 @@ router.get('/locations', (req, res) => {
 });
 // Helper function to get primary airport code for a city
 function getPrimaryAirportForCity(cityCode) {
-    const cityAirports = airports.filter(airport => airport.cityCode === cityCode);
-    if (cityAirports.length > 0) {
-        // Return the first airport as primary (they are ordered by importance in the data)
-        return cityAirports[0].value;
+    try {
+        const cityAirports = airports.filter(airport => airport.cityCode === cityCode);
+        if (cityAirports.length > 0) {
+            // Return the first airport as primary (they are ordered by importance in the data)
+            return cityAirports[0].value;
+        }
+        // If no mapping found, some airports use the same code as the city
+        const directAirport = airports.find(airport => airport.value === cityCode);
+        if (directAirport) {
+            return directAirport.value;
+        }
+        console.warn(`[Budget Route] No airport found for city: ${cityCode}`);
+        return cityCode; // Fallback to city code
     }
-    // If no mapping found, some airports use the same code as the city
-    const directAirport = airports.find(airport => airport.value === cityCode);
-    if (directAirport) {
-        return directAirport.value;
+    catch (error) {
+        console.error('[Budget Route] Error getting airport code:', error);
+        return cityCode; // Return the city code as fallback
     }
-    console.warn(`[Budget Route] No airport found for city: ${cityCode}`);
-    return cityCode; // Fallback to city code
+}
+// Add a helper function for safely calling the helper functions with better error handling
+const safelyCallHelper = (fn, args, fnName, defaultValue) => {
+    try {
+        return fn(...args);
+    }
+    catch (error) {
+        logger.error(`[Budget] Helper function ${fnName} failed:`, {
+            error: error instanceof Error ? error.message : 'Unknown error',
+            stack: error instanceof Error ? error.stack : 'No stack trace'
+        });
+        return defaultValue;
+    }
+};
+// Add validation for enriched activities
+function validateEnrichedActivity(activity) {
+    const hasValidBookingDetails = activity.bookingDetails &&
+        activity.bookingDetails.productCode &&
+        activity.bookingDetails.provider === 'Viator';
+    const hasValidAvailability = activity.availability &&
+        Array.isArray(activity.availability.availableTimeSlots) &&
+        activity.availability.realTimeVerification?.verified;
+    const hasValidPrice = activity.price &&
+        typeof activity.price.amount === 'number' &&
+        activity.price.amount > 0 &&
+        activity.price.currency;
+    return hasValidBookingDetails && hasValidAvailability && hasValidPrice;
+}
+// Add logging for activity validation
+function logActivityValidation(activity) {
+    logger.debug('[Budget] Activity validation:', {
+        name: activity.name,
+        bookingDetails: {
+            hasDetails: !!activity.bookingDetails,
+            provider: activity.bookingDetails?.provider,
+            productCode: activity.bookingDetails?.productCode
+        },
+        availability: {
+            hasAvailability: !!activity.availability,
+            isAvailable: activity.availability?.isAvailable,
+            hasTimeSlots: !!activity.availability?.availableTimeSlots?.length,
+            timeSlots: activity.availability?.availableTimeSlots,
+            verified: activity.availability?.realTimeVerification?.verified
+        },
+        price: {
+            hasPrice: !!activity.price,
+            amount: activity.price?.amount,
+            currency: activity.price?.currency
+        },
+        timeSlot: activity.timeSlot,
+        dayNumber: activity.dayNumber
+    });
 }
 // Calculate budget endpoint
 router.post('/calculate', async (req, res) => {
@@ -128,487 +189,478 @@ router.post('/calculate', async (req, res) => {
         if (!req.body.endDate)
             missingFields.push('end date');
         if (!req.body.travelers)
-            missingFields.push('number of travelers');
+            missingFields.push('travelers');
         if (missingFields.length > 0) {
-            console.error('[Budget Route] Missing fields:', {
-                missingFields,
-                receivedFields: {
-                    departureLocation: req.body.departureLocation,
+            const errorMessage = `Missing required fields: ${missingFields.join(', ')}`;
+            logger.error('[Budget Route] Validation error:', {
+                error: errorMessage,
+                receivedFields: Object.keys(req.body),
+                missingFields
+            });
+            return res.status(400).json({
+                success: false,
+                error: errorMessage,
+                errorDetails: {
+                    type: 'VALIDATION_ERROR',
+                    missingFields,
+                    receivedFields: Object.keys(req.body),
+                    timestamp: new Date().toISOString()
+                },
+                timestamp: new Date().toISOString()
+            });
+        }
+        // Additional validation for date format and range
+        try {
+            const startDate = new Date(req.body.startDate);
+            const endDate = new Date(req.body.endDate);
+            const today = new Date();
+            today.setHours(0, 0, 0, 0); // Reset time to start of day for fair comparison
+            // Check if dates are valid
+            if (isNaN(startDate.getTime()) || isNaN(endDate.getTime())) {
+                const errorMessage = 'Invalid date format. Please use YYYY-MM-DD format.';
+                logger.error('[Budget Route] Date validation error:', {
+                    error: errorMessage,
+                    startDate: req.body.startDate,
+                    endDate: req.body.endDate
+                });
+                return res.status(400).json({
+                    success: false,
+                    error: errorMessage,
+                    errorDetails: {
+                        type: 'DATE_FORMAT_ERROR',
+                        startDate: req.body.startDate,
+                        endDate: req.body.endDate,
+                        expectedFormat: 'YYYY-MM-DD',
+                        timestamp: new Date().toISOString()
+                    },
+                    timestamp: new Date().toISOString()
+                });
+            }
+            // Check if start date is in the past
+            const startDateOnly = new Date(startDate);
+            startDateOnly.setHours(0, 0, 0, 0); // Reset time to start of day for fair comparison
+            if (startDateOnly < today) {
+                const errorMessage = 'Start date cannot be in the past.';
+                logger.error('[Budget Route] Date validation error:', {
+                    error: errorMessage,
+                    startDate: req.body.startDate,
+                    today: today.toISOString().split('T')[0]
+                });
+                return res.status(400).json({
+                    success: false,
+                    error: errorMessage,
+                    errorDetails: {
+                        type: 'PAST_DATE_ERROR',
+                        startDate: req.body.startDate,
+                        currentDate: today.toISOString().split('T')[0],
+                        timestamp: new Date().toISOString()
+                    },
+                    timestamp: new Date().toISOString()
+                });
+            }
+            // Check if end date is before start date
+            if (endDate < startDate) {
+                const errorMessage = 'End date cannot be before start date.';
+                logger.error('[Budget Route] Date validation error:', {
+                    error: errorMessage,
+                    startDate: req.body.startDate,
+                    endDate: req.body.endDate
+                });
+                return res.status(400).json({
+                    success: false,
+                    error: errorMessage,
+                    errorDetails: {
+                        type: 'DATE_RANGE_ERROR',
+                        startDate: req.body.startDate,
+                        endDate: req.body.endDate,
+                        timestamp: new Date().toISOString()
+                    },
+                    timestamp: new Date().toISOString()
+                });
+            }
+            // Check if trip is too long (more than 30 days)
+            const tripDays = Math.ceil((endDate.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24));
+            if (tripDays > 30) {
+                const errorMessage = 'Trip duration cannot exceed 30 days.';
+                logger.error('[Budget Route] Trip duration validation error:', {
+                    error: errorMessage,
                     startDate: req.body.startDate,
                     endDate: req.body.endDate,
-                    destinations: req.body.destinations,
-                    travelers: req.body.travelers
+                    duration: tripDays
+                });
+                return res.status(400).json({
+                    success: false,
+                    error: errorMessage,
+                    errorDetails: {
+                        type: 'TRIP_DURATION_ERROR',
+                        startDate: req.body.startDate,
+                        endDate: req.body.endDate,
+                        duration: tripDays,
+                        maxDuration: 30,
+                        timestamp: new Date().toISOString()
+                    },
+                    timestamp: new Date().toISOString()
+                });
+            }
+        }
+        catch (validationError) {
+            const errorMessage = 'Error validating dates.';
+            logger.error('[Budget Route] Date validation error:', {
+                error: validationError instanceof Error ? validationError.message : 'Unknown validation error',
+                startDate: req.body.startDate,
+                endDate: req.body.endDate
+            });
+            return res.status(400).json({
+                success: false,
+                error: errorMessage,
+                errorDetails: {
+                    type: 'DATE_VALIDATION_ERROR',
+                    message: validationError instanceof Error ? validationError.message : 'Unknown validation error',
+                    startDate: req.body.startDate,
+                    endDate: req.body.endDate,
+                    timestamp: new Date().toISOString()
+                },
+                timestamp: new Date().toISOString()
+            });
+        }
+        // Transform the request to match our internal format
+        const transformedRequest = {
+            type: req.body.type || 'full',
+            departureLocation: {
+                code: String(req.body.departureLocation.code),
+                label: String(req.body.departureLocation.label),
+                airport: req.body.departureLocation.airport || req.body.departureLocation.code,
+                outboundDate: String(req.body.startDate),
+                inboundDate: String(req.body.endDate),
+                isRoundTrip: true
+            },
+            destinations: req.body.destinations.map((dest) => {
+                const city = cities.find(c => c.value === dest.code);
+                if (!city) {
+                    console.warn('[Budget Route] City not found in database:', dest);
                 }
-            });
-            return res.status(400).json({
-                success: false,
-                error: `Missing required fields: ${missingFields.join(', ')}`,
-                timestamp: new Date().toISOString()
-            });
-        }
-        // Ensure proper data types
-        const travelers = parseInt(String(req.body.travelers));
-        if (isNaN(travelers)) {
-            console.error('[Budget Route] Invalid travelers value:', req.body.travelers);
-            return res.status(400).json({
-                success: false,
-                error: 'Invalid travelers value: must be a number',
-                timestamp: new Date().toISOString()
-            });
-        }
-        // Get destination city details
-        try {
-            const locations = await amadeusService.searchLocations(req.body.destinations[0].code);
-            if (!locations || locations.length === 0) {
-                console.error('[Budget Route] Invalid destination city:', {
-                    receivedCity: req.body.destinations[0]
-                });
-                return res.status(400).json({
-                    success: false,
-                    error: 'Invalid destination city',
-                    timestamp: new Date().toISOString()
-                });
-            }
-            // Use the first matching location
-            const destinationCity = {
-                value: locations[0].iataCode,
-                label: `${locations[0].address.cityName}, ${locations[0].address.countryName}`
-            };
-            // Get origin airport code
-            const originLocations = await amadeusService.searchLocations(req.body.departureLocation.code);
-            if (!originLocations || originLocations.length === 0) {
-                console.error('[Budget Route] Invalid origin location:', {
-                    receivedLocation: req.body.departureLocation
-                });
-                return res.status(400).json({
-                    success: false,
-                    error: 'Invalid origin location',
-                    timestamp: new Date().toISOString()
-                });
-            }
-            // Use the first matching location's IATA code
-            const originAirportCode = originLocations[0].iataCode;
-            // Get destination airport code - we already have it from the location search above
-            const destinationAirportCode = locations[0].iataCode;
-            // Race between the actual work and the timeout
-            const result = await Promise.race([
-                (async () => {
-                    // Transform the request to match our internal format
-                    const transformedRequest = {
-                        type: req.body.type || 'full',
-                        departureLocation: {
-                            code: String(req.body.departureLocation.code),
-                            label: String(req.body.departureLocation.label),
-                            airport: req.body.departureLocation.airport || req.body.departureLocation.code,
-                            outboundDate: String(req.body.startDate),
-                            inboundDate: String(req.body.endDate),
-                            isRoundTrip: true
-                        },
-                        destinations: req.body.destinations.map((dest) => {
-                            const city = cities.find(c => c.value === dest.code);
-                            if (!city) {
-                                console.warn('[Budget Route] City not found in database:', dest);
-                            }
-                            return {
-                                code: city?.value || dest.code,
-                                label: city?.label || dest.label,
-                                airport: city?.value || dest.code
-                            };
-                        }),
-                        country: destinationCity.value,
-                        travelers: travelers,
-                        currency: String(req.body.currency || 'USD'),
-                        budget: req.body.budgetLimit ? parseFloat(String(req.body.budgetLimit)) : undefined,
-                        startDate: String(req.body.startDate),
-                        endDate: String(req.body.endDate),
-                        days: Math.ceil((new Date(req.body.endDate).getTime() - new Date(req.body.startDate).getTime()) / (1000 * 60 * 60 * 24))
-                    };
-                    // Initialize agentResult
-                    let agentResult = {
-                        flights: {
-                            budget: {
-                                min: 0,
-                                max: 0,
-                                average: 0,
-                                confidence: 0,
-                                source: 'Amadeus API',
-                                references: []
-                            },
-                            medium: {
-                                min: 0,
-                                max: 0,
-                                average: 0,
-                                confidence: 0,
-                                source: 'Amadeus API',
-                                references: []
-                            },
-                            premium: {
-                                min: 0,
-                                max: 0,
-                                average: 0,
-                                confidence: 0,
-                                source: 'Amadeus API',
-                                references: []
-                            }
-                        }
-                    };
+                return {
+                    code: city?.value || dest.code,
+                    label: city?.label || dest.label,
+                    airport: city?.value || dest.code
+                };
+            }),
+            country: req.body.destinations[0].code,
+            travelers: parseInt(String(req.body.travelers)),
+            currency: String(req.body.currency || 'USD'),
+            budget: req.body.budgetLimit ? parseFloat(String(req.body.budgetLimit)) : undefined,
+            startDate: String(req.body.startDate),
+            endDate: String(req.body.endDate),
+            days: Math.ceil((new Date(req.body.endDate).getTime() - new Date(req.body.startDate).getTime()) / (1000 * 60 * 60 * 24))
+        };
+        // Race between the actual work and the timeout
+        const result = await Promise.race([
+            (async () => {
+                let agentResult;
+                // Skip flight search for activities-only requests
+                if (req.body.type === 'activities_only') {
+                    logger.info('[Budget Route] Activities-only request, skipping flight search');
+                    transformedRequest.flightData = [];
+                }
+                else {
                     // First search for real-time flights with Amadeus
-                    console.log('[Budget Route] Searching for real-time flights with Amadeus...');
-                    try {
-                        const formattedDepartureDate = transformedRequest.startDate.split('T')[0];
-                        const formattedReturnDate = transformedRequest.endDate.split('T')[0];
-                        // Search for flights in all cabin classes with individual timeouts
-                        const cabinClasses = ['ECONOMY', 'PREMIUM_ECONOMY', 'BUSINESS', 'FIRST'];
-                        const searchPromises = cabinClasses.map(async (cabinClass) => {
-                            try {
-                                const searchPromise = amadeusService.searchFlights({
-                                    segments: [{
-                                            originLocationCode: originAirportCode,
-                                            destinationLocationCode: destinationAirportCode,
-                                            departureDate: formattedDepartureDate
-                                        }, {
-                                            originLocationCode: destinationAirportCode,
-                                            destinationLocationCode: originAirportCode,
-                                            departureDate: formattedReturnDate
-                                        }],
-                                    adults: transformedRequest.travelers,
-                                    travelClass: cabinClass
-                                });
-                                // Add timeout to individual search
-                                const result = await Promise.race([
-                                    searchPromise,
-                                    new Promise((_, reject) => setTimeout(() => reject(new Error(`Search timeout for ${cabinClass}`)), SEARCH_TIMEOUT))
-                                ]);
-                                return result;
-                            }
-                            catch (error) {
-                                console.warn(`[Budget Route] Search failed for ${cabinClass}:`, error);
-                                return []; // Return empty array for failed searches
+                    logger.info('[Budget Route] Searching for real-time flights with Amadeus...');
+                    const formattedDepartureDate = transformedRequest.startDate.split('T')[0];
+                    const formattedReturnDate = transformedRequest.endDate.split('T')[0];
+                    // Search for flights in all cabin classes with individual timeouts
+                    const cabinClasses = ['ECONOMY', 'PREMIUM_ECONOMY', 'BUSINESS', 'FIRST'];
+                    const searchPromises = cabinClasses.map(async (cabinClass) => {
+                        try {
+                            const searchPromise = amadeusService.searchFlights({
+                                segments: [{
+                                        originLocationCode: transformedRequest.departureLocation.airport,
+                                        destinationLocationCode: transformedRequest.destinations[0].airport,
+                                        departureDate: formattedDepartureDate
+                                    }, {
+                                        originLocationCode: transformedRequest.destinations[0].airport,
+                                        destinationLocationCode: transformedRequest.departureLocation.airport,
+                                        departureDate: formattedReturnDate
+                                    }],
+                                adults: transformedRequest.travelers,
+                                travelClass: cabinClass
+                            });
+                            // Add timeout to individual search
+                            const result = await Promise.race([
+                                searchPromise,
+                                new Promise((_, reject) => setTimeout(() => reject(new Error(`Search timeout for ${cabinClass}`)), SEARCH_TIMEOUT))
+                            ]);
+                            return result;
+                        }
+                        catch (error) {
+                            console.warn(`[Budget Route] Search failed for ${cabinClass}:`, error);
+                            return [];
+                        }
+                    });
+                    // Wait for all searches to complete
+                    const allFlights = (await Promise.all(searchPromises)).flat();
+                    if (allFlights.length === 0) {
+                        console.warn('[Budget Route] No flights found for any cabin class');
+                    }
+                    else {
+                        console.log('[Budget Route] Flight search results:', {
+                            totalFlights: allFlights.length,
+                            byClass: {
+                                economy: allFlights.filter((f) => f.travelerPricings[0]?.fareDetailsBySegment[0]?.cabin === 'ECONOMY').length,
+                                premiumEconomy: allFlights.filter((f) => f.travelerPricings[0]?.fareDetailsBySegment[0]?.cabin === 'PREMIUM_ECONOMY').length,
+                                business: allFlights.filter((f) => f.travelerPricings[0]?.fareDetailsBySegment[0]?.cabin === 'BUSINESS').length,
+                                first: allFlights.filter((f) => f.travelerPricings[0]?.fareDetailsBySegment[0]?.cabin === 'FIRST').length
                             }
                         });
-                        // Wait for all searches to complete and process results
-                        const allFlights = (await Promise.all(searchPromises)).flat();
-                        if (allFlights.length === 0) {
-                            console.warn('[Budget Route] No flights found for any cabin class');
+                        // Add flight data to the transformed request
+                        transformedRequest.flightData = allFlights;
+                    }
+                }
+                // Call VacationBudgetAgent with flight data
+                logger.info('[Budget Route] Calling VacationBudgetAgent with request:', {
+                    type: transformedRequest.type,
+                    hasFlightData: !!transformedRequest.flightData?.length,
+                    destination: transformedRequest.destinations[0].label,
+                    days: transformedRequest.days
+                });
+                agentResult = await agent.handleTravelRequest({
+                    ...transformedRequest,
+                    preferences: req.body.preferences,
+                    budgetLimit: req.body.budgetLimit
+                });
+                // Check if agent result is valid before proceeding
+                if (!agentResult || (!agentResult.activities && !agentResult.enrichedActivities)) {
+                    logger.error('[Budget Route] VacationBudgetAgent failed to return valid result');
+                    return {
+                        success: false,
+                        error: 'Failed to calculate budget and generate initial activities',
+                        timestamp: new Date().toISOString()
+                    };
+                }
+                // Use enriched activities if available, otherwise fall back to regular activities
+                const activitiesArray = agentResult.enrichedActivities ||
+                    (Array.isArray(agentResult.activities) ? agentResult.activities : Object.values(agentResult.activities));
+                if (!activitiesArray.length) {
+                    logger.error('[Budget Route] No activities found in agent result');
+                    return {
+                        success: false,
+                        error: 'No activities generated',
+                        timestamp: new Date().toISOString()
+                    };
+                }
+                // Format existing activities properly before passing them
+                const formattedActivities = activitiesArray.map(activity => {
+                    // Keep all existing properties
+                    const base = { ...activity };
+                    // Only fill in missing fields with defaults
+                    return {
+                        ...base,
+                        name: base.name || 'Explore Local Attractions',
+                        duration: base.duration || (typeof base.duration === 'string' ?
+                            parseInt(base.duration.replace(/[^0-9]/g, '')) * 60 : 120),
+                        category: base.category || 'Sightseeing',
+                        timeSlot: base.timeSlot || 'morning',
+                        startTime: base.startTime || '09:00',
+                        selected: typeof base.selected === 'boolean' ? base.selected : false,
+                        description: base.description || 'Discover the local culture and attractions in this vibrant city.',
+                        location: base.location || 'City Center',
+                        price: base.price || {
+                            amount: 0,
+                            currency: 'USD'
+                        },
+                        rating: base.rating || 4.5,
+                        numberOfReviews: base.numberOfReviews || 100,
+                        bookingDetails: base.bookingDetails || {
+                            provider: 'Local',
+                            instantConfirmation: true,
+                            cancellationPolicy: 'Flexible'
                         }
-                        else {
-                            console.log('[Budget Route] Flight search results:', {
-                                totalFlights: allFlights.length,
-                                byClass: {
-                                    economy: allFlights.filter((f) => f.travelerPricings[0]?.fareDetailsBySegment[0]?.cabin === 'ECONOMY').length,
-                                    premiumEconomy: allFlights.filter((f) => f.travelerPricings[0]?.fareDetailsBySegment[0]?.cabin === 'PREMIUM_ECONOMY').length,
-                                    business: allFlights.filter((f) => f.travelerPricings[0]?.fareDetailsBySegment[0]?.cabin === 'BUSINESS').length,
-                                    first: allFlights.filter((f) => f.travelerPricings[0]?.fareDetailsBySegment[0]?.cabin === 'FIRST').length
+                    };
+                });
+                logger.info('[Budget] Activities formatting completed', {
+                    originalCount: activitiesArray.length,
+                    formattedCount: formattedActivities.length,
+                    firstActivity: formattedActivities[0] ? {
+                        name: formattedActivities[0].name,
+                        duration: formattedActivities[0].duration,
+                        timeSlot: formattedActivities[0].timeSlot,
+                        category: formattedActivities[0].category,
+                        price: formattedActivities[0].price,
+                        bookingDetails: formattedActivities[0].bookingDetails ? {
+                            provider: formattedActivities[0].bookingDetails.provider,
+                            productCode: formattedActivities[0].bookingDetails.productCode
+                        } : undefined
+                    } : null,
+                    hasEnrichedActivities: !!agentResult.enrichedActivities,
+                    enrichedActivitiesCount: agentResult.enrichedActivities?.length
+                });
+                // If we have valid activities from the budget agent, use them directly
+                if (formattedActivities.length > 0) {
+                    logger.info('[Budget] Using activities from budget agent, skipping activities generation');
+                    // Create themed activities based on preferences
+                    const themedActivities = formattedActivities.map((activity, index) => {
+                        const timeSlot = index % 3 === 0 ? 'morning' :
+                            index % 3 === 1 ? 'afternoon' : 'evening';
+                        const category = req.body.preferences?.interests?.[index % req.body.preferences.interests.length] || 'Culture';
+                        return {
+                            ...activity,
+                            name: activity.name || `${category} Experience in ${transformedRequest.destinations[0].label}`,
+                            timeSlot,
+                            category,
+                            description: activity.description || `Enjoy a ${req.body.preferences?.travelStyle || 'luxury'} ${category.toLowerCase()} experience in ${transformedRequest.destinations[0].label}.`,
+                            commentary: `This activity is perfect for travelers interested in ${category.toLowerCase()} with a ${req.body.preferences?.pacePreference || 'moderate'} pace.`,
+                            itineraryHighlight: `A ${timeSlot} activity focusing on ${category.toLowerCase()} aspects of the city.`
+                        };
+                    });
+                    // Create optimized schedule using the optimizeSchedule function
+                    const optimizedSchedule = await optimizeSchedule(themedActivities, transformedRequest.days, transformedRequest.destinations[0].label, req.body.preferences);
+                    return {
+                        success: true,
+                        data: {
+                            ...(agentResult || {}),
+                            activities: themedActivities,
+                            schedule: optimizedSchedule.schedule,
+                            dailyPlans: optimizedSchedule.schedule,
+                            dailyHighlights: optimizedSchedule.dailyHighlights,
+                            totalBudget: transformedRequest.budget,
+                            metadata: {
+                                perplexityCalls: 0,
+                                scheduleGeneration: {
+                                    source: 'budget_agent',
+                                    timestamp: new Date().toISOString(),
+                                    preferences: req.body.preferences
                                 }
-                            });
-                        }
-                        if (allFlights && allFlights.length > 0) {
-                            console.log('[Budget Route] Found', allFlights.length, 'Amadeus flights');
-                            console.log('[Budget Route] Sample raw flight data:', {
-                                firstFlight: allFlights[0],
-                                dictionaries: allFlights[0]?.dictionaries
-                            });
-                            // Transform and categorize flights
-                            const transformedFlights = await Promise.all(allFlights.map(async (offer) => {
-                                try {
-                                    const firstSegment = offer.itineraries[0].segments[0];
-                                    const lastOutboundSegment = offer.itineraries[0].segments[offer.itineraries[0].segments.length - 1];
-                                    const inboundSegments = offer.itineraries[1]?.segments || [];
-                                    const lastInboundSegment = inboundSegments[inboundSegments.length - 1];
-                                    const cabinClass = offer.travelerPricings[0].fareDetailsBySegment[0].cabin;
-                                    console.log('[Budget Route] Processing flight offer:', {
-                                        price: offer.price,
-                                        segments: {
-                                            outbound: offer.itineraries[0].segments.map((segment) => ({
-                                                departure: segment.departure,
-                                                arrival: segment.arrival,
-                                                aircraft: segment.aircraft,
-                                                duration: segment.duration,
-                                                carrierCode: segment.carrierCode,
-                                                number: segment.number
-                                            })),
-                                            inbound: offer.itineraries[1]?.segments?.map((segment) => ({
-                                                departure: segment.departure,
-                                                arrival: segment.arrival,
-                                                aircraft: segment.aircraft,
-                                                duration: segment.duration,
-                                                carrierCode: segment.carrierCode,
-                                                number: segment.number
-                                            }))
-                                        },
-                                        cabinClass
-                                    });
-                                    // Try to get airline info, but don't fail if it's not available
-                                    let airlineInfo;
-                                    try {
-                                        // First try to get airline info for the actual carrier
-                                        const carrierInfo = offer.dictionaries?.carriers?.[firstSegment.carrierCode];
-                                        if (typeof carrierInfo === 'string') {
-                                            airlineInfo = { commonName: carrierInfo };
-                                        }
-                                        else if (carrierInfo && typeof carrierInfo === 'object') {
-                                            airlineInfo = carrierInfo;
-                                        }
-                                        else {
-                                            // Fallback to validating airline if carrier info not found
-                                            const airlineInfoArray = await amadeusService.getAirlineInfo(offer.validatingAirlineCodes[0]);
-                                            airlineInfo = airlineInfoArray[0] || { commonName: firstSegment.carrierCode };
-                                        }
-                                    }
-                                    catch (error) {
-                                        console.warn('[Budget Route] Error fetching airline info:', error);
-                                        // Use the carrier code as fallback
-                                        airlineInfo = { commonName: firstSegment.carrierCode };
-                                    }
-                                    const price = parseFloat(offer.price.total);
-                                    const tier = amadeusService.determineTier(offer);
-                                    console.log('[Budget Route] Determined flight tier:', {
-                                        price,
-                                        cabinClass,
-                                        tier
-                                    });
-                                    // Create a consistent flight data structure
-                                    const flightData = {
-                                        // Basic flight info for table view
-                                        airline: airlineInfo.commonName || firstSegment.carrierCode,
-                                        route: inboundSegments.length > 0
-                                            ? `${firstSegment.departure.iataCode} <-> ${lastOutboundSegment.arrival.iataCode}` // Round trip
-                                            : `${firstSegment.departure.iataCode} -> ${lastOutboundSegment.arrival.iataCode}`, // One way
-                                        duration: amadeusService.calculateTotalDuration(offer.itineraries[0].segments),
-                                        layovers: offer.itineraries[0].segments.length - 1,
-                                        outbound: firstSegment.departure.at,
-                                        inbound: lastInboundSegment?.arrival.at || lastOutboundSegment.arrival.at,
-                                        price: {
-                                            amount: price,
-                                            currency: offer.price.currency,
-                                            numberOfTravelers: transformedRequest.travelers
-                                        },
-                                        tier,
-                                        flightNumber: `${firstSegment.carrierCode}${firstSegment.number}`,
-                                        referenceUrl: amadeusService.generateBookingUrl(offer),
-                                        cabinClass,
-                                        // Detailed flight info for modal view
-                                        details: {
-                                            price: {
-                                                amount: price,
-                                                currency: offer.price.currency,
-                                                numberOfTravelers: transformedRequest.travelers
-                                            },
-                                            outbound: {
-                                                departure: {
-                                                    airport: firstSegment.departure.iataCode,
-                                                    terminal: firstSegment.departure.terminal,
-                                                    time: firstSegment.departure.at
-                                                },
-                                                arrival: {
-                                                    airport: lastOutboundSegment.arrival.iataCode,
-                                                    terminal: lastOutboundSegment.arrival.terminal,
-                                                    time: lastOutboundSegment.arrival.at
-                                                },
-                                                duration: amadeusService.calculateTotalDuration(offer.itineraries[0].segments),
-                                                segments: offer.itineraries[0].segments.map((segment) => ({
-                                                    airline: segment.carrierCode,
-                                                    flightNumber: `${segment.carrierCode}${segment.number}`,
-                                                    aircraft: {
-                                                        code: segment.aircraft.code,
-                                                        name: AIRCRAFT_CODES[segment.aircraft.code] || segment.aircraft.code
-                                                    },
-                                                    departure: {
-                                                        airport: segment.departure.iataCode,
-                                                        terminal: segment.departure.terminal,
-                                                        time: segment.departure.at
-                                                    },
-                                                    arrival: {
-                                                        airport: segment.arrival.iataCode,
-                                                        terminal: segment.arrival.terminal,
-                                                        time: segment.arrival.at
-                                                    },
-                                                    duration: segment.duration,
-                                                    cabinClass: offer.travelerPricings[0].fareDetailsBySegment.find((fare) => fare.segmentId === `${segment.carrierCode}${segment.number}`)?.cabin || cabinClass
-                                                })),
-                                            }
-                                        }
-                                    };
-                                    console.log('[Budget Route] Created flight data structure:', {
-                                        tier,
-                                        price,
-                                        route: flightData.route,
-                                        segments: {
-                                            outbound: flightData.details.outbound.segments.map(s => ({
-                                                aircraft: s.aircraft,
-                                                departure: s.departure,
-                                                arrival: s.arrival
-                                            }))
-                                        }
-                                    });
-                                    // Add inbound flight details if it's a round trip
-                                    if (inboundSegments.length > 0) {
-                                        const firstInboundSegment = inboundSegments[0];
-                                        flightData.details.inbound = {
-                                            departure: {
-                                                airport: firstInboundSegment.departure.iataCode,
-                                                terminal: firstInboundSegment.departure.terminal,
-                                                time: firstInboundSegment.departure.at
-                                            },
-                                            arrival: {
-                                                airport: lastInboundSegment.arrival.iataCode,
-                                                terminal: lastInboundSegment.arrival.terminal,
-                                                time: lastInboundSegment.arrival.at
-                                            },
-                                            duration: amadeusService.calculateTotalDuration(inboundSegments),
-                                            segments: inboundSegments.map((segment) => ({
-                                                airline: segment.carrierCode,
-                                                flightNumber: `${segment.carrierCode}${segment.number}`,
-                                                aircraft: {
-                                                    code: segment.aircraft.code,
-                                                    name: AIRCRAFT_CODES[segment.aircraft.code] || segment.aircraft.code
-                                                },
-                                                departure: {
-                                                    airport: segment.departure.iataCode,
-                                                    terminal: segment.departure.terminal,
-                                                    time: segment.departure.at
-                                                },
-                                                arrival: {
-                                                    airport: segment.arrival.iataCode,
-                                                    terminal: segment.arrival.terminal,
-                                                    time: segment.arrival.at
-                                                },
-                                                duration: segment.duration,
-                                                cabinClass: offer.travelerPricings[0].fareDetailsBySegment.find((fare) => fare.segmentId === `${segment.carrierCode}${segment.number}`)?.cabin || cabinClass
-                                            }))
-                                        };
-                                    }
-                                    return flightData;
-                                }
-                                catch (error) {
-                                    console.error('[Budget Route] Error transforming flight:', error);
-                                    return null;
-                                }
-                            })).then(flights => flights.filter(flight => flight !== null));
-                            console.log('[Budget Route] Transformed flights by tier:', {
-                                flightsByTier: transformedFlights.reduce((acc, flight) => {
-                                    if (!acc[flight.tier])
-                                        acc[flight.tier] = [];
-                                    acc[flight.tier].push({
-                                        price: flight.price,
-                                        airline: flight.airline,
-                                        route: flight.route
-                                    });
-                                    return acc;
-                                }, {})
-                            });
-                            // Group flights by tier
-                            const groupedFlights = transformedFlights.reduce((acc, flight) => {
-                                if (!acc[flight.tier]) {
-                                    acc[flight.tier] = {
-                                        min: Infinity,
-                                        max: -Infinity,
-                                        average: 0,
-                                        confidence: 0.9,
-                                        source: 'Amadeus API',
-                                        references: []
-                                    };
-                                }
-                                acc[flight.tier].references.push(flight);
-                                acc[flight.tier].min = Math.min(acc[flight.tier].min, flight.price.amount);
-                                acc[flight.tier].max = Math.max(acc[flight.tier].max, flight.price.amount);
-                                return acc;
-                            }, {});
-                            // Calculate averages
-                            Object.keys(groupedFlights).forEach(tier => {
-                                const flights = groupedFlights[tier].references;
-                                groupedFlights[tier].average = flights.reduce((sum, f) => sum + f.price.amount, 0) / flights.length;
-                            });
-                            console.log('[Budget Route] Final grouped flights:', {
-                                tiers: Object.keys(groupedFlights),
-                                flightCounts: Object.entries(groupedFlights).reduce((acc, [tier, data]) => {
-                                    acc[tier] = data.references.length;
-                                    return acc;
-                                }, {})
-                            });
-                            // If we have Amadeus flights, use them exclusively
-                            if (Object.keys(groupedFlights).length > 0) {
-                                agentResult.flights = {
-                                    budget: groupedFlights.budget || agentResult.flights.budget,
-                                    medium: groupedFlights.medium || agentResult.flights.medium,
-                                    premium: groupedFlights.premium || agentResult.flights.premium
-                                };
-                            }
-                            // If no Amadeus flights at all, keep Perplexity results
-                            else {
-                                agentResult.flights = {
-                                    budget: groupedFlights.budget || {
-                                        min: 0,
-                                        max: 0,
-                                        average: 0,
-                                        confidence: 0,
-                                        source: 'Amadeus API',
-                                        references: []
-                                    },
-                                    medium: groupedFlights.medium || {
-                                        min: 0,
-                                        max: 0,
-                                        average: 0,
-                                        confidence: 0,
-                                        source: 'Amadeus API',
-                                        references: []
-                                    },
-                                    premium: groupedFlights.premium || {
-                                        min: 0,
-                                        max: 0,
-                                        average: 0,
-                                        confidence: 0,
-                                        source: 'Amadeus API',
-                                        references: []
-                                    }
-                                };
                             }
                         }
+                    };
+                }
+                logger.info('[Budget] No activities from budget agent, calling activities generation endpoint', {
+                    days: transformedRequest.days,
+                    destination: transformedRequest.destinations[0].label,
+                    formattedActivitiesCount: formattedActivities?.length
+                });
+                const activitiesResult = await (async () => {
+                    try {
+                        logger.info('[Budget] Starting activities generation');
+                        // Get activities from the budget agent
+                        const formattedActivities = await agent.handleTravelRequest({
+                            departureLocation: transformedRequest.departureLocation,
+                            destinations: transformedRequest.destinations,
+                            startDate: transformedRequest.startDate,
+                            endDate: transformedRequest.endDate,
+                            travelers: transformedRequest.travelers,
+                            budgetLimit: transformedRequest.budget || 0,
+                            flightData: transformedRequest.flightData,
+                            preferences: {
+                                travelStyle: 'balanced',
+                                pacePreference: 'moderate',
+                                interests: [],
+                                accessibility: [],
+                                dietaryRestrictions: []
+                            }
+                        });
+                        // Log the full activities data for debugging
+                        logger.debug('[Budget] Received activities from budget agent:', {
+                            hasEnrichedActivities: !!formattedActivities?.enrichedActivities,
+                            enrichedActivitiesCount: formattedActivities?.enrichedActivities?.length,
+                            firstActivity: formattedActivities?.enrichedActivities?.[0],
+                            hasDailyPlans: !!formattedActivities?.dailyPlans,
+                            dailyPlansCount: formattedActivities?.dailyPlans?.length
+                        });
+                        // Validate that we have properly enriched activities
+                        if (!formattedActivities?.enrichedActivities?.length) {
+                            throw new Error('No enriched activities received from budget agent');
+                        }
+                        logger.info('[Budget] Using enriched activities from budget agent');
+                        // Return the enriched activities with all their details
+                        return {
+                            success: true,
+                            data: {
+                                activities: formattedActivities.enrichedActivities,
+                                dailyPlans: formattedActivities.dailyPlans || [],
+                                tripOverview: formattedActivities.tripSummary?.overview || '',
+                                activityFitNotes: formattedActivities.organizationLogic?.overview || '',
+                                schedule: formattedActivities.dailyPlans || [],
+                                dailyHighlights: formattedActivities.dayHighlights || [],
+                                metadata: {
+                                    source: 'budget_agent_enriched',
+                                    totalActivities: formattedActivities.enrichedActivities.length,
+                                    enrichedCount: formattedActivities.enrichedActivities.filter(a => a.bookingDetails?.provider === 'Viator').length,
+                                    scheduleDays: formattedActivities.dailyPlans?.length || 0
+                                }
+                            }
+                        };
                     }
                     catch (error) {
-                        console.error('[Budget Route] Error searching flights:', error);
-                        // If flight search fails, call agent without flight data
-                        console.log('[Budget Route] Calling budget agent without flight data...');
-                        agentResult = await agent.handleTravelRequest(transformedRequest);
+                        logger.error('[Budget] Error generating activities:', {
+                            error: error instanceof Error ? error.message : 'Unknown error',
+                            stack: error instanceof Error ? error.stack : undefined
+                        });
+                        throw new Error('Failed to generate activities: ' + (error instanceof Error ? error.message : 'Unknown error'));
                     }
-                    return {
-                        ...(agentResult || {}),
-                        totalBudget: transformedRequest.budget,
-                        requestDetails: transformedRequest
-                    };
-                })(),
-                timeoutPromise
-            ]);
-            console.log('[Budget Route] ====== END BUDGET CALCULATION ======');
-            return res.json({
-                success: true,
-                data: result,
-                timestamp: new Date().toISOString()
+                })();
+                // Use the activities result
+                if (!activitiesResult?.success || !activitiesResult?.data?.activities?.length) {
+                    throw new Error('Failed to generate valid activities');
+                }
+                result = {
+                    ...result,
+                    ...activitiesResult.data,
+                    metadata: {
+                        ...result.metadata,
+                        activities: activitiesResult.metadata
+                    }
+                };
+                return result;
+            })(),
+            timeoutPromise
+        ]);
+        console.log('[Budget Route] ====== END BUDGET CALCULATION ======');
+        // Validate and log enriched activities
+        if (result.enrichedActivities) {
+            logger.info('[Budget] Processing enriched activities:', {
+                totalActivities: result.enrichedActivities.length,
+                validationSummary: {
+                    total: result.enrichedActivities.length,
+                    valid: result.enrichedActivities.filter(validateEnrichedActivity).length,
+                    withProductCodes: result.enrichedActivities.filter(a => a.bookingDetails?.productCode).length,
+                    withAvailability: result.enrichedActivities.filter(a => a.availability?.isAvailable).length,
+                    withVerification: result.enrichedActivities.filter(a => a.availability?.realTimeVerification?.verified).length
+                }
             });
-        }
-        catch (error) {
-            console.error('[Budget Route] Error processing budget calculation:', {
-                error: error instanceof Error ? {
-                    message: error.message,
-                    stack: error.stack,
-                    name: error.name
-                } : error,
-                timestamp: new Date().toISOString()
-            });
-            // Handle timeout specifically
-            if (error instanceof Error && error.message === 'Request timeout') {
-                return res.status(504).json({
-                    success: false,
-                    error: 'Request timed out. Please try again with a shorter date range or fewer destinations.',
-                    timestamp: new Date().toISOString()
+            // Log detailed validation for each activity
+            result.enrichedActivities.forEach(logActivityValidation);
+            // Log daily plans if available
+            if (result.dailyPlans) {
+                logger.info('[Budget] Daily plans generated:', {
+                    totalDays: result.dailyPlans.length,
+                    plans: result.dailyPlans.map(plan => ({
+                        dayNumber: plan.dayNumber,
+                        theme: plan.theme,
+                        mainArea: plan.mainArea,
+                        activityCount: plan.activities.length,
+                        activities: plan.activities.map(activity => ({
+                            name: activity.name,
+                            timeSlot: activity.timeSlot,
+                            productCode: activity.bookingDetails?.productCode,
+                            isAvailable: activity.availability?.isAvailable,
+                            exactStartTimes: activity.availability?.realTimeVerification?.exactStartTimes
+                        }))
+                    }))
                 });
             }
-            return res.status(500).json({
-                success: false,
-                error: error instanceof Error ? error.message : 'An unexpected error occurred',
-                timestamp: new Date().toISOString()
-            });
+            // Log trip highlights if available
+            if (result.dayHighlights) {
+                logger.info('[Budget] Trip highlights generated:', {
+                    totalHighlights: result.dayHighlights.length,
+                    highlights: result.dayHighlights.map(highlight => ({
+                        dayNumber: highlight.dayNumber,
+                        theme: highlight.theme,
+                        mainAttractions: highlight.mainAttractions
+                    }))
+                });
+            }
         }
+        return res.json(result);
     }
     catch (error) {
         console.error('[Budget Route] Error processing budget calculation:', {
@@ -624,12 +676,57 @@ router.post('/calculate', async (req, res) => {
             return res.status(504).json({
                 success: false,
                 error: 'Request timed out. Please try again with a shorter date range or fewer destinations.',
+                errorDetails: {
+                    type: 'TIMEOUT_ERROR',
+                    message: 'The request exceeded the maximum allowed processing time',
+                    timeoutDuration: `${TIMEOUT / 1000} seconds`,
+                    timestamp: new Date().toISOString()
+                },
                 timestamp: new Date().toISOString()
             });
         }
-        return res.status(500).json({
+        // Handle different error types with specific messages
+        let statusCode = 500;
+        let errorMessage = 'An unexpected error occurred';
+        let errorType = 'UNKNOWN_ERROR';
+        if (error instanceof Error) {
+            // Categorize errors based on their message or type
+            if (error.message.includes('No flights available')) {
+                statusCode = 404;
+                errorMessage = 'No flights available for the specified dates and route. Please try different dates or destinations.';
+                errorType = 'NO_FLIGHTS_ERROR';
+            }
+            else if (error.message.includes('Invalid') || error.message.includes('Missing')) {
+                statusCode = 400;
+                errorMessage = `Invalid request parameters: ${error.message}`;
+                errorType = 'VALIDATION_ERROR';
+            }
+            else if (error.message.includes('Amadeus')) {
+                statusCode = 502;
+                errorMessage = 'Flight search service temporarily unavailable. Please try again later.';
+                errorType = 'FLIGHT_SERVICE_ERROR';
+            }
+            else if (error.message.includes('activities')) {
+                statusCode = 502;
+                errorMessage = 'Activities generation service temporarily unavailable. Please try again later.';
+                errorType = 'ACTIVITIES_SERVICE_ERROR';
+            }
+            else if (error.message.includes('rate limit') || error.message.includes('429')) {
+                statusCode = 429;
+                errorMessage = 'Rate limit exceeded. Please try again in a few minutes.';
+                errorType = 'RATE_LIMIT_ERROR';
+            }
+        }
+        return res.status(statusCode).json({
             success: false,
-            error: error instanceof Error ? error.message : 'An unexpected error occurred',
+            error: errorMessage,
+            errorDetails: {
+                type: errorType,
+                message: error instanceof Error ? error.message : 'Unknown error occurred',
+                name: error instanceof Error ? error.name : 'UnknownError',
+                stack: error instanceof Error && process.env.NODE_ENV !== 'production' ? error.stack : undefined,
+                timestamp: new Date().toISOString()
+            },
             timestamp: new Date().toISOString()
         });
     }
@@ -651,13 +748,17 @@ router.post('/generate-activity', async (req, res) => {
         if (!destination || !dayNumber || !timeSlot || !tier) {
             return res.status(400).json({ error: 'Missing required parameters' });
         }
-        console.log('[Budget API] Calling VacationBudgetAgent to generate activity...');
+        const mappedCategory = normalizeCategory(category || '');
+        console.log('[Budget API] Calling VacationBudgetAgent to generate activity with mapped category:', {
+            originalCategory: category,
+            mappedCategory
+        });
         const activity = await agent.generateSingleActivity({
             destination,
             dayNumber,
             timeOfDay: timeSlot,
             budget: tier,
-            category,
+            category: mappedCategory,
             userPreferences,
             existingActivities,
             flightTimes,

@@ -4,16 +4,30 @@ import { PrismaClient } from '@prisma/client';
 import { cities } from '../data/cities.js';
 import { airports } from '../data/airports.js';
 import { AmadeusService } from '../services/amadeus.js';
+import { FlightService } from '../services/flights.js';
 import { AirlineInfo } from '../types.js';
 import { AmadeusSegment, AmadeusFare, AmadeusFareDetail, AmadeusFlightOffer } from '../types/amadeus.js';
 import { AIRCRAFT_CODES as AIRCRAFT_CODE_MAP } from '../constants/aircraft.js';
 import { normalizeCategory } from '../constants/categories.js';
 import { logger } from '../utils/logger.js';
+import { 
+  generateDayTheme,
+  determineMainArea,
+  generateBreakSchedule,
+  generateLogistics,
+  generateDayCommentary,
+  generateDayHighlights,
+  optimizeSchedule
+} from './activities.js';
+import { DestinationsService } from '../services/destinations.js';
+import { ViatorService } from '../services/viator.js';
 
 const router = Router();
 const amadeusService = new AmadeusService();
 const agent = new VacationBudgetAgent(amadeusService);
 const prisma = new PrismaClient();
+const destinationsService = DestinationsService.getInstance();
+const viatorService = new ViatorService();
 
 // Import AIRCRAFT_CODES from amadeus service
 const AIRCRAFT_CODES: { [key: string]: string } = {
@@ -157,17 +171,79 @@ interface TransformedRequest {
   endDate: string;
   flightData?: AmadeusFlightOffer[];
   days: number;
+  preferences: {
+    travelStyle: string;
+    pacePreference: string;
+    interests: string[];
+    accessibility: string[];
+    dietaryRestrictions: string[];
+  };
+}
+
+// Helper function to transform budget request
+function transformBudgetRequest(requestBody: any): TransformedRequest {
+  // Extract dates
+  const startDate = requestBody.startDate || new Date().toISOString().split('T')[0];
+  const endDate = requestBody.endDate || new Date(new Date().getTime() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+  
+  // Calculate number of days
+  const days = Math.ceil((new Date(endDate).getTime() - new Date(startDate).getTime()) / (1000 * 60 * 60 * 24));
+
+  // Transform departure location
+  const departureLocation = {
+    code: requestBody.departureLocation?.code || '',
+    label: requestBody.departureLocation?.label || '',
+    airport: getPrimaryAirportForCity(requestBody.departureLocation?.code || ''),
+    outboundDate: startDate,
+    inboundDate: endDate,
+    isRoundTrip: true
+  };
+
+  // Transform destinations
+  const destinations = (requestBody.destinations || []).map((dest: any) => ({
+    code: dest.code || '',
+    label: dest.label || '',
+    airport: getPrimaryAirportForCity(dest.code || '')
+  }));
+
+  // Transform preferences
+  const preferences = {
+    travelStyle: requestBody.preferences?.travelStyle || 'balanced',
+    pacePreference: requestBody.preferences?.pacePreference || 'moderate',
+    interests: requestBody.preferences?.interests || [],
+    accessibility: requestBody.preferences?.accessibility || [],
+    dietaryRestrictions: requestBody.preferences?.dietaryRestrictions || []
+  };
+
+  return {
+    type: 'vacation',
+    departureLocation,
+    destinations,
+    country: destinations[0]?.label?.split(',')[0] || '',
+    travelers: requestBody.travelers || 1,
+    currency: requestBody.currency || 'USD',
+    budget: requestBody.budgetLimit,
+    startDate,
+    endDate,
+    days,
+    preferences,
+    flightData: requestBody.flightData
+  };
 }
 
 // Get available cities and airports
-router.get('/locations', (req: Request, res: Response) => {
+router.get('/locations', async (req: Request, res: Response) => {
   try {
-    console.log('[Budget Route] Fetching available locations');
+    logger.info('[Budget Route] Fetching available locations');
+    
+    // Get destinations from the service
+    const destinations = await destinationsService.getDestinations();
+    
     res.json({
       success: true,
       data: {
-        cities: cities.map(city => ({
-          value: city.value,
+        cities: destinations.map(city => ({
+          value: city.code,
           label: city.label
         })),
         airports: airports.map(airport => ({
@@ -175,10 +251,22 @@ router.get('/locations', (req: Request, res: Response) => {
           label: airport.label
         }))
       },
+      metadata: {
+        lastUpdated: destinations[0]?.lastUpdated || new Date(),
+        totalDestinations: destinations.length,
+        sources: {
+          viator: destinations.filter(d => d.source === 'VIATOR').length,
+          amadeus: destinations.filter(d => d.source === 'AMADEUS').length,
+          static: destinations.filter(d => d.source === 'STATIC').length
+        }
+      },
       timestamp: new Date().toISOString()
     });
   } catch (error) {
-    console.error('[Budget Route] Error fetching locations:', error);
+    logger.error('[Budget Route] Error fetching locations:', {
+      error: error instanceof Error ? error.message : 'Unknown error',
+      stack: error instanceof Error ? error.stack : undefined
+    });
     res.status(500).json({
       success: false,
       error: error instanceof Error ? error.message : 'An unexpected error occurred',
@@ -208,305 +296,486 @@ function getPrimaryAirportForCity(cityCode: string): string {
   }
 }
 
+// Add a helper function for safely calling the helper functions with better error handling
+const safelyCallHelper = (fn: Function, args: any[], fnName: string, defaultValue: any) => {
+  try {
+    return fn(...args);
+  } catch (error) {
+    logger.error(`[Budget] Helper function ${fnName} failed:`, {
+      error: error instanceof Error ? error.message : 'Unknown error',
+      stack: error instanceof Error ? error.stack : 'No stack trace'
+    });
+    return defaultValue;
+  }
+};
+
+// Add validation for enriched activities
+function validateEnrichedActivity(activity: Activity): boolean {
+  const hasValidBookingDetails = activity.bookingDetails && 
+    activity.bookingDetails.productCode &&
+    activity.bookingDetails.provider === 'Viator';
+
+  const hasValidAvailability = activity.availability &&
+    Array.isArray(activity.availability.availableTimeSlots) &&
+    activity.availability.realTimeVerification?.verified;
+
+  const hasValidPrice = activity.price &&
+    typeof activity.price.amount === 'number' &&
+    activity.price.amount > 0 &&
+    activity.price.currency;
+
+  return hasValidBookingDetails && hasValidAvailability && hasValidPrice;
+}
+
+// Add logging for activity validation
+function logActivityValidation(activity: Activity): void {
+  logger.debug('[Budget] Activity validation:', {
+    name: activity.name,
+    bookingDetails: {
+      hasDetails: !!activity.bookingDetails,
+      provider: activity.bookingDetails?.provider,
+      productCode: activity.bookingDetails?.productCode
+    },
+    availability: {
+      hasAvailability: !!activity.availability,
+      isAvailable: activity.availability?.isAvailable,
+      hasTimeSlots: !!activity.availability?.availableTimeSlots?.length,
+      timeSlots: activity.availability?.availableTimeSlots,
+      verified: activity.availability?.realTimeVerification?.verified
+    },
+    price: {
+      hasPrice: !!activity.price,
+      amount: activity.price?.amount,
+      currency: activity.price?.currency
+    },
+    timeSlot: activity.timeSlot,
+    dayNumber: activity.dayNumber
+  });
+}
+
 // Calculate budget endpoint
 router.post('/calculate', async (req: Request, res: Response) => {
   // Increase timeout for the entire request
-  const TIMEOUT = 600000; // 10 minutes to account for multiple flight searches
-  const SEARCH_TIMEOUT = 120000; // 2 minutes per search
-  const timeoutPromise = new Promise((_, reject) => {
-    setTimeout(() => reject(new Error('Request timeout')), TIMEOUT);
-  });
+  req.setTimeout(300000);
+  res.setTimeout(300000);
 
   try {
-    console.log('[Budget Route] ====== START BUDGET CALCULATION ======');
-    console.log('[Budget Route] Received request:', {
-      body: JSON.stringify(req.body, null, 2),
-      headers: {
-        'content-type': req.headers['content-type'],
-        'user-agent': req.headers['user-agent'],
-        origin: req.headers.origin,
-        host: req.headers.host,
-        referer: req.headers.referer
-      },
-      url: req.url,
-      method: req.method
+    logger.info('[Budget Route] ====== START BUDGET CALCULATION ======');
+    logger.info('[Budget Route] Received request:', {
+      body: req.body,
+        timestamp: new Date().toISOString()
+      });
+
+    // Transform request
+    const transformedRequest = transformBudgetRequest(req.body);
+    logger.info('[Budget Route] Transformed request:', transformedRequest);
+
+    // Initialize services
+    const agent = new VacationBudgetAgent(new FlightService());
+    const viatorService = new ViatorService();
+
+    // Create a timeout promise
+    const timeoutPromise = new Promise((_, reject) => {
+      setTimeout(() => reject(new Error('Budget calculation timed out')), 290000);
     });
 
-    // Validate required fields
-    const missingFields = [];
-    if (!req.body.departureLocation?.code) missingFields.push('departure location code');
-    if (!req.body.departureLocation?.label) missingFields.push('departure location label');
-    if (!Array.isArray(req.body.destinations) || req.body.destinations.length === 0) missingFields.push('destinations');
-    if (!req.body.startDate) missingFields.push('start date');
-    if (!req.body.endDate) missingFields.push('end date');
-    if (!req.body.travelers) missingFields.push('number of travelers');
-
-    if (missingFields.length > 0) {
-      return res.status(400).json({
-        success: false,
-        error: `Missing required fields: ${missingFields.join(', ')}`,
-        timestamp: new Date().toISOString()
-      });
-    }
-
-    // Ensure proper data types
-    const travelers = parseInt(String(req.body.travelers));
-    if (isNaN(travelers)) {
-      return res.status(400).json({
-        success: false,
-        error: 'Invalid travelers value: must be a number',
-        timestamp: new Date().toISOString()
-      });
-    }
-
-    // Get destination city details
-      const locations = await amadeusService.searchLocations(req.body.destinations[0].code);
-      if (!locations || locations.length === 0) {
-      return res.status(400).json({
-        success: false,
-        error: 'Invalid destination city',
-        timestamp: new Date().toISOString()
-      });
-    }
-
-      // Use the first matching location
-      const destinationCity = {
-        value: locations[0].iataCode,
-        label: `${locations[0].address.cityName}, ${locations[0].address.countryName}`
-      };
-
-    // Get origin airport code
-      const originLocations = await amadeusService.searchLocations(req.body.departureLocation.code);
-      if (!originLocations || originLocations.length === 0) {
-        return res.status(400).json({
-          success: false,
-          error: 'Invalid origin location',
-          timestamp: new Date().toISOString()
-        });
-      }
-
-      // Use the first matching location's IATA code
-      const originAirportCode = originLocations[0].iataCode;
-      const destinationAirportCode = locations[0].iataCode;
-
-    // Race between the actual work and the timeout
     const result = await Promise.race([
       (async () => {
-    // Transform the request to match our internal format
-    const transformedRequest: TransformedRequest = {
-      type: req.body.type || 'full',
-      departureLocation: {
-        code: String(req.body.departureLocation.code),
-        label: String(req.body.departureLocation.label),
-        airport: req.body.departureLocation.airport || req.body.departureLocation.code,
-        outboundDate: String(req.body.startDate),
-        inboundDate: String(req.body.endDate),
-        isRoundTrip: true
-      },
-      destinations: req.body.destinations.map((dest: { code: string; label: string }) => {
-        const city = cities.find(c => c.value === dest.code);
-        if (!city) {
-          console.warn('[Budget Route] City not found in database:', dest);
-        }
-        return {
-          code: city?.value || dest.code,
-          label: city?.label || dest.label,
-          airport: city?.value || dest.code
-        };
-      }),
-      country: destinationCity.value,
-      travelers: travelers,
-      currency: String(req.body.currency || 'USD'),
-      budget: req.body.budgetLimit ? parseFloat(String(req.body.budgetLimit)) : undefined,
-      startDate: String(req.body.startDate),
-      endDate: String(req.body.endDate),
-      days: Math.ceil((new Date(req.body.endDate).getTime() - new Date(req.body.startDate).getTime()) / (1000 * 60 * 60 * 24))
-    };
-
         let agentResult;
-        let activitiesData;
 
-        // First search for real-time flights with Amadeus
-        console.log('[Budget Route] Searching for real-time flights with Amadeus...');
-          const formattedDepartureDate = transformedRequest.startDate.split('T')[0];
-          const formattedReturnDate = transformedRequest.endDate.split('T')[0];
-
-          // Search for flights in all cabin classes with individual timeouts
-          const cabinClasses = ['ECONOMY', 'PREMIUM_ECONOMY', 'BUSINESS', 'FIRST'];
-          const searchPromises = cabinClasses.map(async cabinClass => {
-            try {
-              const searchPromise = amadeusService.searchFlights({
-                segments: [{
-                  originLocationCode: originAirportCode,
-                  destinationLocationCode: destinationAirportCode,
-                  departureDate: formattedDepartureDate
-                }, {
-                  originLocationCode: destinationAirportCode,
-                  destinationLocationCode: originAirportCode,
-                  departureDate: formattedReturnDate
-                }],
-                adults: transformedRequest.travelers,
-                travelClass: cabinClass
-              });
-
-              // Add timeout to individual search
-              const result = await Promise.race([
-                searchPromise,
-                new Promise((_, reject) => 
-                  setTimeout(() => reject(new Error(`Search timeout for ${cabinClass}`)), SEARCH_TIMEOUT)
-                )
-              ]);
-
-              return result;
-            } catch (error) {
-              console.warn(`[Budget Route] Search failed for ${cabinClass}:`, error);
-            return [];
-            }
+        try {
+          // Get activities from the budget agent
+          agentResult = await agent.handleTravelRequest({
+            departureLocation: transformedRequest.departureLocation,
+            destinations: transformedRequest.destinations,
+            startDate: transformedRequest.startDate,
+            endDate: transformedRequest.endDate,
+            travelers: transformedRequest.travelers,
+            budgetLimit: transformedRequest.budget || 0,
+            flightData: transformedRequest.flightData,
+            preferences: transformedRequest.preferences
           });
 
-        // Wait for all searches to complete
-          const allFlights = (await Promise.all(searchPromises)).flat();
-          
-          if (allFlights.length === 0) {
-            console.warn('[Budget Route] No flights found for any cabin class');
-          } else {
-            console.log('[Budget Route] Flight search results:', {
-              totalFlights: allFlights.length,
-              byClass: {
-                economy: allFlights.filter((f: AmadeusFlightOffer) => 
-                  f.travelerPricings[0]?.fareDetailsBySegment[0]?.cabin === 'ECONOMY').length,
-                premiumEconomy: allFlights.filter((f: AmadeusFlightOffer) => 
-                  f.travelerPricings[0]?.fareDetailsBySegment[0]?.cabin === 'PREMIUM_ECONOMY').length,
-                business: allFlights.filter((f: AmadeusFlightOffer) => 
-                  f.travelerPricings[0]?.fareDetailsBySegment[0]?.cabin === 'BUSINESS').length,
-                first: allFlights.filter((f: AmadeusFlightOffer) => 
-                  f.travelerPricings[0]?.fareDetailsBySegment[0]?.cabin === 'FIRST').length
-              }
-            });
-
-          // Add flight data to the transformed request
-          transformedRequest.flightData = allFlights;
-        }
-
-        // Call VacationBudgetAgent with flight data
-        console.log('[Budget Route] Calling VacationBudgetAgent with flight data...');
-        agentResult = await agent.handleTravelRequest({
-          ...transformedRequest,
-          preferences: req.body.preferences,
-          budgetLimit: req.body.budgetLimit
-        });
-
-        // Extract activities from agent result
-        const initialActivities = agentResult.activities?.budget?.references || [];
-
-        // Pass the generated activities to activities/generate endpoint
-        const activitiesResponse = await fetch('http://localhost:3001/api/activities/generate', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': 'Bearer internal'
-          },
-          body: JSON.stringify({
-            destination: destinationCity,
-            days: transformedRequest.days,
-            budget: transformedRequest.budget,
-            currency: transformedRequest.currency,
-            flightTimes: {
-              arrival: agentResult.flights?.budget?.references?.[0]?.details?.outbound?.segments?.slice(-1)[0]?.arrival?.time,
-              departure: agentResult.flights?.budget?.references?.[0]?.details?.inbound?.segments?.[0]?.departure?.time
-            },
-            preferences: req.body.preferences,
-            existingActivities: initialActivities,
-            skipPerplexityGeneration: true
-          }),
-          signal: AbortSignal.timeout(300000)
-        });
-
-        if (!activitiesResponse.ok) {
-          const errorText = await activitiesResponse.text();
-          logger.error('[Budget] Failed to generate activities:', errorText);
-          throw new Error('Failed to generate activities');
-        }
-
-        // Read the response as a stream to handle large responses
-        const reader = activitiesResponse.body?.getReader();
-        const decoder = new TextDecoder();
-
-        if (reader) {
-          let result = '';
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            result += decoder.decode(value, { stream: true });
-          }
-          try {
-            activitiesData = JSON.parse(result);
+          logger.info('[Budget Route] Received agent result:', {
+            hasActivities: !!agentResult?.activities,
+            hasEnrichedActivities: !!agentResult?.enrichedActivities,
+            activitiesCount: agentResult?.activities?.length || 0,
+            enrichedCount: agentResult?.enrichedActivities?.length || 0
+          });
             } catch (error) {
-            logger.error('[Budget] Failed to parse activities response:', error);
-            throw new Error('Failed to parse activities response');
-          }
-        } else {
-          activitiesData = await activitiesResponse.json();
+          logger.error('[Budget Route] Error in budget agent:', error);
+          throw error;
         }
 
-        // Log the activities response for debugging
-        logger.info('[Budget] Activities response:', {
-          hasActivities: !!activitiesData.activities?.length,
-          hasSchedule: !!activitiesData.schedule?.length,
-          hasDailyPlans: !!activitiesData.dailyPlans?.length,
-          hasDailyHighlights: !!activitiesData.dailyHighlights?.length,
-          responseSize: JSON.stringify(activitiesData).length
-        });
+        // Check if agent result is valid before proceeding
+        if (!agentResult || (!agentResult.activities && !agentResult.enrichedActivities)) {
+          logger.error('[Budget Route] VacationBudgetAgent failed to return valid result');
+          return {
+            success: false,
+            error: 'Failed to calculate budget and generate initial activities',
+            timestamp: new Date().toISOString()
+          };
+        }
 
-        // Return combined result with enriched activities
-        return {
-          success: true,
-          data: {
-          ...(agentResult || {}),
-            activities: activitiesData.activities || [],
-            schedule: activitiesData.schedule || [],
-            dailyPlans: activitiesData.dailyPlans || [],
-            dailyHighlights: activitiesData.dailyHighlights || [],
-          totalBudget: transformedRequest.budget,
-            requestDetails: transformedRequest,
-            metadata: {
-              ...activitiesData.metadata,
-              perplexityCalls: activitiesData.metadata?.perplexityCalls || 0
+        // Use enriched activities if available, otherwise fall back to regular activities
+        const activitiesArray = agentResult.enrichedActivities || 
+          (Array.isArray(agentResult.activities) ? agentResult.activities : 
+            agentResult.activities ? Object.values(agentResult.activities).flatMap(tier => tier.references || []) : []);
+
+        if (!activitiesArray || !activitiesArray.length) {
+          logger.error('[Budget Route] No activities found in agent result');
+          return {
+            success: false,
+            error: 'No activities generated',
+            timestamp: new Date().toISOString()
+          };
+        }
+
+        // Extract destination info for Viator enrichment
+        const destination = transformedRequest.destinations[0];
+        const cityName = destination.label.split(',')[0].trim();
+
+        // Get destination ID from Viator
+        let destinationId;
+        try {
+          destinationId = await viatorService.getDestinationId(cityName);
+          logger.info('[Budget] Found Viator destination ID:', {
+            city: cityName,
+            destinationId
+          });
+        } catch (error) {
+          logger.error('[Budget] Failed to get Viator destination ID:', {
+            city: cityName,
+            error: error instanceof Error ? error.message : 'Unknown error'
+          });
+        }
+
+        // Enrich activities with Viator data
+        const enrichedActivities = await Promise.all(
+          activitiesArray.map(async (activity) => {
+            try {
+              logger.info('[Budget] Enriching activity:', {
+                name: activity.name,
+                destination: cityName,
+                date: transformedRequest.startDate,
+                stage: 'start'
+              });
+
+              // Search for matching Viator activities
+              const searchResults = await viatorService.searchActivity(
+                activity.name,
+                destinationId,
+                transformedRequest.startDate,
+                transformedRequest.endDate
+              );
+
+              if (!searchResults || searchResults.length === 0) {
+                logger.warn('[Budget] No Viator activities found for:', {
+                  name: activity.name,
+                  destination: cityName,
+                  stage: 'no_results'
+                });
+          return {
+              ...activity,
+                  enrichmentStatus: 'not_found',
+                  location: cityName,
+                  date: transformedRequest.startDate
+                };
+              }
+
+              // Get the best match using string similarity
+              const bestMatch = searchResults.reduce((best, current) => {
+                const bestScore = viatorService.stringSimilarity(activity.name.toLowerCase(), best.title.toLowerCase());
+                const currentScore = viatorService.stringSimilarity(activity.name.toLowerCase(), current.title.toLowerCase());
+                return currentScore > bestScore ? current : best;
+              }, searchResults[0]);
+
+              logger.info('[Budget] Found matching activity:', {
+                originalName: activity.name,
+                matchedName: bestMatch.title,
+                productCode: bestMatch.productCode,
+                stage: 'match_found'
+              });
+
+              // Get real-time availability
+              let realTimeCheck;
+              try {
+                realTimeCheck = await viatorService.checkRealTimeAvailability(
+                  bestMatch.productCode,
+                  transformedRequest.startDate
+                );
+                
+                logger.info('[Budget] Real-time availability checked:', {
+                  name: activity.name,
+                  productCode: bestMatch.productCode,
+                  isAvailable: realTimeCheck?.available,
+                  stage: 'availability_checked'
+                });
+              } catch (error) {
+                logger.warn('[Budget] Failed to get real-time availability:', {
+                  name: activity.name,
+                  productCode: bestMatch.productCode,
+                  error: error instanceof Error ? error.message : 'Unknown error'
+                });
+              }
+
+              // Get detailed product information
+              const enriched = await viatorService.enrichActivityDetails({
+                ...activity,
+                name: activity.name,
+                timeSlot: activity.timeSlot,
+                dayNumber: activity.dayNumber,
+                location: cityName,
+                date: transformedRequest.startDate,
+                bookingDetails: {
+                  provider: 'Viator',
+                  productCode: bestMatch.productCode,
+                  referenceUrl: viatorService.constructBookingUrl(bestMatch)
+                },
+                price: {
+                  amount: realTimeCheck?.pricing?.fromPrice || bestMatch.pricing?.summary?.fromPrice || activity.price?.amount || 0,
+                  currency: realTimeCheck?.pricing?.currency || bestMatch.pricing?.currency || 'USD'
+                },
+                availability: realTimeCheck ? {
+                  isAvailable: realTimeCheck.available,
+                  availableTimeSlots: realTimeCheck.schedule.availableTimeSlots.map(time => {
+                    const hour = parseInt(time.split(':')[0]);
+                    if (hour >= 6 && hour < 12) return 'morning';
+                    if (hour >= 12 && hour < 17) return 'afternoon';
+                    return 'evening';
+                  }),
+                  exactStartTimes: realTimeCheck.schedule.availableTimeSlots,
+                  realTimeVerification: {
+                    verified: true,
+                    exactStartTimes: realTimeCheck.schedule.availableTimeSlots,
+                    lastChecked: new Date().toISOString(),
+                    pricing: realTimeCheck.pricing
+                  },
+                  operatingHours: realTimeCheck.schedule.openingHours?.join(', ')
+                } : undefined
+              });
+
+              logger.info('[Budget] Successfully enriched activity:', {
+                name: activity.name,
+                productCode: bestMatch.productCode,
+                stage: 'complete'
+              });
+
+              // Return enriched activity with fallback to original data
+          return {
+                ...activity,
+                ...enriched,
+                name: activity.name,
+                timeSlot: activity.timeSlot,
+                dayNumber: activity.dayNumber,
+                location: cityName,
+                date: transformedRequest.startDate,
+                enrichmentStatus: enriched.bookingDetails?.productCode ? 'success' : 'not_found'
+              };
+        } catch (error) {
+              logger.warn('[Budget] Failed to enrich activity with Viator details:', {
+                name: activity.name,
+                error: error instanceof Error ? error.message : 'Unknown error'
+              });
+              return {
+                ...activity,
+                location: cityName,
+                date: transformedRequest.startDate,
+                enrichmentStatus: 'failed'
+              };
             }
+          })
+        );
+
+        // Update daily plans with enriched activities
+        const updatedDailyPlans = agentResult.dailyPlans?.map((plan) => ({
+          ...plan,
+          activities: plan.activities?.map((activity) => {
+            const enriched = enrichedActivities.find(
+              (ea) => ea.name === activity.name && ea.dayNumber === plan.dayNumber
+            );
+            return enriched || activity;
+          }) || []
+        })) || [];
+
+        // Return the final result
+          return {
+            success: true,
+          requestDetails: {
+              departureLocation: transformedRequest.departureLocation,
+              destinations: transformedRequest.destinations,
+              startDate: transformedRequest.startDate,
+              endDate: transformedRequest.endDate,
+              travelers: transformedRequest.travelers,
+            currency: transformedRequest.currency,
+            budgetLimit: transformedRequest.budget
           },
-          timestamp: new Date().toISOString()
+          activities: enrichedActivities,
+          dailyPlans: updatedDailyPlans.map(day => ({
+            ...day,
+            activities: day.mapData.locations.map(location => {
+              // Find matching enriched activity
+              const enrichedActivity = enrichedActivities.find(a => 
+                a.name === location.name || 
+                a.name.toLowerCase().includes(location.name.toLowerCase()) ||
+                location.name.toLowerCase().includes(a.name.toLowerCase())
+              );
+
+              if (enrichedActivity) {
+                return {
+                  ...enrichedActivity,
+                  name: location.name,
+                  description: location.description || enrichedActivity.description,
+                  category: location.category || enrichedActivity.category,
+                  location: location.address || enrichedActivity.location,
+                  timeSlot: location.timeSlot || enrichedActivity.timeSlot,
+                  duration: location.duration || enrichedActivity.duration,
+                  coordinates: location.coordinates,
+                  order: location.order,
+                  availability: enrichedActivity.availability || {
+                    isAvailable: true,
+                    availableTimeSlots: [location.timeSlot],
+                    exactStartTimes: [],
+                    timesByCategory: {
+                      morning: [],
+                      afternoon: [],
+                      evening: []
+                    },
+                    realTimeVerification: {
+                      verified: false,
+                      exactStartTimes: [],
+                      lastChecked: new Date().toISOString()
+                    }
+                  }
+                };
+              }
+
+              // If no match found, try to find a similar activity to get availability data
+              const similarActivity = enrichedActivities.find(a => 
+                a.name.toLowerCase().includes(location.name.toLowerCase()) ||
+                location.name.toLowerCase().includes(a.name.toLowerCase())
+              );
+
+              // Return location data with availability from similar activity if found
+              return {
+                name: location.name,
+                description: location.description,
+                category: location.category,
+                location: location.address,
+                timeSlot: location.timeSlot,
+                duration: location.duration,
+                coordinates: location.coordinates,
+                order: location.order,
+                dayNumber: day.dayNumber,
+                date: transformedRequest.startDate,
+                price: { amount: 0, currency: transformedRequest.currency },
+                availability: similarActivity?.availability || {
+                  isAvailable: true,
+                  availableTimeSlots: [location.timeSlot],
+                  exactStartTimes: [],
+                  timesByCategory: {
+                    morning: [],
+                    afternoon: [],
+                    evening: []
+                  },
+                  realTimeVerification: {
+                    verified: false,
+                    exactStartTimes: [],
+                    lastChecked: new Date().toISOString()
+                  }
+                }
+              };
+            })
+          })),
+          tripOverview: agentResult.tripSummary?.overview || 'Trip overview not available',
+          activityFitNotes: agentResult.organizationLogic?.overview || 'Activity fit notes not available',
+          schedule: updatedDailyPlans.map(day => ({
+            dayNumber: day.dayNumber,
+            theme: safelyCallHelper(generateDayTheme, [day.activities], 'generateDayTheme', 'Mixed Activities'),
+            mainArea: safelyCallHelper(determineMainArea, [day.activities], 'determineMainArea', 'City Center'),
+            commentary: safelyCallHelper(generateDayCommentary, [day.activities, transformedRequest.preferences, day.dayNumber], 'generateDayCommentary', ''),
+            highlights: safelyCallHelper(generateDayHighlights, [day.activities, transformedRequest.preferences], 'generateDayHighlights', []),
+            activities: enrichedActivities.filter(activity => activity.dayNumber === day.dayNumber).map(activity => ({
+              ...activity,
+              timeSlot: activity.timeSlot,
+              startTime: activity.startTime || activity.availability?.exactStartTimes?.[0],
+              availability: activity.availability || {
+                isAvailable: true,
+                availableTimeSlots: [activity.timeSlot],
+                exactStartTimes: activity.availability?.exactStartTimes || [],
+                timesByCategory: {
+                  morning: activity.availability?.timesByCategory?.morning || [],
+                  afternoon: activity.availability?.timesByCategory?.afternoon || [],
+                  evening: activity.availability?.timesByCategory?.evening || []
+                },
+                realTimeVerification: {
+                  verified: activity.availability?.realTimeVerification?.verified || false,
+                  exactStartTimes: activity.availability?.realTimeVerification?.exactStartTimes || [],
+                  lastChecked: activity.availability?.realTimeVerification?.lastChecked || new Date().toISOString()
+                }
+              }
+            })).sort((a, b) => {
+              // Sort by time slot first
+              const timeSlotOrder = { morning: 0, afternoon: 1, evening: 2 };
+              const timeSlotDiff = timeSlotOrder[a.timeSlot] - timeSlotOrder[b.timeSlot];
+              if (timeSlotDiff !== 0) return timeSlotDiff;
+              
+              // Then by start time if available
+              if (a.startTime && b.startTime) {
+                const [aHour, aMin] = a.startTime.split(':').map(Number);
+                const [bHour, bMin] = b.startTime.split(':').map(Number);
+                return (aHour * 60 + aMin) - (bHour * 60 + bMin);
+              }
+              return 0;
+            }),
+            breaks: safelyCallHelper(generateBreakSchedule, [day.activities, transformedRequest.preferences], 'generateBreakSchedule', {
+              morning: { startTime: '10:30', endTime: '11:00', duration: 30, suggestion: 'Coffee break' },
+              lunch: { startTime: '12:30', endTime: '13:30', duration: 60, suggestion: 'Lunch break' },
+              afternoon: { startTime: '15:30', endTime: '16:00', duration: 30, suggestion: 'Rest break' },
+              dinner: { startTime: '18:30', endTime: '20:00', duration: 90, suggestion: 'Dinner' }
+            }),
+            logistics: safelyCallHelper(generateLogistics, [day.activities, transformedRequest.preferences], 'generateLogistics', {
+              transportSuggestions: ['Use public transportation between major attractions'],
+              walkingDistances: ['Average walking distance between activities: 15-20 minutes'],
+              timeEstimates: ['Allow 30 minutes for transportation between activities']
+            })
+          })),
+          dailyHighlights: agentResult.dayHighlights || [],
+          totalBudget: transformedRequest.budget,
+                metadata: {
+            perplexityCalls: 0,
+            scheduleGeneration: {
+              source: 'budget_agent',
+              timestamp: new Date().toISOString(),
+              preferences: transformedRequest.preferences
+            },
+            enrichment: {
+              totalActivities: enrichedActivities.length,
+              enrichedCount: enrichedActivities.filter(a => a.enrichmentStatus === 'success').length,
+              destinationId
+            }
+          }
         };
       })(),
       timeoutPromise
     ]);
 
-    console.log('[Budget Route] ====== END BUDGET CALCULATION ======');
+    logger.info('[Budget Route] ====== END BUDGET CALCULATION ======');
+
+    // Send the response
     return res.json(result);
 
-  } catch (error: unknown) {
-    console.error('[Budget Route] Error processing budget calculation:', {
-      error: error instanceof Error ? {
-        message: error.message,
-        stack: error.stack,
-        name: error.name
-      } : error,
-      timestamp: new Date().toISOString()
+  } catch (error) {
+    logger.error('[Budget Route] Error in budget calculation:', {
+      error: error instanceof Error ? error.message : 'Unknown error',
+      stack: error instanceof Error ? error.stack : undefined
     });
-
-    // Handle timeout specifically
-    if (error instanceof Error && error.message === 'Request timeout') {
-      return res.status(504).json({
-        success: false,
-        error: 'Request timed out. Please try again with a shorter date range or fewer destinations.',
-        timestamp: new Date().toISOString()
-      });
-    }
 
     return res.status(500).json({
-      success: false,
-      error: error instanceof Error ? error.message : 'An unexpected error occurred',
-      timestamp: new Date().toISOString()
-    });
+        success: false,
+      error: error instanceof Error ? error.message : 'Budget calculation failed',
+        timestamp: new Date().toISOString()
+      });
   }
 });
 

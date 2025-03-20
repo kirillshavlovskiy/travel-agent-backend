@@ -273,3 +273,16 @@ model Route {
   @@index([fromCode])
   @@index([toCode])
 }
+
+model Destination {
+  id          String   @id @default(uuid())
+  code        String   @unique
+  label       String
+  cityCode    String?
+  country     String?
+  lastUpdated DateTime @default(now())
+  source      String   @default("STATIC")
+
+  @@index([code])
+  @@index([lastUpdated])
+}

@@ -7,17 +7,23 @@ const __dirname = path.dirname(__filename);
 const logsDir = path.join(__dirname, '../../logs');
 const logFile = path.join(logsDir, 'server.log');
 const hotelLogFile = path.join(logsDir, 'hotel-processing.log');
+const viatorLogFile = path.join(logsDir, 'viator.log');
 console.log('Logs directory:', logsDir);
 console.log('Hotel log file:', hotelLogFile);
+console.log('Viator log file:', viatorLogFile);
 // Ensure logs directory exists
 if (!fs.existsSync(logsDir)) {
     console.log('Creating logs directory:', logsDir);
     fs.mkdirSync(logsDir, { recursive: true });
 }
-// Ensure hotel log file exists
+// Ensure log files exist
 if (!fs.existsSync(hotelLogFile)) {
     console.log('Creating hotel log file:', hotelLogFile);
     fs.writeFileSync(hotelLogFile, '');
+}
+if (!fs.existsSync(viatorLogFile)) {
+    console.log('Creating Viator log file:', viatorLogFile);
+    fs.writeFileSync(viatorLogFile, '');
 }
 // ANSI color codes for better visibility
 const colors = {
@@ -29,12 +35,12 @@ const colors = {
     error: '\x1b[31m', // Red
     debug: '\x1b[35m', // Magenta
 };
-const hotelLogger = winston.createLogger({
+const createLogger = (logFile) => winston.createLogger({
     level: 'debug',
     format: winston.format.combine(winston.format.timestamp(), winston.format.json()),
     transports: [
         new winston.transports.File({
-            filename: hotelLogFile,
+            filename: logFile,
             level: 'debug'
         }),
         new winston.transports.Console({
@@ -42,9 +48,15 @@ const hotelLogger = winston.createLogger({
         })
     ]
 });
-// Test log to verify logging is working
+const hotelLogger = createLogger(hotelLogFile);
+const viatorLogger = createLogger(viatorLogFile);
+// Test logs to verify logging is working
 hotelLogger.info('Hotel logger initialized', {
     logFile: hotelLogFile,
+    timestamp: new Date().toISOString()
+});
+viatorLogger.info('Viator logger initialized', {
+    logFile: viatorLogFile,
     timestamp: new Date().toISOString()
 });
 // Add specific hotel logging methods
@@ -81,6 +93,28 @@ export const logHotelProcessing = {
             availableHotels: summary.availableHotels,
             destinations: summary.destinations,
             dateRange: summary.dateRange
+        });
+    }
+};
+// Add specific Viator logging methods
+export const logViatorProcessing = {
+    availabilityCheck: (productCode, data) => {
+        viatorLogger.info('Checking availability', {
+            productCode,
+            ...data
+        });
+    },
+    availabilityResult: (productCode, data) => {
+        viatorLogger.info('Availability result', {
+            productCode,
+            ...data
+        });
+    },
+    error: (productCode, error) => {
+        viatorLogger.error('Error processing request', {
+            productCode,
+            error: error.message,
+            details: error.response || error
         });
     }
 };

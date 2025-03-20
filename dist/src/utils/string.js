@@ -22,11 +22,15 @@ export function calculateStringSimilarity(str1, str2) {
         wordSet: wordSetSimilarity,
         keyword: keywordSimilarity
     });
-    // Weight and combine the similarities
-    // Give more weight to word set and keyword similarities for activity names
-    const combinedSimilarity = (levenshteinSimilarity * 0.3 +
-        wordSetSimilarity * 0.4 +
-        keywordSimilarity * 0.3);
+    // Adjust weights to favor keyword matches
+    const combinedSimilarity = (levenshteinSimilarity * 0.2 + // Reduced from 0.3
+        wordSetSimilarity * 0.3 + // Reduced from 0.4
+        keywordSimilarity * 0.5 // Increased from 0.3
+    );
+    // Boost score if there are significant keyword matches
+    if (keywordSimilarity > 0.5) {
+        return Math.min(1, combinedSimilarity * 1.5);
+    }
     return combinedSimilarity;
 }
 function normalizeString(str) {
@@ -69,25 +73,45 @@ function calculateWordSetSimilarity(s1, s2) {
     return intersection.size / union.size;
 }
 function calculateKeywordSimilarity(s1, s2) {
-    // Define important keywords that indicate similar activities
+    // Expanded list of important keywords
     const keywords = [
-        'seine', 'river', 'cruise', 'tour', 'ticket', 'paris',
-        'eiffel', 'tower', 'louvre', 'museum', 'palace',
-        'guided', 'skip', 'line', 'priority', 'access'
+        // Common activity types
+        'tour', 'visit', 'experience', 'adventure', 'excursion',
+        'cruise', 'walk', 'exploration', 'trip', 'journey',
+        // Access types
+        'skip', 'line', 'priority', 'access', 'entry', 'ticket',
+        'admission', 'pass', 'guided', 'private', 'small-group',
+        // Time-related
+        'day', 'night', 'evening', 'morning', 'afternoon', 'sunset',
+        'sunrise', 'hour', 'full-day', 'half-day',
+        // Common attractions
+        'museum', 'palace', 'castle', 'cathedral', 'church',
+        'garden', 'park', 'monument', 'tower', 'bridge',
+        // Activity features
+        'tasting', 'food', 'wine', 'cooking', 'workshop',
+        'photography', 'bike', 'boat', 'bus', 'walking',
+        // Locations (add specific to your destinations)
+        'paris', 'seine', 'louvre', 'eiffel', 'versailles',
+        'montmartre', 'latin', 'quarter', 'marais', 'opera'
     ];
     const words1 = s1.split(' ');
     const words2 = s2.split(' ');
     let matchingKeywords = 0;
     let totalKeywords = 0;
-    for (const keyword of keywords) {
-        const inFirst = words1.includes(keyword);
-        const inSecond = words2.includes(keyword);
-        if (inFirst || inSecond) {
+    // Count matching keywords in both strings
+    keywords.forEach(keyword => {
+        const inStr1 = words1.some(w => w.includes(keyword));
+        const inStr2 = words2.some(w => w.includes(keyword));
+        if (inStr1 || inStr2) {
             totalKeywords++;
-            if (inFirst && inSecond) {
+            if (inStr1 && inStr2) {
                 matchingKeywords++;
             }
         }
+    });
+    // If no keywords found, fall back to basic word matching
+    if (totalKeywords === 0) {
+        return calculateWordSetSimilarity(s1, s2);
     }
-    return totalKeywords === 0 ? 0 : matchingKeywords / totalKeywords;
+    return matchingKeywords / totalKeywords;
 }

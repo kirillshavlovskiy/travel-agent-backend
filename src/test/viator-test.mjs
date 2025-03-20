@@ -43,7 +43,8 @@ async function testViatorSearch() {
       searchRequest,
       {
         headers: {
-          'Accept': 'application/json;version=2.0',
+          'Accept': 'application/json',
+          'Accept-Version': '2.0',
           'Content-Type': 'application/json',
           'Accept-Language': 'en-US',
           'exp-api-key': VIATOR_API_KEY

@@ -1,55 +1,28 @@
 import axios from 'axios';
 import { logger } from '../utils/logger';
-const ACTIVITY_CATEGORIES = [
-    {
-        name: 'Cultural & Historical',
-        keywords: ['museum', 'gallery', 'history', 'art', 'palace', 'cathedral', 'church', 'monument', 'heritage'],
-        preferredTimeOfDay: 'morning',
-        typicalDuration: 120
-    },
-    {
-        name: 'Cruises & Sailing',
-        keywords: ['cruise', 'boat', 'sailing', 'river', 'yacht', 'dinner cruise', 'lunch cruise', 'night cruise', 'canal'],
-        preferredTimeOfDay: 'afternoon',
-        typicalDuration: 180
-    },
-    {
-        name: 'Food & Dining',
-        keywords: ['food', 'dinner', 'lunch', 'culinary', 'restaurant', 'cooking class', 'wine tasting', 'tapas', 'gourmet'],
-        preferredTimeOfDay: 'evening',
-        typicalDuration: 150
-    },
-    {
-        name: 'Shows & Entertainment',
-        keywords: ['show', 'concert', 'theater', 'performance', 'dance', 'musical', 'cabaret', 'circus', 'disney'],
-        preferredTimeOfDay: 'evening',
-        typicalDuration: 120
-    },
-    {
-        name: 'Outdoor Activities',
-        keywords: ['hiking', 'walking', 'beach', 'mountain', 'nature', 'park', 'garden', 'bike tour', 'cycling'],
-        preferredTimeOfDay: 'morning',
-        typicalDuration: 240
-    },
-    {
-        name: 'Adventure & Sports',
-        keywords: ['kayak', 'adventure', 'sport', 'diving', 'climbing', 'rafting', 'zip line', 'bungee'],
-        preferredTimeOfDay: 'morning',
-        typicalDuration: 240
-    },
-    {
-        name: 'Tickets & Passes',
-        keywords: ['ticket', 'pass', 'admission', 'entry', 'skip-the-line', 'fast track', 'priority access'],
-        preferredTimeOfDay: 'morning',
-        typicalDuration: 120
-    },
-    {
-        name: 'Transportation',
-        keywords: ['transfer', 'airport', 'hotel', 'shuttle', 'private driver', 'pickup', 'transport'],
-        preferredTimeOfDay: 'morning',
-        typicalDuration: 60
-    }
-];
+import { determineCategoryFromDescription, getPreferredTimeSlot, getTypicalDuration } from '../constants/categories.js';
+// Add Viator category mapping
+const VIATOR_CATEGORY_MAP = {
+    'Tours & Sightseeing': 'Cultural & Historical',
+    'Cultural & Theme Tours': 'Cultural & Historical',
+    'Historical & Heritage Tours': 'Cultural & Historical',
+    'Walking & Biking Tours': 'Nature & Adventure',
+    'Outdoor Activities': 'Nature & Adventure',
+    'Water Sports': 'Nature & Adventure',
+    'Day Cruises': 'Cruises & Sailing',
+    'Night Cruises': 'Cruises & Sailing',
+    'Sunset Cruises': 'Cruises & Sailing',
+    'Food, Wine & Nightlife': 'Food & Dining',
+    'Food Tours': 'Food & Dining',
+    'Dining Experiences': 'Food & Dining',
+    'Shows, Concerts & Sports': 'Entertainment',
+    'Theater, Shows & Musicals': 'Entertainment',
+    'Shopping Tours': 'Shopping',
+    'Shopping Passes & Offers': 'Shopping',
+    'Sightseeing Tickets & Passes': 'Tickets & Passes',
+    'Attraction Tickets': 'Tickets & Passes',
+    'Museum Tickets & Passes': 'Tickets & Passes'
+};
 export class ViatorService {
     constructor(apiKey) {
         this.baseUrl = 'https://api.viator.com/partner';
@@ -435,8 +408,38 @@ export class ViatorService {
                                 description: productDetails.cancellationPolicy?.description?.trim() || '',
                                 refundEligibility: productDetails.cancellationPolicy?.refundEligibility || []
                             }
-                        }
+                        },
+                        reviews: productDetails.reviews ? {
+                            rating: productDetails.reviews.rating,
+                            totalReviews: productDetails.reviews.totalReviews,
+                            ratingBreakdown: productDetails.reviews.ratingBreakdown || [],
+                            featuredReviews: productDetails.reviews.featuredReviews || []
+                        } : undefined
                     };
+                    // Map reviews to frontend format
+                    const reviews = productDetails.reviews ? {
+                        reviewCountTotals: {
+                            averageRating: productDetails.reviews.combinedAverageRating || 0,
+                            totalReviews: productDetails.reviews.totalReviews || 0,
+                            stats: productDetails.reviews.reviewCountTotals?.map((count) => ({
+                                rating: count.rating,
+                                count: count.count,
+                                percentage: ((count.count / productDetails.reviews.totalReviews) * 100).toFixed(1)
+                            })) || [],
+                            sources: productDetails.reviews.sources?.map((source) => ({
+                                provider: source.provider,
+                                count: source.totalCount
+                            })) || []
+                        },
+                        items: productDetails.reviews.featuredReviews?.map((review) => ({
+                            author: review.author,
+                            date: review.date,
+                            rating: review.rating,
+                            text: review.content,
+                            title: review.title,
+                            helpful: review.helpful
+                        })) || []
+                    } : undefined;
                     // Extract availability and pricing information
                     const bookingInfo = {
                         productCode,
@@ -459,20 +462,37 @@ export class ViatorService {
                         title: option.title,
                         languageGuides: option.languageGuides
                     }));
-                    return {
+                    // Format location data
+                    const formatLocation = (locationData) => {
+                        if (typeof locationData === 'string')
+                            return locationData;
+                        if (typeof locationData === 'object') {
+                            return locationData.address ||
+                                (locationData.meetingPoints?.[0]?.address) ||
+                                (locationData.startingLocations?.[0]?.address) ||
+                                'Location details available upon booking';
+                        }
+                        return 'Location details available upon booking';
+                    };
+                    const enrichedActivity = {
                         ...activity,
-                        location: locationInfo,
+                        location: formatLocation(activity.location),
+                        locationDetails: activity.location,
                         openingHours: productDetails.itinerary?.routes?.[0]?.operatingSchedule || '',
                         details,
+                        reviews,
                         bookingInfo,
                         itinerary: structuredItinerary,
                         productDetails: {
                             ...activity.productDetails,
                             productOptions
                         },
-                        commentary: activity.commentary,
-                        itineraryHighlight: activity.itineraryHighlight
+                        commentary: activity.commentary || details.overview,
+                        itineraryHighlight: activity.itineraryHighlight || `Visit ${activity.name} ${details.whatToExpect?.[0]?.description || ''}`,
+                        scoringReason: activity.scoringReason,
+                        dayPlanningLogic: activity.dayPlanningLogic
                     };
+                    return enrichedActivity;
                 }
             }
             catch (error) {
@@ -513,7 +533,17 @@ export class ViatorService {
                 currency: product.price?.currency || 'USD'
             },
             tier: this.determineTier(product.price?.amount || 0),
-            category: product.categories?.[0]?.name || 'General',
+            category: product.categories?.[0]?.name
+                ? (VIATOR_CATEGORY_MAP[product.categories[0].name] || this.determineCategory({
+                    name: product.title,
+                    description: product.description,
+                    productCode: product.productCode
+                }))
+                : this.determineCategory({
+                    name: product.title,
+                    description: product.description,
+                    productCode: product.productCode
+                }),
             location: {
                 address: product.location?.address,
                 coordinates: product.location?.coordinates ? {
@@ -566,48 +596,23 @@ export class ViatorService {
         };
     }
     determineCategory(activity) {
-        const description = (activity.description + ' ' + activity.name).toLowerCase();
-        // Try to match based on keywords
-        for (const category of ACTIVITY_CATEGORIES) {
-            if (category.keywords.some(keyword => description.includes(keyword.toLowerCase()))) {
-                return category.name;
-            }
+        if (activity.name.includes('Skip the Line') || activity.name.includes('Fast Track')) {
+            return 'Tickets & Passes';
         }
-        // Default to Cultural if no match found
-        return 'Cultural';
+        const description = (activity.description + ' ' + activity.name).toLowerCase();
+        return determineCategoryFromDescription(description);
     }
     getPreferredTimeSlot(category) {
-        const categoryInfo = ACTIVITY_CATEGORIES.find(c => c.name === category);
-        switch (categoryInfo?.preferredTimeOfDay) {
-            case 'morning':
-                return {
-                    startTime: '09:00',
-                    endTime: '13:00',
-                    duration: categoryInfo.typicalDuration,
-                    category
-                };
-            case 'afternoon':
-                return {
-                    startTime: '14:00',
-                    endTime: '18:00',
-                    duration: categoryInfo.typicalDuration,
-                    category
-                };
-            case 'evening':
-                return {
-                    startTime: '19:00',
-                    endTime: '23:00',
-                    duration: categoryInfo.typicalDuration,
-                    category
-                };
-            default:
-                return {
-                    startTime: '12:00',
-                    endTime: '16:00',
-                    duration: 120,
-                    category
-                };
-        }
+        const startTime = getPreferredTimeSlot(category) === 'morning' ? '09:00' :
+            getPreferredTimeSlot(category) === 'afternoon' ? '14:00' : '19:00';
+        const endTime = getPreferredTimeSlot(category) === 'morning' ? '13:00' :
+            getPreferredTimeSlot(category) === 'afternoon' ? '18:00' : '23:00';
+        return {
+            startTime,
+            endTime,
+            duration: getTypicalDuration(category),
+            category
+        };
     }
     async getAvailabilitySchedule(productCode) {
         try {

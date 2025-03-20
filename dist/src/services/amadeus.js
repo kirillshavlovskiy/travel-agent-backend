@@ -56,6 +56,9 @@ export class AmadeusService {
             lastHour: 0,
             lastRequestTime: Date.now()
         };
+        // Add location cache
+        this.locationCache = new Map();
+        this.CACHE_TTL = 24 * 60 * 60 * 1000; // 24 hours in milliseconds
         const clientId = process.env.AMADEUS_CLIENT_ID;
         const clientSecret = process.env.AMADEUS_CLIENT_SECRET;
         logger.info('Initializing Amadeus service', {
@@ -327,18 +330,40 @@ export class AmadeusService {
                 logger.info('Making Amadeus API call with formatted params:', searchParams);
                 const response = await this.amadeus.shopping.flightOffersSearch.post(JSON.stringify(searchParams));
                 if (!response || !response.body) {
-                    logger.warn('Empty response from Amadeus API');
-                    return [];
+                    logger.error('Empty response from Amadeus API', {
+                        response,
+                        params: searchParams
+                    });
+                    throw new Error('No response received from flight search');
                 }
                 const results = typeof response.body === 'string' ? JSON.parse(response.body) : response.body;
+                if (!results.data || !Array.isArray(results.data)) {
+                    logger.error('Invalid response format from Amadeus API', {
+                        results,
+                        params: searchParams
+                    });
+                    throw new Error('Invalid flight search response format');
+                }
+                if (results.data.length === 0) {
+                    logger.warn('No flights found for the given criteria', {
+                        params: searchParams,
+                        response: results
+                    });
+                    throw new Error('No flights available for the specified criteria');
+                }
                 logger.info('Flight search successful', {
-                    count: results.data?.length || 0,
+                    count: results.data.length,
                     dictionaries: results.dictionaries,
-                    firstResult: results.data?.[0]
+                    firstResult: results.data[0],
+                    priceRange: {
+                        min: Math.min(...results.data.map(f => parseFloat(f.price.total))),
+                        max: Math.max(...results.data.map(f => parseFloat(f.price.total))),
+                        currency: results.data[0].price.currency
+                    }
                 });
                 // Store dictionaries for later use
                 this.lastFlightSearchDictionaries = results.dictionaries || null;
-                return results.data || [];
+                return results.data;
             }
             catch (error) {
                 logger.error('Failed to search flights', {
@@ -362,7 +387,22 @@ export class AmadeusService {
                     amadeusInitialized: !!this.amadeus,
                     hasShoppingAPI: !!this.amadeus?.shopping?.flightOffersSearch?.post
                 });
-                return []; // Return empty array instead of throwing
+                // Throw a more descriptive error
+                if (error instanceof Error) {
+                    if (error.message.includes('No flights available')) {
+                        throw new Error('No flights available for the specified dates and route');
+                    }
+                    else if (error?.response?.statusCode === 401) {
+                        throw new Error('Authentication failed with Amadeus API');
+                    }
+                    else if (error?.response?.statusCode === 429) {
+                        throw new Error('Rate limit exceeded for flight search');
+                    }
+                    else {
+                        throw new Error(`Flight search failed: ${error.message}`);
+                    }
+                }
+                throw new Error('Failed to search for flights');
             }
         });
     }
@@ -484,27 +524,47 @@ export class AmadeusService {
             return 'https://www.google.com/travel/flights';
         }
     }
+    isCacheValid(timestamp) {
+        return Date.now() - timestamp < this.CACHE_TTL;
+    }
     async searchLocations(keyword) {
-        try {
-            logger.info('Searching locations with keyword', { keyword });
-            const response = await this.amadeus.referenceData.locations.get({
+        // Check cache first
+        const cacheKey = keyword.toLowerCase();
+        const cached = this.locationCache.get(cacheKey);
+        if (cached && this.isCacheValid(cached.timestamp)) {
+            logger.info('Returning cached location data', {
                 keyword,
-                subType: 'CITY,AIRPORT',
-                view: 'LIGHT'
+                cacheAge: Math.round((Date.now() - cached.timestamp) / 1000 / 60) + ' minutes'
             });
-            const locations = JSON.parse(response.body);
-            logger.info('Location search successful', {
-                count: locations.data?.length || 0
-            });
-            return locations.data || [];
+            return cached.data;
         }
-        catch (error) {
-            logger.error('Failed to search locations', {
-                error: error instanceof Error ? error.message : 'Unknown error',
-                stack: error instanceof Error ? error.stack : undefined,
-                keyword
-            });
-            throw error;
-        }
+        return this.executeWithRateLimit(async () => {
+            try {
+                logger.info('Searching locations with keyword', { keyword });
+                const response = await this.amadeus.referenceData.locations.get({
+                    keyword,
+                    subType: 'CITY,AIRPORT',
+                    view: 'LIGHT'
+                });
+                const locations = JSON.parse(response.body);
+                logger.info('Location search successful', {
+                    count: locations.data?.length || 0
+                });
+                // Cache the results
+                this.locationCache.set(cacheKey, {
+                    data: locations.data || [],
+                    timestamp: Date.now()
+                });
+                return locations.data || [];
+            }
+            catch (error) {
+                logger.error('Failed to search locations', {
+                    error: error instanceof Error ? error.message : 'Unknown error',
+                    stack: error instanceof Error ? error.stack : undefined,
+                    keyword
+                });
+                throw error;
+            }
+        });
     }
 }

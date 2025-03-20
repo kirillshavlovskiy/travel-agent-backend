@@ -27,7 +27,7 @@ router.post('/', async (req: Request, res: Response) => {
         'Authorization': `Bearer ${process.env.PERPLEXITY_API_KEY}`
       },
       body: JSON.stringify({
-        model: model || 'llama-3.1-sonar-small-128k-online',
+        model: model || 'sonar',
         messages: messages || [
           {
             role: 'system',

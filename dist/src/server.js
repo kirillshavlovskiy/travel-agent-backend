@@ -1,5 +1,9 @@
 import express from 'express';
+import { activitiesRouter } from './routes/activities.js';
+import { authMiddleware } from './middleware/auth.js';
 const app = express();
+// Enable JSON body parsing
+app.use(express.json());
 // Add timeout middleware with longer timeout for budget calculation
 app.use((req, res, next) => {
     // Set a longer timeout (10 minutes) for budget calculation
@@ -27,3 +31,5 @@ app.use((req, res, next) => {
     res.on('timeout', timeoutHandler);
     next();
 });
+// Mount the activities router with auth middleware
+app.use('/api/activities', authMiddleware, activitiesRouter);
