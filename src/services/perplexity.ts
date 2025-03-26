@@ -1486,52 +1486,75 @@ IMPORTANT:
 
   private transformDailyItineraryToActivities(content: any): any {
     try {
-      const activities: Activity[] = [];
-      
-      // Handle daily itinerary format
+      const activities: any[] = [];
+      const seenActivities = new Set<string>();
+
       Object.keys(content).forEach(key => {
         if (key.startsWith('day')) {
           const dayNumber = parseInt(key.replace('day', ''));
           const dayData = content[key];
-          
+
           ['morning', 'afternoon', 'evening'].forEach(timeSlot => {
             if (dayData[timeSlot] && Array.isArray(dayData[timeSlot])) {
               dayData[timeSlot].forEach((activity: any) => {
                 try {
-                  // Extract price information from the activity
-                  const price = {
-                    amount: activity.price?.amount || 
-                           parseFloat(activity.price) || 
-                           0,
-                    currency: activity.price?.currency || 
-                             'USD'
-                  };
+                  // Create a unique key for deduplication
+                  const activityKey = `${activity.activity || activity.name}-${dayNumber}-${timeSlot}`;
+                  if (seenActivities.has(activityKey)) {
+                    return; // Skip duplicate activities
+                  }
+                  seenActivities.add(activityKey);
 
-                  // Log price extraction
-                  logger.debug('[Activity Transform] Extracting price:', {
-                    activityName: activity.activity || activity.name,
-                    rawPrice: activity.price,
-                    extractedPrice: price
-                  });
+                  // Extract price with proper validation
+                  let price = 0;
+                  if (typeof activity.price === 'object' && activity.price !== null) {
+                    price = activity.price.amount || 0;
+                  } else if (typeof activity.price === 'number') {
+                    price = activity.price;
+                  } else if (typeof activity.price === 'string') {
+                    price = activity.price.toLowerCase() === 'free' ? 0 : parseFloat(activity.price) || 0;
+                  }
+
+                  // Determine tier based on price
+                  const tier = price <= 30 ? 'budget' : price <= 100 ? 'medium' : 'premium';
 
                   activities.push({
-                    id: `${dayNumber}-${timeSlot}-${activities.length}`,
-                    name: activity.activity || activity.name || 'Unnamed Activity',
-                    description: activity.tip || '',
-                    duration: parseFloat(activity.duration) || 2,
-                    category: activity.category || 'General',
-                    location: activity.location || '',
+                    activity: activity.activity || activity.name,
+                    name: activity.activity || activity.name,
+                    description: activity.description || '',
+                    duration: activity.duration || 2,
+                    category: activity.category || 'Sightseeing',
+                    location: activity.location || 'City Center',
+                    price: {
+                      amount: price,
+                      currency: activity.price?.currency || 'USD'
+                    },
                     timeSlot,
                     dayNumber,
-                    price,
-                    needsEnrichment: true // Flag to indicate this activity needs Viator enrichment
+                    tier,
+                    bookingDetails: {
+                      provider: 'Viator',
+                      productCode: activity.productCode || '',
+                      referenceUrl: activity.referenceUrl || '',
+                      instantConfirmation: false
+                    },
+                    availability: {
+                      isAvailable: true,
+                      availableTimeSlots: [activity.startTime || '09:00'],
+                      exactStartTimes: [activity.startTime || '09:00'],
+                      realTimeVerification: {
+                        verified: false,
+                        lastChecked: new Date().toISOString()
+                      }
+                    }
                   });
 
                   logger.debug('[Activity Transform] Successfully transformed activity:', {
                     name: activity.activity || activity.name,
                     price,
                     timeSlot,
-                    dayNumber
+                    dayNumber,
+                    tier
                   });
                 } catch (activityError) {
                   logger.warn('[Activity Transform] Failed to transform activity:', {

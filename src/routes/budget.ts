@@ -1,4 +1,4 @@
-import { Router, Request, Response } from 'express';
+import express, { Router, Request, Response } from 'express';
 import { VacationBudgetAgent } from '../services/agents.js';
 import { PrismaClient } from '@prisma/client';
 import { cities } from '../data/cities.js';
@@ -20,11 +20,13 @@ import {
   optimizeSchedule
 } from './activities.js';
 import { DestinationsService } from '../services/destinations.js';
-import { ViatorService } from '../services/viator.js';
+import { ViatorService, ViatorAvailabilityResponse } from '../services/viator.js';
+import * as fs from 'fs';
+import * as path from 'path';
 
 const router = Router();
 const amadeusService = new AmadeusService();
-const agent = new VacationBudgetAgent(amadeusService);
+const agent = new VacationBudgetAgent(new FlightService());
 const prisma = new PrismaClient();
 const destinationsService = DestinationsService.getInstance();
 const viatorService = new ViatorService();
@@ -71,6 +73,89 @@ const AIRCRAFT_CODES: { [key: string]: string } = {
   'B78X': 'Boeing 787-10 Dreamliner',
   '7M9': 'Boeing 737 MAX 9'
 };
+
+interface Activity {
+  id?: string;
+  name: string;
+  duration: number;
+  category: string;
+  timeSlot: 'morning' | 'afternoon' | 'evening';
+  startTime: string;
+  selected: boolean;
+  description: string;
+  location: string;
+  price: {
+    amount: number;
+    currency: string;
+  };
+  rating: number;
+  numberOfReviews: number;
+  bookingDetails: {
+    provider: string;
+    productCode?: string;
+    referenceUrl?: string;
+    instantConfirmation: boolean;
+    cancellationPolicy?: string;
+  };
+  dayNumber: number;
+  enrichmentStatus?: 'success' | 'not_found' | 'failed';
+  date?: string;
+  commentary?: string;
+  itineraryHighlight?: string;
+  availability?: ActivityAvailability;
+  coordinates?: {
+    lat: number;
+    lng: number;
+  };
+  order?: number;
+  highlights?: string[];
+  enrichmentDuration?: number;
+}
+
+interface DailyPlan {
+  dayNumber: number;
+  activities: Activity[];
+  mapData: {
+    locations: Array<{
+      name: string;
+      description?: string;
+      category?: string;
+      address?: string;
+      timeSlot?: string;
+      duration?: number;
+      coordinates?: {
+        lat: number;
+        lng: number;
+      };
+      order?: number;
+    }>;
+  };
+}
+
+interface CategoryTier<T> {
+  references: T[];
+}
+
+interface ActivityReference extends Activity {
+  tier: 'budget' | 'medium' | 'premium';
+}
+
+interface AgentResult {
+  activities?: {
+    budget: CategoryTier<ActivityReference>;
+    medium: CategoryTier<ActivityReference>;
+    premium: CategoryTier<ActivityReference>;
+  } | Activity[];
+  enrichedActivities?: Activity[];
+  dailyPlans?: DailyPlan[];
+  tripSummary?: {
+    overview: string;
+  };
+  organizationLogic?: {
+    overview: string;
+  };
+  dayHighlights?: string[];
+}
 
 interface FlightSegment {
   airline: string;
@@ -178,6 +263,72 @@ interface TransformedRequest {
     accessibility: string[];
     dietaryRestrictions: string[];
   };
+}
+
+// Update the ViatorSearchResult interface
+interface ViatorSearchResult {
+  title: string;
+  productCode: string;
+  description?: string;
+  location?: string;
+  rating?: number;
+  numberOfReviews?: number;
+  highlights?: string[];
+  pricing?: {
+    summary?: {
+      fromPrice?: number;
+    };
+    currency?: string;
+  };
+}
+
+// Update the RealTimeCheck interface
+interface RealTimeCheck {
+  available: boolean;
+  schedule: {
+    availableTimeSlots: string[];
+    openingHours?: string[];
+  };
+  pricing?: {
+    fromPrice?: number;
+    currency?: string;
+  };
+  operatingDays?: string[];
+  timeSlots?: string[];
+  unavailableDatesCount?: number;
+  source?: string;
+  bookableItems?: number;
+}
+
+// Add these type declarations
+interface TimeSlots {
+  morning: string[];
+  afternoon: string[];
+  evening: string[];
+}
+
+interface ActivityAvailability {
+  isAvailable: boolean;
+  availableTimeSlots: ('morning' | 'afternoon' | 'evening')[];
+  exactStartTimes: string[];
+  timesByCategory: TimeSlots;
+  realTimeVerification: {
+    verified: boolean;
+    exactStartTimes: string[];
+    lastChecked: string;
+    pricing?: any;
+  };
+  operatingHours?: string;
+}
+
+// Add at the beginning of the file, after imports
+const usedProductCodes = new Set<string>();
+
+// Add function to reset product codes at the start of each request
+function resetProductCodes() {
+  usedProductCodes.clear();
+  viatorService.resetProductCodes(); // Reset the service's tracking as well
+  logger.info('[Budget] Reset product code tracking');
 }
 
 // Helper function to transform budget request
@@ -309,7 +460,7 @@ const safelyCallHelper = (fn: Function, args: any[], fnName: string, defaultValu
   }
 };
 
-// Add validation for enriched activities
+// Update the validateEnrichedActivity function
 function validateEnrichedActivity(activity: Activity): boolean {
   const hasValidBookingDetails = activity.bookingDetails && 
     activity.bookingDetails.productCode &&
@@ -317,14 +468,14 @@ function validateEnrichedActivity(activity: Activity): boolean {
 
   const hasValidAvailability = activity.availability &&
     Array.isArray(activity.availability.availableTimeSlots) &&
-    activity.availability.realTimeVerification?.verified;
+    activity.availability.realTimeVerification?.verified === true;
 
   const hasValidPrice = activity.price &&
     typeof activity.price.amount === 'number' &&
     activity.price.amount > 0 &&
-    activity.price.currency;
+    typeof activity.price.currency === 'string';
 
-  return hasValidBookingDetails && hasValidAvailability && hasValidPrice;
+  return Boolean(hasValidBookingDetails && hasValidAvailability && hasValidPrice);
 }
 
 // Add logging for activity validation
@@ -353,8 +504,42 @@ function logActivityValidation(activity: Activity): void {
   });
 }
 
+// Update the availability transformation
+const transformAvailability = (realTimeCheck: RealTimeCheck): ActivityAvailability => {
+  const timesByCategory: TimeSlots = {
+    morning: [],
+    afternoon: [],
+    evening: []
+  };
+
+  const availableTimeSlots = realTimeCheck.schedule.availableTimeSlots.map(time => {
+    const hour = parseInt(time.split(':')[0]);
+    const slot = hour >= 6 && hour < 12 ? 'morning' :
+      hour >= 12 && hour < 17 ? 'afternoon' : 'evening';
+    timesByCategory[slot].push(time);
+    return slot;
+  });
+
+  return {
+    isAvailable: realTimeCheck.available,
+    availableTimeSlots: Array.from(new Set(availableTimeSlots)) as ('morning' | 'afternoon' | 'evening')[],
+    exactStartTimes: realTimeCheck.schedule.availableTimeSlots,
+    timesByCategory,
+    realTimeVerification: {
+      verified: true,
+      exactStartTimes: realTimeCheck.schedule.availableTimeSlots,
+      lastChecked: new Date().toISOString(),
+      pricing: realTimeCheck.pricing
+    },
+    operatingHours: realTimeCheck.schedule.openingHours?.join(', ')
+  };
+};
+
 // Calculate budget endpoint
 router.post('/calculate', async (req: Request, res: Response) => {
+  // Reset product codes at the start of each request
+  resetProductCodes();
+  
   // Increase timeout for the entire request
   req.setTimeout(300000);
   res.setTimeout(300000);
@@ -370,10 +555,6 @@ router.post('/calculate', async (req: Request, res: Response) => {
     const transformedRequest = transformBudgetRequest(req.body);
     logger.info('[Budget Route] Transformed request:', transformedRequest);
 
-    // Initialize services
-    const agent = new VacationBudgetAgent(new FlightService());
-    const viatorService = new ViatorService();
-
     // Create a timeout promise
     const timeoutPromise = new Promise((_, reject) => {
       setTimeout(() => reject(new Error('Budget calculation timed out')), 290000);
@@ -381,9 +562,9 @@ router.post('/calculate', async (req: Request, res: Response) => {
 
     const result = await Promise.race([
       (async () => {
-        let agentResult;
-
         try {
+          let agentResult: AgentResult;
+
           // Get activities from the budget agent
           agentResult = await agent.handleTravelRequest({
             departureLocation: transformedRequest.departureLocation,
@@ -394,18 +575,15 @@ router.post('/calculate', async (req: Request, res: Response) => {
             budgetLimit: transformedRequest.budget || 0,
             flightData: transformedRequest.flightData,
             preferences: transformedRequest.preferences
-          });
+          }) as AgentResult;
 
           logger.info('[Budget Route] Received agent result:', {
             hasActivities: !!agentResult?.activities,
             hasEnrichedActivities: !!agentResult?.enrichedActivities,
-            activitiesCount: agentResult?.activities?.length || 0,
+            activitiesCount: Array.isArray(agentResult?.activities) ? agentResult.activities.length : 
+              agentResult?.activities ? Object.values(agentResult.activities).reduce((acc, tier) => acc + (tier.references?.length || 0), 0) : 0,
             enrichedCount: agentResult?.enrichedActivities?.length || 0
           });
-            } catch (error) {
-          logger.error('[Budget Route] Error in budget agent:', error);
-          throw error;
-        }
 
         // Check if agent result is valid before proceeding
         if (!agentResult || (!agentResult.activities && !agentResult.enrichedActivities)) {
@@ -418,25 +596,102 @@ router.post('/calculate', async (req: Request, res: Response) => {
         }
 
         // Use enriched activities if available, otherwise fall back to regular activities
-        const activitiesArray = agentResult.enrichedActivities || 
+          const activitiesArray: Activity[] = agentResult.enrichedActivities || 
           (Array.isArray(agentResult.activities) ? agentResult.activities : 
             agentResult.activities ? Object.values(agentResult.activities).flatMap(tier => tier.references || []) : []);
 
-        if (!activitiesArray || !activitiesArray.length) {
-          logger.error('[Budget Route] No activities found in agent result');
+          // Format existing activities properly before passing them
+          const formattedActivities: Activity[] = activitiesArray.map(activity => {
+            const base = { ...activity };
+            const duration = typeof base.duration === 'string' ? 
+              parseInt((base.duration as string).replace(/[^0-9]/g, '')) : 
+              (typeof base.duration === 'number' ? base.duration : 120);
+            
           return {
-            success: false,
-            error: 'No activities generated',
-            timestamp: new Date().toISOString()
-          };
-        }
+              ...base,
+              name: base.name || 'Explore Local Attractions',
+              duration,
+              category: base.category || 'Sightseeing',
+              timeSlot: base.timeSlot || 'morning',
+              startTime: base.startTime || '09:00',
+              selected: typeof base.selected === 'boolean' ? base.selected : false,
+              description: base.description || 'Discover the local culture and attractions in this vibrant city.',
+              location: base.location || 'City Center',
+              price: base.price || {
+                amount: 0,
+                currency: 'USD'
+              },
+              rating: base.rating || 4.5,
+              numberOfReviews: base.numberOfReviews || 100,
+              bookingDetails: base.bookingDetails || {
+                provider: 'Local',
+                instantConfirmation: true,
+                cancellationPolicy: 'Flexible'
+              },
+              dayNumber: base.dayNumber || 1
+            };
+          });
 
-        // Extract destination info for Viator enrichment
-        const destination = transformedRequest.destinations[0];
-        const cityName = destination.label.split(',')[0].trim();
+          // Validate and deduplicate activities using a more specific key
+          const uniqueActivities = formattedActivities.reduce((acc, activity) => {
+            const key = `${activity.name}-${activity.dayNumber}-${activity.timeSlot}-${activity.bookingDetails?.productCode || 'local'}-${activity.location}-${activity.category}-${activity.price?.amount}`;
+            if (!acc.has(key)) {
+              acc.set(key, activity);
+            } else {
+              logger.warn('[Budget] Duplicate activity detected:', {
+                activityName: activity.name,
+                existingKey: key,
+                existingActivity: acc.get(key),
+                newActivity: activity
+              });
+            }
+            return acc;
+          }, new Map<string, Activity>());
+
+          const deduplicatedActivities = Array.from(uniqueActivities.values());
+
+          logger.info('[Budget] Activities formatting completed', {
+            originalCount: activitiesArray.length,
+            formattedCount: deduplicatedActivities.length,
+            firstActivity: deduplicatedActivities[0] ? {
+              name: deduplicatedActivities[0].name,
+              duration: deduplicatedActivities[0].duration,
+              timeSlot: deduplicatedActivities[0].timeSlot,
+              category: deduplicatedActivities[0].category,
+              price: deduplicatedActivities[0].price,
+              bookingDetails: deduplicatedActivities[0].bookingDetails ? {
+                provider: deduplicatedActivities[0].bookingDetails.provider,
+                productCode: deduplicatedActivities[0].bookingDetails.productCode
+              } : undefined
+            } : null,
+            hasEnrichedActivities: !!agentResult.enrichedActivities,
+            enrichedActivitiesCount: agentResult.enrichedActivities?.length
+          });
+
+          // If we have valid activities from the budget agent, use them directly
+          if (deduplicatedActivities.length > 0) {
+            logger.info('[Budget] Using activities from budget agent, skipping activities generation');
+            // Create themed activities based on preferences
+            const destination = transformedRequest.destinations[0];
+            const cityName = destination.label.split(',')[0].trim();
+            const themedActivities: Activity[] = deduplicatedActivities.map((activity, index) => {
+              const timeSlot = index % 3 === 0 ? 'morning' :
+                index % 3 === 1 ? 'afternoon' : 'evening';
+              const category = req.body.preferences?.interests?.[index % req.body.preferences.interests.length] || 'Culture';
+              return {
+                ...activity,
+                name: activity.name || `${category} Experience in ${cityName}`,
+                timeSlot,
+                category,
+                description: activity.description || `Enjoy a ${req.body.preferences?.travelStyle || 'luxury'} ${category.toLowerCase()} experience in ${cityName}.`,
+                location: cityName,
+                commentary: `This activity is perfect for travelers interested in ${category.toLowerCase()} with a ${req.body.preferences?.pacePreference || 'moderate'} pace.`,
+                itineraryHighlight: `A ${timeSlot} activity focusing on ${category.toLowerCase()} aspects of the city.`
+              };
+            });
 
         // Get destination ID from Viator
-        let destinationId;
+            let destinationId: string | undefined;
         try {
           destinationId = await viatorService.getDestinationId(cityName);
           logger.info('[Budget] Found Viator destination ID:', {
@@ -452,140 +707,125 @@ router.post('/calculate', async (req: Request, res: Response) => {
 
         // Enrich activities with Viator data
         const enrichedActivities = await Promise.all(
-          activitiesArray.map(async (activity) => {
-            try {
-              logger.info('[Budget] Enriching activity:', {
-                name: activity.name,
-                destination: cityName,
+              themedActivities.map(async (activity) => {
+                try {
+                  logger.info('[Budget] Starting activity enrichment:', {
+                    activityName: activity.name,
+                    dayNumber: activity.dayNumber,
+                    timeSlot: activity.timeSlot,
+                    category: activity.category,
+                    location: cityName,
                 date: transformedRequest.startDate,
-                stage: 'start'
+                    stage: 'enrichment_start'
               });
 
-              // Search for matching Viator activities
+                  // Search for matching activities
               const searchResults = await viatorService.searchActivity(
                 activity.name,
                 destinationId,
-                transformedRequest.startDate,
-                transformedRequest.endDate
+                    transformedRequest.startDate
               );
 
-              if (!searchResults || searchResults.length === 0) {
-                logger.warn('[Budget] No Viator activities found for:', {
+                  if (!searchResults?.length) {
+                    logger.warn('[Budget] No search results found for activity:', {
                   name: activity.name,
-                  destination: cityName,
-                  stage: 'no_results'
-                });
-          return {
-              ...activity,
-                  enrichmentStatus: 'not_found',
-                  location: cityName,
-                  date: transformedRequest.startDate
-                };
-              }
+                      location: cityName
+                    });
+                    return activity;
+                  }
 
-              // Get the best match using string similarity
-              const bestMatch = searchResults.reduce((best, current) => {
-                const bestScore = viatorService.stringSimilarity(activity.name.toLowerCase(), best.title.toLowerCase());
-                const currentScore = viatorService.stringSimilarity(activity.name.toLowerCase(), current.title.toLowerCase());
-                return currentScore > bestScore ? current : best;
-              }, searchResults[0]);
+                  // Find best unused match
+                  let bestMatch = null;
+                  for (const result of searchResults) {
+                    if (!usedProductCodes.has(result.productCode)) {
+                      bestMatch = result;
+                      break;
+                    }
+                  }
 
-              logger.info('[Budget] Found matching activity:', {
-                originalName: activity.name,
-                matchedName: bestMatch.title,
-                productCode: bestMatch.productCode,
-                stage: 'match_found'
-              });
+                  if (!bestMatch) {
+                    logger.warn('[Budget] All matching product codes already used:', {
+                      activity: activity.name,
+                      usedCodes: Array.from(usedProductCodes)
+                    });
+                    return activity;
+                  }
 
-              // Get real-time availability
-              let realTimeCheck;
-              try {
-                realTimeCheck = await viatorService.checkRealTimeAvailability(
-                  bestMatch.productCode,
-                  transformedRequest.startDate
-                );
-                
-                logger.info('[Budget] Real-time availability checked:', {
-                  name: activity.name,
+                  // Track the product code
+                  usedProductCodes.add(bestMatch.productCode);
+                  logger.info('[Budget] Reserved product code:', {
                   productCode: bestMatch.productCode,
-                  isAvailable: realTimeCheck?.available,
-                  stage: 'availability_checked'
-                });
-              } catch (error) {
-                logger.warn('[Budget] Failed to get real-time availability:', {
-                  name: activity.name,
-                  productCode: bestMatch.productCode,
-                  error: error instanceof Error ? error.message : 'Unknown error'
-                });
-              }
+                    activity: activity.name
+                  });
 
-              // Get detailed product information
+                  // Enrich the activity
               const enriched = await viatorService.enrichActivityDetails({
                 ...activity,
-                name: activity.name,
-                timeSlot: activity.timeSlot,
-                dayNumber: activity.dayNumber,
-                location: cityName,
-                date: transformedRequest.startDate,
+                    name: bestMatch.title,
+                    description: bestMatch.description,
                 bookingDetails: {
                   provider: 'Viator',
                   productCode: bestMatch.productCode,
-                  referenceUrl: viatorService.constructBookingUrl(bestMatch)
-                },
-                price: {
-                  amount: realTimeCheck?.pricing?.fromPrice || bestMatch.pricing?.summary?.fromPrice || activity.price?.amount || 0,
-                  currency: realTimeCheck?.pricing?.currency || bestMatch.pricing?.currency || 'USD'
-                },
-                availability: realTimeCheck ? {
-                  isAvailable: realTimeCheck.available,
-                  availableTimeSlots: realTimeCheck.schedule.availableTimeSlots.map(time => {
-                    const hour = parseInt(time.split(':')[0]);
-                    if (hour >= 6 && hour < 12) return 'morning';
-                    if (hour >= 12 && hour < 17) return 'afternoon';
-                    return 'evening';
-                  }),
-                  exactStartTimes: realTimeCheck.schedule.availableTimeSlots,
-                  realTimeVerification: {
-                    verified: true,
-                    exactStartTimes: realTimeCheck.schedule.availableTimeSlots,
-                    lastChecked: new Date().toISOString(),
-                    pricing: realTimeCheck.pricing
-                  },
-                  operatingHours: realTimeCheck.schedule.openingHours?.join(', ')
-                } : undefined
-              });
+                      referenceUrl: `https://www.viator.com/tours/${cityName.replace(/\s+/g, '-')}/${bestMatch.productCode}`
+                    }
+                  });
 
-              logger.info('[Budget] Successfully enriched activity:', {
-                name: activity.name,
-                productCode: bestMatch.productCode,
-                stage: 'complete'
-              });
-
-              // Return enriched activity with fallback to original data
-          return {
-                ...activity,
-                ...enriched,
-                name: activity.name,
-                timeSlot: activity.timeSlot,
-                dayNumber: activity.dayNumber,
-                location: cityName,
-                date: transformedRequest.startDate,
-                enrichmentStatus: enriched.bookingDetails?.productCode ? 'success' : 'not_found'
-              };
+                  return enriched || activity;
         } catch (error) {
-              logger.warn('[Budget] Failed to enrich activity with Viator details:', {
-                name: activity.name,
+                  logger.error('[Budget] Failed to enrich activity:', {
+                    activity: activity.name,
                 error: error instanceof Error ? error.message : 'Unknown error'
               });
-              return {
-                ...activity,
-                location: cityName,
-                date: transformedRequest.startDate,
-                enrichmentStatus: 'failed'
-              };
+                  return activity;
             }
           })
         );
+
+            // Add validation for product codes
+            const productCodeMap = new Map<string, string>();
+            const duplicates: Array<{code: string, activities: string[]}> = [];
+
+            enrichedActivities.forEach(activity => {
+              const productCode = activity.bookingDetails?.productCode;
+              if (productCode) {
+                if (productCodeMap.has(productCode)) {
+                  duplicates.push({
+                    code: productCode,
+                    activities: [productCodeMap.get(productCode)!, activity.name]
+                  });
+                } else {
+                  productCodeMap.set(productCode, activity.name);
+                }
+              }
+            });
+
+            if (duplicates.length > 0) {
+              logger.error('[Budget] Duplicate product codes detected:', {
+                duplicates,
+                totalActivities: enrichedActivities.length,
+                uniqueProductCodes: productCodeMap.size
+              });
+            }
+
+            // Add summary logging for all activities
+            logger.info('[Budget] Activity enrichment summary:', {
+              totalActivities: enrichedActivities.length,
+              enrichmentStats: {
+                success: enrichedActivities.filter(a => a.enrichmentStatus === 'success').length,
+                notFound: enrichedActivities.filter(a => a.enrichmentStatus === 'not_found').length,
+                failed: enrichedActivities.filter(a => a.enrichmentStatus === 'failed').length
+              },
+              priceRange: {
+                min: Math.min(...enrichedActivities.map(a => a.price?.amount || 0)),
+                max: Math.max(...enrichedActivities.map(a => a.price?.amount || 0)),
+                average: enrichedActivities.reduce((acc, a) => acc + (a.price?.amount || 0), 0) / enrichedActivities.length
+              },
+              categoryDistribution: enrichedActivities.reduce((acc, a) => {
+                acc[a.category] = (acc[a.category] || 0) + 1;
+                return acc;
+              }, {} as Record<string, number>),
+              stage: 'enrichment_summary'
+            });
 
         // Update daily plans with enriched activities
         const updatedDailyPlans = agentResult.dailyPlans?.map((plan) => ({
@@ -597,6 +837,33 @@ router.post('/calculate', async (req: Request, res: Response) => {
             return enriched || activity;
           }) || []
         })) || [];
+
+        // Create optimized schedule using the optimizeSchedule function
+        const optimizedSchedule = await optimizeSchedule(
+          enrichedActivities.map(activity => ({
+            ...activity,
+            id: activity.bookingDetails?.productCode || `local-${activity.name}-${activity.dayNumber}`,
+            location: cityName
+          })),
+          transformedRequest.days,
+          cityName,
+          req.body.preferences
+        );
+
+        // Log the optimized plan to a file
+        const logEntry = {
+          timestamp: new Date().toISOString(),
+          destination: cityName,
+          days: transformedRequest.days,
+          input_activities: enrichedActivities.length,
+          optimized_schedule: optimizedSchedule
+        };
+
+        const logDir = path.join(process.cwd(), 'logs');
+        const logFile = path.join(logDir, 'optimized_plan.log');
+
+        fs.appendFileSync(logFile, JSON.stringify(logEntry, null, 2) + '\n');
+        logger.info(`Optimized plan logged to ${logFile}`);
 
         // Return the final result
           return {
@@ -611,82 +878,7 @@ router.post('/calculate', async (req: Request, res: Response) => {
             budgetLimit: transformedRequest.budget
           },
           activities: enrichedActivities,
-          dailyPlans: updatedDailyPlans.map(day => ({
-            ...day,
-            activities: day.mapData.locations.map(location => {
-              // Find matching enriched activity
-              const enrichedActivity = enrichedActivities.find(a => 
-                a.name === location.name || 
-                a.name.toLowerCase().includes(location.name.toLowerCase()) ||
-                location.name.toLowerCase().includes(a.name.toLowerCase())
-              );
-
-              if (enrichedActivity) {
-                return {
-                  ...enrichedActivity,
-                  name: location.name,
-                  description: location.description || enrichedActivity.description,
-                  category: location.category || enrichedActivity.category,
-                  location: location.address || enrichedActivity.location,
-                  timeSlot: location.timeSlot || enrichedActivity.timeSlot,
-                  duration: location.duration || enrichedActivity.duration,
-                  coordinates: location.coordinates,
-                  order: location.order,
-                  availability: enrichedActivity.availability || {
-                    isAvailable: true,
-                    availableTimeSlots: [location.timeSlot],
-                    exactStartTimes: [],
-                    timesByCategory: {
-                      morning: [],
-                      afternoon: [],
-                      evening: []
-                    },
-                    realTimeVerification: {
-                      verified: false,
-                      exactStartTimes: [],
-                      lastChecked: new Date().toISOString()
-                    }
-                  }
-                };
-              }
-
-              // If no match found, try to find a similar activity to get availability data
-              const similarActivity = enrichedActivities.find(a => 
-                a.name.toLowerCase().includes(location.name.toLowerCase()) ||
-                location.name.toLowerCase().includes(a.name.toLowerCase())
-              );
-
-              // Return location data with availability from similar activity if found
-              return {
-                name: location.name,
-                description: location.description,
-                category: location.category,
-                location: location.address,
-                timeSlot: location.timeSlot,
-                duration: location.duration,
-                coordinates: location.coordinates,
-                order: location.order,
-                dayNumber: day.dayNumber,
-                date: transformedRequest.startDate,
-                price: { amount: 0, currency: transformedRequest.currency },
-                availability: similarActivity?.availability || {
-                  isAvailable: true,
-                  availableTimeSlots: [location.timeSlot],
-                  exactStartTimes: [],
-                  timesByCategory: {
-                    morning: [],
-                    afternoon: [],
-                    evening: []
-                  },
-                  realTimeVerification: {
-                    verified: false,
-                    exactStartTimes: [],
-                    lastChecked: new Date().toISOString()
-                  }
-                }
-              };
-            })
-          })),
+              dailyPlans: updatedDailyPlans,
           tripOverview: agentResult.tripSummary?.overview || 'Trip overview not available',
           activityFitNotes: agentResult.organizationLogic?.overview || 'Activity fit notes not available',
           schedule: updatedDailyPlans.map(day => ({
@@ -695,32 +887,16 @@ router.post('/calculate', async (req: Request, res: Response) => {
             mainArea: safelyCallHelper(determineMainArea, [day.activities], 'determineMainArea', 'City Center'),
             commentary: safelyCallHelper(generateDayCommentary, [day.activities, transformedRequest.preferences, day.dayNumber], 'generateDayCommentary', ''),
             highlights: safelyCallHelper(generateDayHighlights, [day.activities, transformedRequest.preferences], 'generateDayHighlights', []),
-            activities: enrichedActivities.filter(activity => activity.dayNumber === day.dayNumber).map(activity => ({
-              ...activity,
-              timeSlot: activity.timeSlot,
-              startTime: activity.startTime || activity.availability?.exactStartTimes?.[0],
-              availability: activity.availability || {
-                isAvailable: true,
-                availableTimeSlots: [activity.timeSlot],
-                exactStartTimes: activity.availability?.exactStartTimes || [],
-                timesByCategory: {
-                  morning: activity.availability?.timesByCategory?.morning || [],
-                  afternoon: activity.availability?.timesByCategory?.afternoon || [],
-                  evening: activity.availability?.timesByCategory?.evening || []
-                },
-                realTimeVerification: {
-                  verified: activity.availability?.realTimeVerification?.verified || false,
-                  exactStartTimes: activity.availability?.realTimeVerification?.exactStartTimes || [],
-                  lastChecked: activity.availability?.realTimeVerification?.lastChecked || new Date().toISOString()
-                }
-              }
-            })).sort((a, b) => {
-              // Sort by time slot first
-              const timeSlotOrder = { morning: 0, afternoon: 1, evening: 2 };
+                activities: enrichedActivities.filter(activity => activity.dayNumber === day.dayNumber)
+                  .sort((a, b) => {
+                    const timeSlotOrder: Record<'morning' | 'afternoon' | 'evening', number> = { 
+                      morning: 0, 
+                      afternoon: 1, 
+                      evening: 2 
+                    };
               const timeSlotDiff = timeSlotOrder[a.timeSlot] - timeSlotOrder[b.timeSlot];
               if (timeSlotDiff !== 0) return timeSlotDiff;
               
-              // Then by start time if available
               if (a.startTime && b.startTime) {
                 const [aHour, aMin] = a.startTime.split(':').map(Number);
                 const [bHour, bMin] = b.startTime.split(':').map(Number);
@@ -756,6 +932,11 @@ router.post('/calculate', async (req: Request, res: Response) => {
             }
           }
         };
+          }
+        } catch (error) {
+          logger.error('[Budget Route] Error in budget agent:', error);
+          throw error;
+        }
       })(),
       timeoutPromise
     ]);

@@ -784,6 +784,8 @@ export class ViatorService {
   private isInitialized: boolean = false;
   private destinationsCache: Map<string, ViatorDestination> = new Map();
   private lastCacheUpdate: number | null = null;
+  // Add product code tracking
+  private usedProductCodes: Map<string, string> = new Map(); // productCode -> activityName
 
   constructor(apiKey?: string) {
     this.apiKey = apiKey || process.env.VIATOR_API_KEY || '';
@@ -1134,57 +1136,30 @@ export class ViatorService {
   ): Promise<ViatorProduct[]> {
     this.ensureInitialized();
     try {
-      // Ensure dates are in the correct format and handle future dates
-      const searchStartDate = startDate || new Date().toISOString().split('T')[0];
-      const searchEndDate = endDate || new Date(new Date(searchStartDate).getTime() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
-
-      // Validate dates are not too far in the future (Viator typically allows up to 2 years)
-      const maxDate = new Date();
-      maxDate.setFullYear(maxDate.getFullYear() + 2);
-      const maxDateStr = maxDate.toISOString().split('T')[0];
-
-      if (searchStartDate > maxDateStr || searchEndDate > maxDateStr) {
-        logger.warn('[Viator] Search dates too far in future, adjusting to max allowed:', {
-          originalStart: searchStartDate,
-          originalEnd: searchEndDate,
-          maxAllowed: maxDateStr
-        });
-      }
-
-      // Validate destinationId is a number
-      if (!destinationId || isNaN(Number(destinationId))) {
-        logger.error('[Viator] Invalid destination ID:', {
-          destinationId,
-          query,
-          timestamp: new Date().toISOString()
-        });
-        throw new Error(`Invalid destination ID: ${destinationId}. Must be a numeric ID.`);
-      }
+      logger.info('[Viator] Searching for activity:', {
+        query,
+        destinationId,
+        startDate,
+        endDate
+      });
 
       const searchRequest = {
         text: query,
         filtering: {
           destination: destinationId
         },
-        startDate: searchStartDate,
-        endDate: searchEndDate,
+        startDate: startDate || new Date().toISOString().split('T')[0],
+        endDate: endDate || new Date(new Date(startDate || Date.now()).getTime() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
         currency: 'USD',
         pagination: {
           offset: 0,
-          limit: 10
+          limit: 20 // Increased from 10 to get more options
         },
         sorting: {
           sortBy: 'RELEVANCE',
           sortOrder: 'DESC'
         }
       };
-
-      logger.debug('[Viator] Searching for activity:', {
-        query,
-        destinationId,
-        request: searchRequest,
-        timestamp: new Date().toISOString()
-      });
 
       const response = await fetch(`${this.baseUrl}/products/search`, {
         method: 'POST',
@@ -1198,77 +1173,32 @@ export class ViatorService {
       });
 
       if (!response.ok) {
-        const errorText = await response.text();
-        logger.error('[Viator] Search API error:', {
-          query,
-          status: response.status,
-          error: errorText,
-          headers: Object.fromEntries(response.headers.entries()),
-          timestamp: new Date().toISOString()
-        });
-        throw new Error(`Viator API error: ${response.status} - ${errorText}`);
+        throw new Error(`Viator API error: ${response.status}`);
       }
 
-      const rawResponse = await response.text();
-      logger.debug('[Viator] Raw search response:', {
-        query,
-        response: rawResponse,
-        timestamp: new Date().toISOString()
-      });
-
-      let data;
-      try {
-        data = JSON.parse(rawResponse);
-        
-        // Add detailed logging of parsed data
-        logger.debug('[Viator] Parsed search response:', {
-          query,
-          hasProducts: !!data?.products,
-          productsCount: data?.products?.length,
-          hasDataProducts: !!data?.data?.products,
-          dataProductsCount: data?.data?.products?.items?.length,
-          responseStructure: {
-            topLevel: Object.keys(data),
-            productsStructure: data?.products ? 'Array' : (data?.data?.products ? 'Nested Object' : 'Unknown'),
-            sampleProduct: data?.products?.[0] || data?.data?.products?.items?.[0]
-          },
-          timestamp: new Date().toISOString()
-        });
-      } catch (parseError) {
-        logger.error('[Viator] Failed to parse search response:', {
-          error: parseError instanceof Error ? parseError.message : 'Unknown error',
-          rawResponse: rawResponse.slice(0, 1000)
-        });
-        throw new Error('Failed to parse search response');
-      }
-
-      // Extract products from the response - updated to handle both response structures
+      const data = await response.json();
       const products = Array.isArray(data?.products) ? data.products :
                       Array.isArray(data?.data?.products?.items) ? data.data.products.items : [];
 
+      // Filter out products with already used product codes
+      const unusedProducts = products.filter(product => 
+        !this.usedProductCodes.has(product.productCode)
+      );
+
       logger.info('[Viator] Search results:', {
         query,
-        totalResults: data?.products?.length || data?.data?.products?.totalCount || 0,
-        returnedResults: products.length,
-        destinationId,
-        dateRange: `${searchStartDate} to ${searchEndDate}`,
-        timestamp: new Date().toISOString(),
-        firstProduct: products[0] ? {
-          title: products[0].title,
-          productCode: products[0].productCode,
-          price: products[0].pricing?.summary?.fromPrice
-        } : null
+        totalResults: products.length,
+        unusedResults: unusedProducts.length,
+        usedProductCodes: Array.from(this.usedProductCodes.keys())
       });
 
-      return products;
+      return unusedProducts;
     } catch (error) {
       logger.error('[Viator] Error searching for activity:', {
         query,
-        error: error instanceof Error ? error.message : 'Unknown error',
-        stack: error instanceof Error ? error.stack : undefined,
-        timestamp: new Date().toISOString()
+        error: error instanceof Error ? error.message : 'Unknown error'
       });
-      throw error;
+      return [];
     }
   }
 
@@ -2130,20 +2060,49 @@ export class ViatorService {
         };
       }
 
-      // Find best matching activity
-      const bestMatch = searchResults.reduce((best, current) => {
-        const bestScore = this.stringSimilarity(activity.name.toLowerCase(), best.title.toLowerCase());
-        const currentScore = this.stringSimilarity(activity.name.toLowerCase(), current.title.toLowerCase());
-        return currentScore > bestScore ? current : best;
-      }, searchResults[0]);
+      // Find best unused match
+      let bestMatch = null;
+      let bestScore = 0;
 
-      const similarityScore = this.stringSimilarity(activity.name.toLowerCase(), bestMatch.title.toLowerCase());
-      logger.info('[Viator] Best match found', {
-        originalName: activity.name,
-        matchedName: bestMatch.title,
-        similarityScore,
+      for (const result of searchResults) {
+        // Skip if product code already used
+        if (this.usedProductCodes.has(result.productCode)) {
+          logger.debug('[Viator] Skipping used product code:', {
+            productCode: result.productCode,
+            usedFor: this.usedProductCodes.get(result.productCode)
+          });
+          continue;
+        }
+
+        const score = this.stringSimilarity(
+          activity.name.toLowerCase(),
+          result.title.toLowerCase()
+        );
+
+        if (score > bestScore) {
+          bestScore = score;
+          bestMatch = result;
+        }
+      }
+
+      if (!bestMatch) {
+        logger.warn('[Viator] No unused product codes available', {
+          activity: activity.name,
+          usedCodes: Array.from(this.usedProductCodes.entries())
+        });
+        return {
+          ...activity,
+          enrichmentStatus: 'failed' as const,
+          enrichmentError: 'No unused product codes available'
+        };
+      }
+
+      // Track the used product code
+      this.usedProductCodes.set(bestMatch.productCode, activity.name);
+      logger.info('[Viator] Reserved product code:', {
         productCode: bestMatch.productCode,
-        stage: 'match_found'
+        activity: activity.name,
+        similarityScore: bestScore
       });
 
       // Get availability schedule
@@ -2163,54 +2122,6 @@ export class ViatorService {
           activity: activity.name,
           productCode: bestMatch.productCode,
           error: error instanceof Error ? error.message : 'Unknown error'
-        });
-      }
-
-      // Find matching time slot from availability
-      let startTimeFromSchedule = null;
-      let adjustedTimeSlot = activity.timeSlot;
-      let availableTimesByCategory = {
-        morning: [] as string[],
-        afternoon: [] as string[],
-        evening: [] as string[]
-      };
-
-      if (availabilitySchedule?.extractedTimeSlots?.length > 0) {
-        const availableTimes = availabilitySchedule.extractedTimeSlots;
-        
-        // Categorize available times
-        availableTimesByCategory = {
-          morning: availableTimes.filter(time => {
-            const hour = parseInt(time.split(':')[0]);
-            return hour >= 6 && hour < 12;
-          }),
-          afternoon: availableTimes.filter(time => {
-            const hour = parseInt(time.split(':')[0]);
-            return hour >= 12 && hour < 17;
-          }),
-          evening: availableTimes.filter(time => {
-            const hour = parseInt(time.split(':')[0]);
-            return hour >= 17;
-          })
-        };
-
-        logger.info('[Viator] Categorized available times', {
-          activity: activity.name,
-          availableTimesByCategory,
-          totalTimes: availableTimes.length
-        });
-        
-        // Use the updated findBestTimeForSlot function
-        const { time, adjustedSlot } = this.findBestTimeForSlot(availableTimes, activity.timeSlot);
-        startTimeFromSchedule = time;
-        adjustedTimeSlot = adjustedSlot;
-        
-        logger.info('[Viator] Selected time for activity', {
-          name: activity.name,
-          originalTimeSlot: activity.timeSlot,
-          adjustedTimeSlot: adjustedSlot,
-          selectedTime: time,
-          availableTimes: availableTimes
         });
       }
 
@@ -2249,8 +2160,8 @@ export class ViatorService {
         rating: bestMatch.reviews?.combinedAverageRating,
         numberOfReviews: bestMatch.reviews?.totalReviews,
         highlights: bestMatch.highlights || [],
-        startTime: startTimeFromSchedule,
-        timeSlot: adjustedTimeSlot,
+        startTime: activity.startTime,
+        timeSlot: activity.timeSlot,
         bookingDetails: {
           provider: 'Viator',
           productCode: bestMatch.productCode,
@@ -2266,11 +2177,24 @@ export class ViatorService {
         enrichmentDuration: Date.now() - startTime,
         availability: {
           isAvailable: !!(availabilitySchedule?.extractedTimeSlots?.length),
-          availableTimeSlots: Object.keys(availableTimesByCategory).filter(slot => 
-            availableTimesByCategory[slot as keyof typeof availableTimesByCategory].length > 0
+          availableTimeSlots: Object.keys(availabilitySchedule?.extractedOperatingHours || {}).filter(slot => 
+            availabilitySchedule?.extractedOperatingHours?.[slot]?.length > 0
           ) as ('morning' | 'afternoon' | 'evening')[],
           exactStartTimes: availabilitySchedule?.extractedTimeSlots || [],
-          timesByCategory: availableTimesByCategory,
+          timesByCategory: {
+            morning: availabilitySchedule?.extractedTimeSlots?.filter(time => {
+              const hour = parseInt(time.split(':')[0]);
+              return hour >= 6 && hour < 12;
+            }) || [],
+            afternoon: availabilitySchedule?.extractedTimeSlots?.filter(time => {
+              const hour = parseInt(time.split(':')[0]);
+              return hour >= 12 && hour < 17;
+            }) || [],
+            evening: availabilitySchedule?.extractedTimeSlots?.filter(time => {
+              const hour = parseInt(time.split(':')[0]);
+              return hour >= 17;
+            }) || []
+          },
           realTimeVerification: {
             verified: true,
             exactStartTimes: availabilitySchedule?.extractedTimeSlots || [],
@@ -2291,67 +2215,23 @@ export class ViatorService {
         }
       };
 
-      logger.info('[Viator] Enriched activity availability data', {
+      logger.info('[Viator] Successfully enriched activity:', {
         name: enrichedActivity.name,
-        availableTimeSlots: enrichedActivity.availability.availableTimeSlots,
-        exactStartTimes: enrichedActivity.availability.exactStartTimes,
-        timesByCategory: enrichedActivity.availability.timesByCategory,
+        productCode: bestMatch.productCode,
+        price: enrichedActivity.price,
+        availability: {
+          isAvailable: enrichedActivity.availability?.isAvailable,
+          timeSlots: enrichedActivity.availability?.availableTimeSlots
+        },
         stage: 'enrichment_complete'
       });
 
-      // Create a clean copy of the activity with only the required fields
-      const cleanedActivity: Activity = {
-        ...activity,
-        name: enrichedActivity.name,
-        description: enrichedActivity.description,
-        duration: enrichedActivity.duration,
-        price: enrichedActivity.price,
-        category: enrichedActivity.category || activity.category,
-        location: activity.location,
-        timeSlot: enrichedActivity.timeSlot,
-        dayNumber: activity.dayNumber,
-        startTime: enrichedActivity.startTime,
-        rating: enrichedActivity.rating,
-        numberOfReviews: enrichedActivity.numberOfReviews,
-        highlights: enrichedActivity.highlights,
-        bookingDetails: enrichedActivity.bookingDetails,
-        availability: {
-          isAvailable: enrichedActivity.availability.isAvailable,
-          availableTimeSlots: enrichedActivity.availability.availableTimeSlots,
-          exactStartTimes: enrichedActivity.availability.exactStartTimes,
-          timesByCategory: enrichedActivity.availability.timesByCategory,
-          realTimeVerification: enrichedActivity.availability.realTimeVerification,
-          operatingHours: enrichedActivity.availability.operatingHours,
-          tripPeriodAvailability: {
-            availableDates: enrichedActivity.availability.tripPeriodAvailability?.availableDates || [],
-            availabilityByDate: enrichedActivity.availability.tripPeriodAvailability?.availabilityByDate || {},
-            operatingDays: enrichedActivity.availability.tripPeriodAvailability?.operatingDays || [],
-            operatingHours: enrichedActivity.availability.tripPeriodAvailability?.operatingHours || {}
-          }
-        },
-        enrichmentStatus: enrichedActivity.enrichmentStatus,
-        enrichmentError: enrichedActivity.enrichmentError,
-        enrichmentDuration: enrichedActivity.enrichmentDuration
-      };
-
-      logger.info('[Budget] Successfully enriched activity:', {
-        name: cleanedActivity.name,
-        productCode: bestMatch.productCode,
-        availability: {
-          availableTimeSlots: cleanedActivity.availability?.availableTimeSlots,
-          exactStartTimes: cleanedActivity.availability?.exactStartTimes,
-          timesByCategory: cleanedActivity.availability?.timesByCategory
-        },
-        stage: 'complete'
-      });
-
-      return cleanedActivity;
+      return enrichedActivity;
 
     } catch (error) {
       logger.error('[Viator] Error enriching activity', {
         name: activity.name,
-        error: error instanceof Error ? error.message : 'Unknown error',
-        stack: error instanceof Error ? error.stack : undefined
+        error: error instanceof Error ? error.message : 'Unknown error'
       });
       return {
         ...activity,
@@ -2563,6 +2443,12 @@ export class ViatorService {
   }
 
   private adultPricingFinder = (detail: ViatorPricingDetail) => detail.ageBand === 'ADULT';
+
+  // Add method to reset product codes (call at the start of each new trip planning)
+  public resetProductCodes() {
+    this.usedProductCodes.clear();
+    logger.info('[Viator] Reset product code tracking');
+  }
 }
 
 // Singleton instance
