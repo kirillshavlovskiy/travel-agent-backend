@@ -77,6 +77,11 @@ const AIRCRAFT_CODES: { [key: string]: string } = {
   '7M9': 'Boeing 737 MAX 9'
 };
 
+// Add at the top of the file where other constants are defined, typically after the imports
+// Near line 49 where TIMEOUT is defined
+const TIMEOUT = 600000; // 10 minutes to account for multiple flight searches
+const SEARCH_TIMEOUT = 120000; // 2 minutes per search
+
 interface Activity {
   id?: string;
   name: string;
@@ -572,6 +577,73 @@ router.post('/calculate', async (req: Request, res: Response) => {
     // Transform request
     const transformedRequest = transformBudgetRequest(req.body);
     logger.info('[Budget Route] Transformed request:', transformedRequest);
+
+    // First search for real-time flights with Amadeus
+    logger.info('[Budget Route] Searching for real-time flights with Amadeus...');
+    const formattedDepartureDate = transformedRequest.startDate.split('T')[0];
+    const formattedReturnDate = transformedRequest.endDate.split('T')[0];
+
+    // Search for flights in all cabin classes with individual timeouts
+    const cabinClasses = ['ECONOMY', 'PREMIUM_ECONOMY', 'BUSINESS', 'FIRST'];
+    const searchPromises = cabinClasses.map(async cabinClass => {
+      try {
+        const searchPromise = amadeusService.searchFlights({
+          segments: [{
+            originLocationCode: transformedRequest.departureLocation.airport,
+            destinationLocationCode: transformedRequest.destinations[0].airport,
+            departureDate: formattedDepartureDate
+          }, {
+            originLocationCode: transformedRequest.destinations[0].airport,
+            destinationLocationCode: transformedRequest.departureLocation.airport,
+            departureDate: formattedReturnDate
+          }],
+          adults: transformedRequest.travelers,
+          travelClass: cabinClass
+        });
+
+        // Add timeout to individual search
+        const result = await Promise.race([
+          searchPromise,
+          new Promise((_, reject) => 
+            setTimeout(() => reject(new Error(`Search timeout for ${cabinClass}`)), SEARCH_TIMEOUT)
+          )
+        ]);
+
+        return result;
+      } catch (error) {
+        logger.warn(`[Budget Route] Search failed for ${cabinClass}:`, error);
+        return [];
+      }
+    });
+
+    // Wait for all searches to complete
+    const allFlights = (await Promise.all(searchPromises)).flat();
+
+    if (allFlights.length === 0) {
+      logger.warn('[Budget Route] No flights found for any cabin class');
+    } else {
+      logger.info('[Budget Route] Flight search results:', {
+        totalFlights: allFlights.length,
+        byClass: {
+          economy: allFlights.filter((f: AmadeusFlightOffer) => 
+            f.travelerPricings[0]?.fareDetailsBySegment[0]?.cabin === 'ECONOMY').length,
+          premiumEconomy: allFlights.filter((f: AmadeusFlightOffer) => 
+            f.travelerPricings[0]?.fareDetailsBySegment[0]?.cabin === 'PREMIUM_ECONOMY').length,
+          business: allFlights.filter((f: AmadeusFlightOffer) => 
+            f.travelerPricings[0]?.fareDetailsBySegment[0]?.cabin === 'BUSINESS').length,
+          first: allFlights.filter((f: AmadeusFlightOffer) => 
+            f.travelerPricings[0]?.fareDetailsBySegment[0]?.cabin === 'FIRST').length
+        },
+        priceRange: allFlights.length > 0 ? {
+          min: Math.min(...allFlights.map((f: AmadeusFlightOffer) => parseFloat(f.price.total))),
+          max: Math.max(...allFlights.map((f: AmadeusFlightOffer) => parseFloat(f.price.total))),
+          currency: allFlights[0].price.currency
+        } : null
+      });
+
+      // Add flight data to the transformed request
+      transformedRequest.flightData = allFlights;
+    }
 
     // Create a timeout promise
     const timeoutPromise = new Promise((_, reject) => {

@@ -856,6 +856,10 @@ export class VacationBudgetAgent {
 
   async handleTravelRequest(request: TravelRequest): Promise<BudgetBreakdown> {
     try {
+      // Add missing variable declarations
+      let flightData: AmadeusFlightOffer[] = [];
+      let errors: Error[] = [];
+      
       const response: BudgetBreakdown = {
         success: true,
         type: 'vacation',
@@ -879,34 +883,94 @@ export class VacationBudgetAgent {
       // Determine budget distribution based on the country
       const budgetDistribution = this.getBudgetDistribution(request.destinations[0].label);
 
-      if (request.flightData) {
-        // If flight data is provided directly
-        // ...
+      // If we have flight data in the request, use it
+      if (request.flightData && request.flightData.length > 0) {
+        flightData = request.flightData;
+        logger.info('[VacationBudgetAgent] Using provided flight data', { 
+          count: flightData.length,
+          firstFlight: flightData[0]?.id
+        });
       } else {
-        // If we need to search for flights
+        // Try to get flight data with retries
+        const cabinClasses = ['ECONOMY', 'PREMIUM_ECONOMY', 'BUSINESS', 'FIRST'] as const;
+        
         logger.info('[VacationBudgetAgent] Searching for flights', {
-          origin: request.departureLocation.airport,
-          destination: request.destinations[0].airport,
-          departureDate: request.startDate,
-          returnDate: request.endDate
+          origin: request.departureLocation.code,
+          destination: request.destinations[0].code,
+          outboundDate: new Date(request.startDate).toISOString().split('T')[0],
+          returnDate: new Date(request.endDate).toISOString().split('T')[0],
+          travelers: Number(request.travelers)
         });
         
-        const flightResults = await this.flightService.searchFlights({
-          origin: request.departureLocation.airport,
-          destination: request.destinations[0].airport,
-          departureDate: request.startDate,
-          returnDate: request.endDate,
-          adults: Number(request.travelers),
-          currency: request.currency,
-          travelClass: 'ECONOMY' // Add the travel class parameter
-        });
-        
-        logger.info('[VacationBudgetAgent] Flight search results', {
-          success: flightResults.success,
-          errorMessage: flightResults.error || 'None',
-          resultsCount: flightResults.data ? (Array.isArray(flightResults.data) ? flightResults.data.length : 'Object returned') : 'No data'
-        });
+        // Sequential search with delay between requests to avoid rate limiting
+        for (const travelClass of cabinClasses) {
+          try {
+            logger.info(`[VacationBudgetAgent] Searching for ${travelClass} flights`);
+            
+            const formattedDepartureDate = new Date(request.startDate).toISOString().split('T')[0];
+            const formattedReturnDate = new Date(request.endDate).toISOString().split('T')[0];
+            
+            const result = await this.flightService.searchFlights({
+              segments: [{
+                originLocationCode: request.departureLocation.code,
+                destinationLocationCode: request.destinations[0].code,
+                departureDate: formattedDepartureDate
+              }, {
+                originLocationCode: request.destinations[0].code,
+                destinationLocationCode: request.departureLocation.code,
+                departureDate: formattedReturnDate
+              }],
+              adults: Number(request.travelers),
+              travelClass
+            });
+            
+            if (result && result.length > 0) {
+              logger.info(`[VacationBudgetAgent] Found ${result.length} ${travelClass} flights`);
+              flightData.push(...result);
+            } else {
+              logger.warn(`[VacationBudgetAgent] No ${travelClass} flights found`);
+            }
+            
+            // Add delay between requests to avoid rate limiting
+            await new Promise(resolve => setTimeout(resolve, 1000));
+          } catch (error) {
+            logger.warn(`[VacationBudgetAgent] Failed to fetch ${travelClass} flights`, { 
+              error: error instanceof Error ? error.message : 'Unknown error'
+            });
+            errors.push(error as Error);
+            // Add longer delay after error
+            await new Promise(resolve => setTimeout(resolve, 2000));
+          }
+        }
       }
+
+      // Only throw error if we have no flight data at all
+      if (flightData.length === 0) {
+        logger.error('[VacationBudgetAgent] No flight data available after all attempts', { 
+          errors: errors.map(e => e.message)
+        });
+        throw new Error('No flights available for the specified dates and route. Please try different dates or destinations.');
+      }
+
+      // Log the flight search results with statistics by cabin class
+      logger.info('[VacationBudgetAgent] Flight search results:', {
+        totalFlights: flightData.length,
+        byClass: {
+          economy: flightData.filter(f => 
+            f.travelerPricings[0]?.fareDetailsBySegment[0]?.cabin === 'ECONOMY').length,
+          premiumEconomy: flightData.filter(f => 
+            f.travelerPricings[0]?.fareDetailsBySegment[0]?.cabin === 'PREMIUM_ECONOMY').length,
+          business: flightData.filter(f => 
+            f.travelerPricings[0]?.fareDetailsBySegment[0]?.cabin === 'BUSINESS').length,
+          first: flightData.filter(f => 
+            f.travelerPricings[0]?.fareDetailsBySegment[0]?.cabin === 'FIRST').length
+        },
+        priceRange: flightData.length > 0 ? {
+          min: Math.min(...flightData.map(f => parseFloat(f.price.total))),
+          max: Math.max(...flightData.map(f => parseFloat(f.price.total))),
+          currency: flightData[0].price.currency
+        } : null
+      });
 
       // Calculate number of days
       const days = Math.ceil((new Date(request.endDate).getTime() - new Date(request.startDate).getTime()) / (1000 * 60 * 60 * 24));

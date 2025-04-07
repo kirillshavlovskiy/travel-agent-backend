@@ -537,15 +537,19 @@ export class AmadeusService {
     adults?: number;
     currencyCode?: string;
     max?: number;
-    nonStop?: boolean;
   }) {
     return this.executeWithRateLimit(async () => {
       try {
         // First, determine if we're using legacy or segments format
         let segments = params.segments || [];
         
-        // If no segments provided but legacy parameters are available, create segments
+        // If no segments provided but legacy parameters exist, create segments from them
         if (segments.length === 0 && params.originLocationCode && params.destinationLocationCode && params.departureDate) {
+          logger.info('Converting legacy flight search params to segments format', {
+            origin: params.originLocationCode,
+            destination: params.destinationLocationCode
+          });
+          
           // Create outbound segment
           segments.push({
             originLocationCode: params.originLocationCode,
@@ -553,7 +557,7 @@ export class AmadeusService {
             departureDate: params.departureDate
           });
           
-          // Add return segment if return date is provided
+          // Add return segment if returnDate is provided
           if (params.returnDate) {
             segments.push({
               originLocationCode: params.destinationLocationCode,
@@ -562,20 +566,22 @@ export class AmadeusService {
             });
           }
         }
+        
+        logger.info('Searching flights with params:', {
+          segments: segments,
+          travelClass: params.travelClass || 'ECONOMY',
+          adults: params.adults || 1
+        });
 
-        // Now validate the segments
-        if (!segments || segments.length === 0) {
-          logger.error('Flight search error: No segments defined', { 
-            originalParams: params,
-            segments
-          });
+        if (!segments || !Array.isArray(segments) || segments.length === 0) {
           throw new Error('At least one flight segment is required');
         }
 
-        logger.info('Searching flights with segments:', {
-          segments,
-          travelClass: params.travelClass,
-          adults: params.adults
+        // Validate all segments
+        segments.forEach((segment, index) => {
+          if (!segment.originLocationCode || !segment.destinationLocationCode || !segment.departureDate) {
+            throw new Error(`Invalid segment data at index ${index}: origin, destination, and departure date are required`);
+          }
         });
 
         // Format the search parameters according to Amadeus API requirements
@@ -605,38 +611,53 @@ export class AmadeusService {
           }
         };
 
-        logger.info('Making Amadeus API call with formatted params:', {
-          originDestinations: searchParams.originDestinations,
-          travelers: searchParams.travelers.length,
-          cabin: params.travelClass || 'ECONOMY'
-        });
+        logger.info('Making Amadeus API call with formatted params:', searchParams);
 
         const response = await this.amadeus.shopping.flightOffersSearch.post(
           JSON.stringify(searchParams)
         );
         
         if (!response || !response.body) {
-          logger.warn('Empty response from Amadeus API');
-          return [];
+          logger.error('Empty response from Amadeus API', {
+            response,
+            params: searchParams
+          });
+          throw new Error('No response received from flight search');
         }
 
         const results = typeof response.body === 'string' ? JSON.parse(response.body) : response.body;
 
+        if (!results.data || !Array.isArray(results.data)) {
+          logger.error('Invalid response format from Amadeus API', {
+            results,
+            params: searchParams
+          });
+          throw new Error('Invalid flight search response format');
+        }
+
+        if (results.data.length === 0) {
+          logger.warn('No flights found for the given criteria', {
+            params: searchParams,
+            response: results
+          });
+          throw new Error('No flights available for the specified criteria');
+        }
+
         logger.info('Flight search successful', {
-          count: results.data?.length || 0,
+          count: results.data.length,
           dictionaries: results.dictionaries,
-          firstResult: results.data?.[0],
-          priceRange: results.data?.length > 0 ? {
+          firstResult: results.data[0],
+          priceRange: {
             min: Math.min(...results.data.map((f: any) => parseFloat(f.price.total))),
             max: Math.max(...results.data.map((f: any) => parseFloat(f.price.total))),
             currency: results.data[0].price.currency
-          } : null
+          }
         });
 
         // Store dictionaries for later use
         this.lastFlightSearchDictionaries = results.dictionaries || null;
 
-        return results.data || [];
+        return results.data;
       } catch (error) {
         logger.error('Failed to search flights', {
           error: error instanceof Error ? {
@@ -659,7 +680,20 @@ export class AmadeusService {
           amadeusInitialized: !!this.amadeus,
           hasShoppingAPI: !!(this.amadeus as any)?.shopping?.flightOffersSearch?.post
         });
-        throw error; // Re-throw to handle upstream
+        
+        // Throw a more descriptive error
+        if (error instanceof Error) {
+          if (error.message.includes('No flights available')) {
+            throw new Error('No flights available for the specified dates and route');
+          } else if ((error as any)?.response?.statusCode === 401) {
+            throw new Error('Authentication failed with Amadeus API');
+          } else if ((error as any)?.response?.statusCode === 429) {
+            throw new Error('Rate limit exceeded for flight search');
+          } else {
+            throw new Error(`Flight search failed: ${error.message}`);
+          }
+        }
+        throw new Error('Failed to search for flights');
       }
     });
   }
