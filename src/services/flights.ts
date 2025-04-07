@@ -8,6 +8,7 @@ export interface FlightSearchParams {
   returnDate?: string;
   adults?: number;
   currency?: string;
+  travelClass?: string;
 }
 
 export interface FlightSearchResult {
@@ -27,13 +28,31 @@ export class FlightService {
     try {
       logger.info('[FlightService] Searching flights:', params);
       
+      // Create segments array in the format required by AmadeusService
+      const segments = [
+        {
+          originLocationCode: params.origin,
+          destinationLocationCode: params.destination,
+          departureDate: params.departureDate
+        }
+      ];
+      
+      // Add return segment if returnDate is provided
+      if (params.returnDate) {
+        segments.push({
+          originLocationCode: params.destination,
+          destinationLocationCode: params.origin,
+          departureDate: params.returnDate
+        });
+      }
+      
+      logger.info('[FlightService] Formatted flight segments:', { segments });
+      
       const flights = await this.amadeusService.searchFlights({
-        originLocationCode: params.origin,
-        destinationLocationCode: params.destination,
-        departureDate: params.departureDate,
-        returnDate: params.returnDate,
+        segments: segments,
+        travelClass: params.travelClass || 'ECONOMY',
         adults: params.adults || 1,
-        currencyCode: params.currency || 'USD'
+        max: 50 // Reasonable default for max results
       });
 
       return {
@@ -43,6 +62,7 @@ export class FlightService {
     } catch (error) {
       logger.error('[FlightService] Error searching flights:', {
         error: error instanceof Error ? error.message : 'Unknown error',
+        stack: error instanceof Error ? error.stack : undefined,
         params
       });
 
@@ -55,23 +75,24 @@ export class FlightService {
 
   async getFlightDetails(flightId: string): Promise<FlightSearchResult> {
     try {
-      logger.info('[FlightService] Getting flight details:', { flightId });
+      logger.info('[FlightService] Getting flight details requested for:', { flightId });
       
-      const details = await this.amadeusService.getFlightDetails(flightId);
+      // This is a stub implementation as the method is not available in AmadeusService
+      logger.warn('[FlightService] Flight details retrieval not implemented yet');
       
       return {
-        success: true,
-        data: details
+        success: false,
+        error: 'Flight details retrieval not currently supported'
       };
     } catch (error) {
-      logger.error('[FlightService] Error getting flight details:', {
+      logger.error('[FlightService] Error in flight details stub:', {
         error: error instanceof Error ? error.message : 'Unknown error',
         flightId
       });
 
       return {
         success: false,
-        error: error instanceof Error ? error.message : 'Failed to get flight details'
+        error: error instanceof Error ? error.message : 'Failed to process flight details request'
       };
     }
   }

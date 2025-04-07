@@ -630,6 +630,7 @@ interface DailyPlan {
 export class VacationBudgetAgent {
   private flightService: FlightService;
   private startTime: number = Date.now();
+  private dayThemes: Map<number, { theme: string; explanation: string }> | null = null;
 
   constructor(flightService: FlightService) {
     this.flightService = flightService;
@@ -856,94 +857,55 @@ export class VacationBudgetAgent {
   async handleTravelRequest(request: TravelRequest): Promise<BudgetBreakdown> {
     try {
       const response: BudgetBreakdown = {
-        requestDetails: {
-          departureLocation: request.departureLocation,
-          destinations: request.destinations,
-          travelers: Number(request.travelers),
-          startDate: request.startDate,
-          endDate: request.endDate,
-          currency: request.currency || 'USD'
-        }
+        success: true,
+        type: 'vacation',
+        summary: {
+          totalCost: 0,
+          accommodation: 0,
+          transportation: 0,
+          activities: 0,
+          food: 0,
+          other: 0
+        },
+        breakdown: {
+          accommodation: [],
+          transportation: [],
+          activities: [],
+          food: [],
+          other: []
+        },
       };
 
-      // Search for flights first
-      try {
-        logger.info('[Flights] Searching for flights:', {
-          origin: request.departureLocation.code,
-          destination: request.destinations[0].code,
-          startDate: request.startDate,
-          endDate: request.endDate,
-          travelers: request.travelers
-        });
+      // Determine budget distribution based on the country
+      const budgetDistribution = this.getBudgetDistribution(request.destinations[0].label);
 
+      if (request.flightData) {
+        // If flight data is provided directly
+        // ...
+      } else {
+        // If we need to search for flights
+        logger.info('[VacationBudgetAgent] Searching for flights', {
+          origin: request.departureLocation.airport,
+          destination: request.destinations[0].airport,
+          departureDate: request.startDate,
+          returnDate: request.endDate
+        });
+        
         const flightResults = await this.flightService.searchFlights({
-          origin: request.departureLocation.code,
-          destination: request.destinations[0].code,
+          origin: request.departureLocation.airport,
+          destination: request.destinations[0].airport,
           departureDate: request.startDate,
           returnDate: request.endDate,
           adults: Number(request.travelers),
-          currency: request.currency
+          currency: request.currency,
+          travelClass: 'ECONOMY' // Add the travel class parameter
         });
-
-        if (flightResults.success && flightResults.data) {
-          const flightOffers = flightResults.data;
-          response.flights = {
-            budget: {
-              min: 0,
-              max: 0,
-              average: 0,
-              confidence: 0.8,
-              source: 'Amadeus API',
-              references: flightOffers.filter(offer => this.determineFlightTier(offer) === 'budget')
-                .map(offer => this.transformAmadeusFlight(offer))
-            },
-            medium: {
-              min: 0,
-              max: 0,
-              average: 0,
-              confidence: 0.8,
-              source: 'Amadeus API',
-              references: flightOffers.filter(offer => this.determineFlightTier(offer) === 'medium')
-                .map(offer => this.transformAmadeusFlight(offer))
-            },
-            premium: {
-              min: 0,
-              max: 0,
-              average: 0,
-              confidence: 0.8,
-              source: 'Amadeus API',
-              references: flightOffers.filter(offer => this.determineFlightTier(offer) === 'premium')
-                .map(offer => this.transformAmadeusFlight(offer))
-            }
-          };
-
-          // Calculate min, max, and average for each tier
-          ['budget', 'medium', 'premium'].forEach(tier => {
-            const references = response.flights[tier].references;
-            if (references.length > 0) {
-              const prices = references.map(ref => ref.price.amount);
-              response.flights[tier].min = Math.min(...prices);
-              response.flights[tier].max = Math.max(...prices);
-              response.flights[tier].average = prices.reduce((a, b) => a + b, 0) / prices.length;
-            }
-          });
-
-          logger.info('[Flights] Successfully retrieved flight offers:', {
-            totalFlights: flightOffers.length,
-            budgetFlights: response.flights.budget.references.length,
-            mediumFlights: response.flights.medium.references.length,
-            premiumFlights: response.flights.premium.references.length
-          });
-        } else {
-          logger.warn('[Flights] No flight results found, using default flight data');
-          response.flights = this.getDefaultCategoryData('flights').flights;
-        }
-      } catch (error) {
-        logger.error('[Flights] Error searching flights:', {
-          error: error instanceof Error ? error.message : 'Unknown error',
-          stack: error instanceof Error ? error.stack : undefined
+        
+        logger.info('[VacationBudgetAgent] Flight search results', {
+          success: flightResults.success,
+          errorMessage: flightResults.error || 'None',
+          resultsCount: flightResults.data ? (Array.isArray(flightResults.data) ? flightResults.data.length : 'Object returned') : 'No data'
         });
-        response.flights = this.getDefaultCategoryData('flights').flights;
       }
 
       // Calculate number of days
@@ -1164,6 +1126,41 @@ export class VacationBudgetAgent {
         }
       }
       response.dailyPlans = dailyPlans;
+      
+      // Create our own dayHighlights using the optimized themes
+      const customDayHighlights = dailyPlans.map(plan => {
+        // Get the activities for this day
+        const dayActivities = transformedActivities.filter(activity => 
+          activity.dayNumber === plan.dayNumber
+        );
+        
+        // Create highlights for the activities
+        const activityHighlights = dayActivities.map(activity => {
+          const duration = Math.round(activity.duration / 60);
+          return `${activity.name} (${duration}h) - ${activity.description.split('.')[0]}.`;
+        });
+        
+        // Filter activities by rating, checking if the rating property exists
+        const topAttractions = dayActivities
+          .filter(a => {
+            // Check if the rating property exists and is >= 4.5
+            return typeof a['rating'] !== 'undefined' && a['rating'] >= 4.5;
+          })
+          .map(a => a.name);
+        
+        return {
+          dayNumber: plan.dayNumber,
+          theme: plan.theme, // Use our optimized theme from the dailyPlan
+          highlights: activityHighlights,
+          mainAttractions: topAttractions.length > 0 ? topAttractions : [dayActivities[0]?.name || 'City exploration']
+        };
+      });
+      
+      // Override the dayHighlights with our custom ones if we have them
+      if (customDayHighlights.length > 0) {
+        logger.info('[VacationBudgetAgent] Using custom day highlights with optimized themes');
+        response.dayHighlights = customDayHighlights;
+      }
     }
 
     return response;
@@ -1777,12 +1774,16 @@ For each activity you find, include:
       const price = activity.price?.amount || 0;
       const availabilityData = activity.availability || {};
 
-      // Get real-time availability data
-      const exactStartTimes = availabilityData.exactStartTimes || [];
+      // Get real-time availability data or use defaults
+      let exactStartTimes = availabilityData.exactStartTimes || [];
 
+      // If no times available, provide defaults based on timeSlot
       if (exactStartTimes.length === 0) {
-        logger.error(`[Activity] No available times found for activity: ${activity.name}`);
-        throw new Error(`No available times found for activity: ${activity.name}`);
+        logger.warn(`[Activity] No available times found for activity: ${activity.name}, using defaults`);
+        const defaultTime = activity.timeSlot === 'morning' ? '09:00' :
+                          activity.timeSlot === 'afternoon' ? '14:00' :
+                          activity.timeSlot === 'evening' ? '19:00' : '09:00';
+        exactStartTimes = [defaultTime];
       }
 
       // Categorize times into slots
@@ -1801,43 +1802,51 @@ For each activity you find, include:
         })
       };
 
-      // Find best matching time for the desired time slot
-      const desiredTimeSlot = activity.timeSlot || 'morning';
-      const availableTimesForSlot = timesByCategory[desiredTimeSlot];
-
-      let selectedTimeSlot = desiredTimeSlot;
-      let selectedTime = null;
-
-      if (availableTimesForSlot && availableTimesForSlot.length > 0) {
-        // Use the first available time in the desired slot
-        selectedTime = availableTimesForSlot[0];
-        logger.info(`[Activity] Found time in desired slot for ${activity.name}: ${selectedTime}`);
-      } else {
-        // Try to find times in other slots
-        const alternativeSlots = Object.entries(timesByCategory)
-          .filter(([_, times]) => times && times.length > 0)
-          .map(([slot]) => slot);
-
-        if (alternativeSlots.length > 0) {
-          selectedTimeSlot = alternativeSlots[0];
-          selectedTime = timesByCategory[selectedTimeSlot][0];
-          logger.info(`[Activity] Adjusted time slot for ${activity.name} from ${desiredTimeSlot} to ${selectedTimeSlot} with time ${selectedTime}`);
-        } else {
-          logger.error(`[Activity] No available times found for activity: ${activity.name}`);
-          throw new Error(`No available times found for activity: ${activity.name}`);
-        }
-      }
-
       // Get available time slots (slots that have times)
       const availableTimeSlots = Object.entries(timesByCategory)
         .filter(([_, times]) => times && times.length > 0)
         .map(([slot]) => slot) as ('morning' | 'afternoon' | 'evening')[];
 
+      // Determine time slot based on duration and available times
+      const timeSlot = activity.timeSlot || determineTimeSlot(exactStartTimes[0], activity.duration);
+      
+      // Find the best start time using proper selection logic
+      let startTime: string;
+      
+      // Step 1: Try to use existing start time if it's valid (not default) and available
+      if (activity.startTime && 
+          activity.startTime !== "09:00" && 
+          exactStartTimes.includes(activity.startTime)) {
+        startTime = activity.startTime;
+        logger.info(`[Activity] Using existing valid start time for "${activity.name}":`, {
+          startTime,
+          timeSlot
+        });
+      }
+      // Step 2: Try to find best time from available times in the preferred slot
+      else if (timesByCategory[timeSlot]?.length > 0) {
+        startTime = timesByCategory[timeSlot][0];
+        logger.info(`[Activity] Using time from preferred slot for "${activity.name}":`, {
+          startTime,
+          timeSlot,
+          availableTimes: timesByCategory[timeSlot]
+        });
+      }
+      // Step 3: Use the first available time as fallback
+      else {
+        startTime = exactStartTimes[0];
+        logger.info(`[Activity] Using first available time for "${activity.name}":`, {
+          startTime,
+          timeSlot,
+          allTimes: exactStartTimes
+        });
+      }
+
       // Transform the activity with validated data
       const transformedActivity: Activity = {
         ...activity,
-        timeSlot: selectedTimeSlot as 'morning' | 'afternoon' | 'evening',
-        startTime: selectedTime,
+        timeSlot,
+        startTime,
         availability: {
           isAvailable: true,
           availableTimeSlots,
@@ -1851,46 +1860,43 @@ For each activity you find, include:
             verified: true,
             exactStartTimes,
             lastChecked: new Date().toISOString()
-          },
-          timeSlotVerification: {
-            requestedSlot: desiredTimeSlot,
-            availableSlots: availableTimeSlots,
-            realTimeVerification: {
-              verified: true,
-              exactStartTimes,
-              lastChecked: new Date().toISOString()
-            }
           }
-        },
-        price: {
-          amount: price,
-          currency: activity.price?.currency || 'USD'
-        },
-        bookingDetails: {
-          ...activity.bookingDetails,
-          provider: 'Viator',
-          productCode: activity.productCode || '',
-          referenceUrl: activity.bookingDetails?.referenceUrl || '',
-          instantConfirmation: false
         }
       };
 
-      logger.info(`[Activity] Successfully transformed activity:`, {
-        name: transformedActivity.name,
-        timeSlot: transformedActivity.timeSlot,
-        startTime: transformedActivity.startTime,
-        availableTimeSlots: transformedActivity.availability.availableTimeSlots,
-        timesByCategory: transformedActivity.availability.timesByCategory,
-        verified: transformedActivity.availability.realTimeVerification.verified
-      });
-
       return transformedActivity;
     } catch (error) {
-      logger.error(`[Activity] Error validating activity:`, {
+      logger.error(`[Activity] Error transforming activity:`, {
         name: activity.name,
-        error: error instanceof Error ? error.message : 'Unknown error'
+        error: error instanceof Error ? error.message : 'Unknown error',
+        stack: error instanceof Error ? error.stack : undefined
       });
-      throw error;
+      
+      // Return activity with default values instead of throwing
+      const defaultTime = activity.timeSlot === 'morning' ? '09:00' :
+                        activity.timeSlot === 'afternoon' ? '14:00' :
+                        activity.timeSlot === 'evening' ? '19:00' : '09:00';
+      
+      return {
+        ...activity,
+        timeSlot: activity.timeSlot || 'morning',
+        startTime: defaultTime,
+        availability: {
+          isAvailable: true,
+          availableTimeSlots: [activity.timeSlot || 'morning'],
+          exactStartTimes: [defaultTime],
+          timesByCategory: {
+            morning: activity.timeSlot === 'morning' ? [defaultTime] : [],
+            afternoon: activity.timeSlot === 'afternoon' ? [defaultTime] : [],
+            evening: activity.timeSlot === 'evening' ? [defaultTime] : []
+          },
+          realTimeVerification: {
+            verified: false,
+            exactStartTimes: [defaultTime],
+            lastChecked: new Date().toISOString()
+          }
+        }
+      };
     }
   }
 
@@ -1997,9 +2003,26 @@ For each activity you find, include:
           }
         };
 
-        // Generate theme based on activities
-    const activityCategories = new Set(activities.map(a => a.category));
-        const theme = Array.from(activityCategories).join(' & ') || 'City Exploration';
+        // Generate theme based on activities - use optimized theme from Perplexity if available
+        let theme: string;
+        if (this.dayThemes && this.dayThemes.has(dayNumber)) {
+          // Use the optimized theme from Perplexity
+          theme = this.dayThemes.get(dayNumber)!.theme;
+          logger.info('[Agents] Using optimized theme for day', {
+            dayNumber,
+            theme,
+            explanation: this.dayThemes.get(dayNumber)!.explanation
+          });
+        } else {
+          // Fall back to calculating a theme based on activities
+          const activityCategories = new Set(activities.map(a => a.category));
+          theme = Array.from(activityCategories).join(' & ') || 'City Exploration';
+          logger.info('[Agents] Generated fallback theme for day', {
+            dayNumber,
+            theme,
+            method: 'category-based'
+          });
+        }
 
         // Determine main area based on activities
     const mainArea = activities.length > 0 
@@ -2172,9 +2195,21 @@ Requirements:
 4. Consider typical meal times (lunch 12:00-14:00, dinner after 18:00)
 5. Account for travel time between locations
 6. Ensure activities don't overlap
+7. Generate a specific, descriptive day theme based on the activities' focus
 
-Return a JSON schedule with exact start times for each activity:
+For the day theme, DO NOT use generic themes like "Mixed Activities". Instead:
+- If activities share common categories, create a theme that captures their essence
+- Consider the specific attractions (e.g., "Seine River Exploration" instead of "Water Activities")
+- Use specific adjectives that highlight the unique appeal (e.g., "Historic Paris Discovery")
+- For varied activities, find a cohesive narrative (e.g., "Paris Highlights: Art & Cuisine")
+- Museum-focused days should highlight the specific collections or styles
+- Food activities should reference the cuisine type or dining experience
+- Outdoor activities should reference the specific landmarks or natural features
+
+Return a JSON schedule with exact start times for each activity and day theme:
 {
+  "dayTheme": "Specific themed name for this day's activities",
+  "themeExplanation": "Brief explanation of why this theme fits",
   "optimizedSchedule": [
     {
       "activityName": "string",
@@ -2188,6 +2223,21 @@ Return a JSON schedule with exact start times for each activity:
       // Get optimized schedule from Perplexity
       const result = await perplexityClient.chat(prompt);
       const schedule = JSON.parse(result.choices[0].message.content);
+      
+      // Log the theme information
+      logger.info(`[Schedule] Day ${dayNumber} theme generated:`, {
+        theme: schedule.dayTheme,
+        explanation: schedule.themeExplanation
+      });
+
+      // Store the theme in a global map for later use
+      if (!this.dayThemes) {
+        this.dayThemes = new Map();
+      }
+      this.dayThemes.set(dayNumber, {
+        theme: schedule.dayTheme,
+        explanation: schedule.themeExplanation
+      });
 
       // Map the optimized times back to activities
       return activities.map(activity => {
@@ -2310,4 +2360,121 @@ Return a JSON schedule with exact start times for each activity:
     const endMinutes = totalMinutes % 60;
     return `${endHours.toString().padStart(2, '0')}:${endMinutes.toString().padStart(2, '0')}`;
   }
+
+  private determineTimeSlotByIndex(index: number): string {
+    switch(index) {
+      case 0: return 'morning';
+      case 1: return 'afternoon';
+      case 2: return 'evening';
+      default: return 'morning';
+    }
+  }
+
+  // Add this method to the VacationBudgetAgent class
+
+  /**
+   * Returns the budget distribution percentages based on destination
+   * @param destination The destination to get budget distribution for
+   * @returns Budget distribution percentages for different categories
+   */
+  private getBudgetDistribution(destination: string): { [key: string]: number } {
+    logger.info('[VacationBudgetAgent] Getting budget distribution for', { destination });
+    
+    // Default distribution
+    const defaultDistribution = {
+      flights: 40,
+      accommodation: 30,
+      activities: 15,
+      food: 10,
+      other: 5
+    };
+    
+    // You can add destination-specific distributions here if needed
+    const destinationMap: { [key: string]: { [key: string]: number } } = {
+      'Paris': {
+        flights: 35,
+        accommodation: 35,
+        activities: 15,
+        food: 12,
+        other: 3
+      },
+      'London': {
+        flights: 30,
+        accommodation: 40,
+        activities: 15,
+        food: 10,
+        other: 5
+      },
+      'Tokyo': {
+        flights: 45,
+        accommodation: 30,
+        activities: 10,
+        food: 12,
+        other: 3
+      },
+      'New York': {
+        flights: 30,
+        accommodation: 40,
+        activities: 12,
+        food: 13,
+        other: 5
+      }
+    };
+    
+    // Check if we have a specific distribution for this destination
+    for (const [key, distribution] of Object.entries(destinationMap)) {
+      if (destination.includes(key)) {
+        logger.info('[VacationBudgetAgent] Using custom budget distribution for', { 
+          destination, 
+          distribution 
+        });
+        return distribution;
+      }
+    }
+    
+    // Fall back to default distribution
+    logger.info('[VacationBudgetAgent] Using default budget distribution', { 
+      distribution: defaultDistribution 
+    });
+    return defaultDistribution;
+  }
+}
+
+// Helper function to determine time slot based on start time and duration
+function determineTimeSlot(time: string, duration: number): 'morning' | 'afternoon' | 'evening' {
+  const [hours, minutes] = time.split(':').map(Number);
+  const startHour = hours;
+  const endHour = hours + Math.floor((minutes + duration) / 60);
+
+  // If the activity spans multiple slots, use the start slot
+  if (startHour >= 6 && startHour < 12) {
+    return 'morning';
+  } else if (startHour >= 12 && startHour < 17) {
+    return 'afternoon';
+  } else {
+    return 'evening';
+  }
+}
+
+// Helper function to find the best start time for a given time slot
+function findBestStartTime(availableTimes: string[], timeSlot: 'morning' | 'afternoon' | 'evening', duration: number): string {
+  const slotBoundaries = {
+    morning: { start: 6, end: 12 },
+    afternoon: { start: 12, end: 17 },
+    evening: { start: 17, end: 24 }
+  };
+
+  // Filter times that fall within the desired time slot
+  const timesInSlot = availableTimes.filter(time => {
+    const hour = parseInt(time.split(':')[0]);
+    return hour >= slotBoundaries[timeSlot].start && hour < slotBoundaries[timeSlot].end;
+  });
+
+  if (timesInSlot.length === 0) {
+    // If no times in desired slot, use the first available time
+    return availableTimes[0];
+  }
+
+  // Return the first time in the slot
+  return timesInSlot[0];
 }

@@ -4,66 +4,61 @@ import { fileURLToPath } from 'url';
 import winston from 'winston';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const logsDir = path.join(__dirname, '../../logs');
+// Use absolute paths from project root
+const projectRoot = path.resolve(__dirname, '../../');
+const logsDir = path.join(projectRoot, 'logs');
 const logFile = path.join(logsDir, 'server.log');
 const hotelLogFile = path.join(logsDir, 'hotel-processing.log');
-const viatorLogFile = path.join(logsDir, 'viator.log');
 console.log('Logs directory:', logsDir);
 console.log('Hotel log file:', hotelLogFile);
-console.log('Viator log file:', viatorLogFile);
-// Ensure logs directory exists
-if (!fs.existsSync(logsDir)) {
-    console.log('Creating logs directory:', logsDir);
-    fs.mkdirSync(logsDir, { recursive: true });
+// Ensure logs directory exists with proper permissions
+try {
+    if (!fs.existsSync(logsDir)) {
+        fs.mkdirSync(logsDir, { recursive: true, mode: 0o755 });
+        console.log('Created logs directory:', logsDir);
+    }
+    // Ensure log files exist with proper permissions
+    [logFile, hotelLogFile].forEach(file => {
+        if (!fs.existsSync(file)) {
+            fs.writeFileSync(file, '', { mode: 0o644 });
+            console.log('Created log file:', file);
+        }
+    });
+    // Test write access
+    fs.appendFileSync(logFile, `[${new Date().toISOString()}] Logger initialized\n`);
+    fs.appendFileSync(hotelLogFile, `[${new Date().toISOString()}] Hotel logger initialized\n`);
 }
-// Ensure log files exist
-if (!fs.existsSync(hotelLogFile)) {
-    console.log('Creating hotel log file:', hotelLogFile);
-    fs.writeFileSync(hotelLogFile, '');
+catch (error) {
+    console.error('Error setting up logging:', error);
+    process.exit(1); // Exit if we can't set up logging
 }
-if (!fs.existsSync(viatorLogFile)) {
-    console.log('Creating Viator log file:', viatorLogFile);
-    fs.writeFileSync(viatorLogFile, '');
-}
-// ANSI color codes for better visibility
-const colors = {
-    reset: '\x1b[0m',
-    bright: '\x1b[1m',
-    dim: '\x1b[2m',
-    info: '\x1b[36m', // Cyan
-    warn: '\x1b[33m', // Yellow
-    error: '\x1b[31m', // Red
-    debug: '\x1b[35m', // Magenta
-};
-const createLogger = (logFile) => winston.createLogger({
+// Create Winston logger instance
+const logger = winston.createLogger({
     level: 'debug',
-    format: winston.format.combine(winston.format.timestamp(), winston.format.json()),
+    format: winston.format.combine(winston.format.timestamp(), winston.format.printf(({ level, message, timestamp, ...rest }) => {
+        const meta = Object.keys(rest).length ? `\n${JSON.stringify(rest, null, 2)}` : '';
+        return `[${timestamp}] [${level.toUpperCase()}] ${message}${meta}`;
+    })),
     transports: [
         new winston.transports.File({
             filename: logFile,
             level: 'debug'
         }),
         new winston.transports.Console({
-            format: winston.format.combine(winston.format.colorize(), winston.format.simple())
+            format: winston.format.combine(winston.format.colorize(), winston.format.printf(({ level, message, timestamp, ...rest }) => {
+                const meta = Object.keys(rest).length ? `\n${JSON.stringify(rest, null, 2)}` : '';
+                return `[${timestamp}] [${level.toUpperCase()}] ${message}${meta}`;
+            }))
         })
     ]
 });
-const hotelLogger = createLogger(hotelLogFile);
-const viatorLogger = createLogger(viatorLogFile);
-// Test logs to verify logging is working
-hotelLogger.info('Hotel logger initialized', {
-    logFile: hotelLogFile,
-    timestamp: new Date().toISOString()
-});
-viatorLogger.info('Viator logger initialized', {
-    logFile: viatorLogFile,
-    timestamp: new Date().toISOString()
-});
+// Export the logger instance directly
+export { logger };
 // Add specific hotel logging methods
 export const logHotelProcessing = {
     batchStart: (batchNumber, hotelIds) => {
         console.log('Logging batch start:', { batchNumber, hotelCount: hotelIds.length });
-        hotelLogger.info('Processing hotel batch', {
+        logger.info('Processing hotel batch', {
             batch: batchNumber,
             hotelCount: hotelIds.length,
             hotelIds
@@ -71,7 +66,7 @@ export const logHotelProcessing = {
     },
     hotelFound: (hotelData) => {
         console.log('Logging hotel found:', { hotelId: hotelData.id, name: hotelData.name });
-        hotelLogger.info('Hotel data processed', {
+        logger.info('Hotel data processed', {
             hotelId: hotelData.id,
             name: hotelData.name,
             offers: hotelData.offers?.length || 0,
@@ -80,7 +75,7 @@ export const logHotelProcessing = {
     },
     batchError: (batchNumber, error) => {
         console.log('Logging batch error:', { batchNumber, error: error.message });
-        hotelLogger.error('Batch processing error', {
+        logger.error('Batch processing error', {
             batch: batchNumber,
             error: error.message,
             details: error.response || error
@@ -88,7 +83,7 @@ export const logHotelProcessing = {
     },
     searchSummary: (summary) => {
         console.log('Logging search summary:', { totalHotels: summary.totalHotelsFound });
-        hotelLogger.info('Hotel search completed', {
+        logger.info('Hotel search completed', {
             totalHotels: summary.totalHotelsFound,
             availableHotels: summary.availableHotels,
             destinations: summary.destinations,
@@ -99,60 +94,34 @@ export const logHotelProcessing = {
 // Add specific Viator logging methods
 export const logViatorProcessing = {
     availabilityCheck: (productCode, data) => {
-        viatorLogger.info('Checking availability', {
+        logger.info('[Viator] Raw availability check', {
             productCode,
+            timestamp: new Date().toISOString(),
             ...data
         });
     },
     availabilityResult: (productCode, data) => {
-        viatorLogger.info('Availability result', {
+        logger.info('[Viator] Raw availability result', {
             productCode,
+            timestamp: new Date().toISOString(),
             ...data
         });
+        // Log raw response separately for better visibility
+        if (data.stage === 'raw_response' && data.rawData) {
+            logger.info('[Viator] Raw API response data', {
+                productCode,
+                timestamp: new Date().toISOString(),
+                rawResponse: JSON.stringify(data.rawData)
+            });
+        }
     },
     error: (productCode, error) => {
-        viatorLogger.error('Error processing request', {
+        logger.error('[Viator] Processing error', {
             productCode,
+            timestamp: new Date().toISOString(),
             error: error.message,
+            stack: error.stack,
             details: error.response || error
         });
-    }
-};
-function formatMessage(level, message, data) {
-    const timestamp = new Date().toISOString();
-    const dataStr = data ? `\n${JSON.stringify(data, null, 2)}` : '';
-    return `[${timestamp}] [${level}] ${message}${dataStr}\n`;
-}
-function formatConsoleMessage(level, message, data) {
-    const timestamp = new Date().toISOString();
-    const color = colors[level.toLowerCase()] || colors.reset;
-    const dataStr = data ? `\n${JSON.stringify(data, null, 2)}` : '';
-    return `${color}[${timestamp}] [${level}] ${message}${dataStr}${colors.reset}`;
-}
-export const logger = {
-    info(message, data) {
-        const logMessage = formatMessage('INFO', message, data);
-        const consoleMessage = formatConsoleMessage('info', message, data);
-        console.log(consoleMessage);
-        fs.appendFileSync(logFile, logMessage);
-    },
-    warn(message, data) {
-        const logMessage = formatMessage('WARN', message, data);
-        const consoleMessage = formatConsoleMessage('warn', message, data);
-        console.warn(consoleMessage);
-        fs.appendFileSync(logFile, logMessage);
-    },
-    error(message, data) {
-        const logMessage = formatMessage('ERROR', message, data);
-        const consoleMessage = formatConsoleMessage('error', message, data);
-        console.error(consoleMessage);
-        fs.appendFileSync(logFile, logMessage);
-    },
-    debug(message, data) {
-        const logMessage = formatMessage('DEBUG', message, data);
-        const consoleMessage = formatConsoleMessage('debug', message, data);
-        // Use console.log instead of console.debug for better visibility
-        console.log(consoleMessage);
-        fs.appendFileSync(logFile, logMessage);
     }
 };

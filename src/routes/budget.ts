@@ -17,12 +17,15 @@ import {
   generateLogistics,
   generateDayCommentary,
   generateDayHighlights,
-  optimizeSchedule
+  optimizeSchedule,
+  getDefaultStartTime
 } from './activities.js';
 import { DestinationsService } from '../services/destinations.js';
 import { ViatorService, ViatorAvailabilityResponse } from '../services/viator.js';
 import * as fs from 'fs';
 import * as path from 'path';
+import { enhanceDailyPlansWithPreferences } from '../utils/itinerary';
+import { createProximityBasedSchedule } from '../utils/proximity';
 
 const router = Router();
 const amadeusService = new AmadeusService();
@@ -98,7 +101,7 @@ interface Activity {
     cancellationPolicy?: string;
   };
   dayNumber: number;
-  enrichmentStatus?: 'success' | 'not_found' | 'failed';
+  enrichmentStatus?: 'success' | 'failed';
   date?: string;
   commentary?: string;
   itineraryHighlight?: string;
@@ -340,30 +343,37 @@ function transformBudgetRequest(requestBody: any): TransformedRequest {
   // Calculate number of days
   const days = Math.ceil((new Date(endDate).getTime() - new Date(startDate).getTime()) / (1000 * 60 * 60 * 24));
 
-  // Transform departure location
+  // Transform departure location - handle both string and object formats
   const departureLocation = {
-    code: requestBody.departureLocation?.code || '',
-    label: requestBody.departureLocation?.label || '',
-    airport: getPrimaryAirportForCity(requestBody.departureLocation?.code || ''),
+    code: typeof requestBody.departureLocation === 'string' 
+      ? requestBody.departureLocation.split(',')[1]?.trim() || ''
+      : requestBody.departureLocation?.code || '',
+    label: typeof requestBody.departureLocation === 'string'
+      ? requestBody.departureLocation
+      : requestBody.departureLocation?.label || '',
+    airport: getPrimaryAirportForCity(typeof requestBody.departureLocation === 'string'
+      ? requestBody.departureLocation.split(',')[1]?.trim() || ''
+      : requestBody.departureLocation?.code || ''),
     outboundDate: startDate,
     inboundDate: endDate,
     isRoundTrip: true
   };
 
-  // Transform destinations
-  const destinations = (requestBody.destinations || []).map((dest: any) => ({
-    code: dest.code || '',
-    label: dest.label || '',
-    airport: getPrimaryAirportForCity(dest.code || '')
+  // Transform destinations - handle both string and object formats
+  const destinations = (Array.isArray(requestBody.destinations) ? requestBody.destinations : [requestBody.destination])
+    .map((dest: any) => ({
+      code: typeof dest === 'string' ? dest.split(',')[1]?.trim() || '' : dest.code || '',
+      label: typeof dest === 'string' ? dest : dest.label || '',
+      airport: getPrimaryAirportForCity(typeof dest === 'string' ? dest.split(',')[1]?.trim() || '' : dest.code || '')
   }));
 
   // Transform preferences
   const preferences = {
-    travelStyle: requestBody.preferences?.travelStyle || 'balanced',
-    pacePreference: requestBody.preferences?.pacePreference || 'moderate',
-    interests: requestBody.preferences?.interests || [],
-    accessibility: requestBody.preferences?.accessibility || [],
-    dietaryRestrictions: requestBody.preferences?.dietaryRestrictions || []
+    travelStyle: requestBody.travelPreferences?.travelStyle || 'balanced',
+    pacePreference: requestBody.travelPreferences?.pace || 'moderate',
+    interests: requestBody.travelPreferences?.interests || [],
+    accessibility: requestBody.travelPreferences?.accessibility || [],
+    dietaryRestrictions: requestBody.travelPreferences?.dietaryRestrictions || []
   };
 
   return {
@@ -371,7 +381,7 @@ function transformBudgetRequest(requestBody: any): TransformedRequest {
     departureLocation,
     destinations,
     country: destinations[0]?.label?.split(',')[0] || '',
-    travelers: requestBody.travelers || 1,
+    travelers: requestBody.numberOfTravelers || 1,
     currency: requestBody.currency || 'USD',
     budget: requestBody.budgetLimit,
     startDate,
@@ -535,14 +545,22 @@ const transformAvailability = (realTimeCheck: RealTimeCheck): ActivityAvailabili
   };
 };
 
+// Add calculateDays function if it's not available elsewhere
+function calculateDays(startDate: string, endDate: string): number {
+  const start = new Date(startDate);
+  const end = new Date(endDate);
+  const diffTime = Math.abs(end.getTime() - start.getTime());
+  return Math.ceil(diffTime / (1000 * 60 * 60 * 24)) + 1; // +1 to include both start and end days
+}
+
 // Calculate budget endpoint
 router.post('/calculate', async (req: Request, res: Response) => {
   // Reset product codes at the start of each request
   resetProductCodes();
   
   // Increase timeout for the entire request
-  req.setTimeout(300000);
-  res.setTimeout(300000);
+  req.setTimeout(600000);  // 10 minutes
+  res.setTimeout(600000);  // 10 minutes
 
   try {
     logger.info('[Budget Route] ====== START BUDGET CALCULATION ======');
@@ -557,7 +575,7 @@ router.post('/calculate', async (req: Request, res: Response) => {
 
     // Create a timeout promise
     const timeoutPromise = new Promise((_, reject) => {
-      setTimeout(() => reject(new Error('Budget calculation timed out')), 290000);
+      setTimeout(() => reject(new Error('Budget calculation timed out')), 590000);  // 9.8 minutes
     });
 
     const result = await Promise.race([
@@ -607,13 +625,17 @@ router.post('/calculate', async (req: Request, res: Response) => {
               parseInt((base.duration as string).replace(/[^0-9]/g, '')) : 
               (typeof base.duration === 'number' ? base.duration : 120);
             
+            // Get the first available time or use a default
+            const firstAvailableTime = base.availability?.realTimeVerification?.exactStartTimes?.[0];
+            const defaultStartTime = base.startTime || firstAvailableTime || '09:00';
+            
           return {
               ...base,
               name: base.name || 'Explore Local Attractions',
               duration,
               category: base.category || 'Sightseeing',
               timeSlot: base.timeSlot || 'morning',
-              startTime: base.startTime || '09:00',
+              startTime: defaultStartTime,  // Always provide a startTime
               selected: typeof base.selected === 'boolean' ? base.selected : false,
               description: base.description || 'Discover the local culture and attractions in this vibrant city.',
               location: base.location || 'City Center',
@@ -623,13 +645,16 @@ router.post('/calculate', async (req: Request, res: Response) => {
               },
               rating: base.rating || 4.5,
               numberOfReviews: base.numberOfReviews || 100,
-              bookingDetails: base.bookingDetails || {
-                provider: 'Local',
-                instantConfirmation: true,
-                cancellationPolicy: 'Flexible'
+              bookingDetails: {
+                provider: base.bookingDetails?.provider || 'Local',
+                productCode: base.bookingDetails?.productCode,
+                referenceUrl: base.bookingDetails?.referenceUrl,
+                instantConfirmation: base.bookingDetails?.instantConfirmation || true,
+                cancellationPolicy: base.bookingDetails?.cancellationPolicy || 'Flexible'
               },
-              dayNumber: base.dayNumber || 1
-            };
+              dayNumber: base.dayNumber || 1,
+              enrichmentStatus: base.enrichmentStatus || 'success'
+            } as Activity;
           });
 
           // Validate and deduplicate activities using a more specific key
@@ -672,8 +697,8 @@ router.post('/calculate', async (req: Request, res: Response) => {
           if (deduplicatedActivities.length > 0) {
             logger.info('[Budget] Using activities from budget agent, skipping activities generation');
             // Create themed activities based on preferences
-            const destination = transformedRequest.destinations[0];
-            const cityName = destination.label.split(',')[0].trim();
+        const destination = transformedRequest.destinations[0];
+        const cityName = destination.label.split(',')[0].trim();
             const themedActivities: Activity[] = deduplicatedActivities.map((activity, index) => {
               const timeSlot = index % 3 === 0 ? 'morning' :
                 index % 3 === 1 ? 'afternoon' : 'evening';
@@ -827,36 +852,118 @@ router.post('/calculate', async (req: Request, res: Response) => {
               stage: 'enrichment_summary'
             });
 
-        // Update daily plans with enriched activities
-        const updatedDailyPlans = agentResult.dailyPlans?.map((plan) => ({
-          ...plan,
-          activities: plan.activities?.map((activity) => {
+        // First, we'll declare the variable outside the if/else block
+        let optimizationResult;
+
+        // Then in the if block
+        if (req.body.preferences.accessibility?.length || req.body.preferences.dietaryRestrictions?.length) {
+          logger.info('[Budget Route] Filtering activities based on accessibility and dietary preferences', {
+            accessibility: req.body.preferences.accessibility || [],
+            dietaryRestrictions: req.body.preferences.dietaryRestrictions || []
+          });
+          
+          // Filter enriched activities
+          const requirementsFilter = {
+            accessibility: req.body.preferences.accessibility,
+            dietaryRestrictions: req.body.preferences.dietaryRestrictions
+          };
+          
+          const filteredActivities = viatorService.filterActivitiesByRequirements(
+            enrichedActivities,
+            requirementsFilter
+          );
+
+          logger.info('[Budget Route] Activity filtering results', {
+            totalActivities: enrichedActivities.length,
+            filteredActivities: filteredActivities.length,
+            filteredOut: enrichedActivities.length - filteredActivities.length
+          });
+          
+          // Now apply proximity-based scheduling if accessibility needs or pace preferences are specified
+          if (req.body.preferences.accessibility?.length || 
+              req.body.preferences.pacePreference) {
+            
+            logger.info('[Budget Route] Using proximity-based scheduling with pace:', {
+              pacePreference: req.body.preferences.pacePreference || 'moderate',
+              accessibility: (req.body.preferences.accessibility || []).length > 0
+            });
+            
+            // Determine number of days
+            const days = calculateDays(transformedRequest.startDate, transformedRequest.endDate);
+            
+            // Apply proximity-based scheduling with pace preference
+            const proximityScheduledActivities = createProximityBasedSchedule(
+              filteredActivities,
+              days,
+              req.body.preferences.accessibility || [],
+              req.body.preferences.pacePreference || 'moderate'
+            );
+            
+            logger.info('[Budget Route] Created proximity-based schedule', {
+              totalActivities: proximityScheduledActivities.length,
+              days,
+              pacePreference: req.body.preferences.pacePreference || 'moderate'
+            });
+            
+            // Use these activities for the schedule optimization
+            optimizationResult = await optimizeSchedule(
+              proximityScheduledActivities,
+              days,
+              transformedRequest.startDate
+            );
+          } else {
+            // Use filtered activities without proximity scheduling
+            optimizationResult = await optimizeSchedule(
+              filteredActivities,
+              calculateDays(transformedRequest.startDate, transformedRequest.endDate),
+              transformedRequest.startDate
+            );
+          }
+        } else {
+          // Original code to execute if no filtering needed
+          optimizationResult = await optimizeSchedule(
+            enrichedActivities,
+            calculateDays(transformedRequest.startDate, transformedRequest.endDate),
+            transformedRequest.startDate
+          );
+        }
+
+        // Make sure we have a valid result before enhancing plans
+        if (!optimizationResult) {
+          throw new Error('Failed to optimize schedule');
+        }
+
+        // Enhance daily plans with preference-specific information
+        if (optimizationResult?.schedule?.length) {
+          logger.info('[Budget Route] Enhancing daily plans with preference-specific information');
+          optimizationResult.schedule = enhanceDailyPlansWithPreferences(
+            optimizationResult.schedule,
+            {
+              accessibility: req.body.preferences.accessibility,
+              dietaryRestrictions: req.body.preferences.dietaryRestrictions,
+              pacePreference: req.body.preferences.pacePreference
+            }
+          );
+        }
+
+        // Update daily plans with optimized schedule
+        const updatedDailyPlans = optimizationResult.schedule.map(day => ({
+          ...day,
+          activities: day.activities?.map((activity) => {
             const enriched = enrichedActivities.find(
-              (ea) => ea.name === activity.name && ea.dayNumber === plan.dayNumber
+              (ea) => ea.name === activity.name && ea.dayNumber === day.dayNumber
             );
             return enriched || activity;
           }) || []
         })) || [];
 
-        // Create optimized schedule using the optimizeSchedule function
-        const optimizedSchedule = await optimizeSchedule(
-          enrichedActivities.map(activity => ({
-            ...activity,
-            id: activity.bookingDetails?.productCode || `local-${activity.name}-${activity.dayNumber}`,
-            location: cityName
-          })),
-          transformedRequest.days,
-          cityName,
-          req.body.preferences
-        );
-
         // Log the optimized plan to a file
         const logEntry = {
           timestamp: new Date().toISOString(),
-          destination: cityName,
+          destination: transformedRequest.destinations[0].label,
           days: transformedRequest.days,
           input_activities: enrichedActivities.length,
-          optimized_schedule: optimizedSchedule
+          optimized_schedule: optimizationResult
         };
 
         const logDir = path.join(process.cwd(), 'logs');
@@ -879,24 +986,27 @@ router.post('/calculate', async (req: Request, res: Response) => {
           },
           activities: enrichedActivities,
               dailyPlans: updatedDailyPlans,
-          tripOverview: agentResult.tripSummary?.overview || 'Trip overview not available',
-          activityFitNotes: agentResult.organizationLogic?.overview || 'Activity fit notes not available',
-          schedule: updatedDailyPlans.map(day => ({
-            dayNumber: day.dayNumber,
-            theme: safelyCallHelper(generateDayTheme, [day.activities], 'generateDayTheme', 'Mixed Activities'),
-            mainArea: safelyCallHelper(determineMainArea, [day.activities], 'determineMainArea', 'City Center'),
-            commentary: safelyCallHelper(generateDayCommentary, [day.activities, transformedRequest.preferences, day.dayNumber], 'generateDayCommentary', ''),
-            highlights: safelyCallHelper(generateDayHighlights, [day.activities, transformedRequest.preferences], 'generateDayHighlights', []),
-                activities: enrichedActivities.filter(activity => activity.dayNumber === day.dayNumber)
-                  .sort((a, b) => {
-                    const timeSlotOrder: Record<'morning' | 'afternoon' | 'evening', number> = { 
-                      morning: 0, 
-                      afternoon: 1, 
-                      evening: 2 
-                    };
-              const timeSlotDiff = timeSlotOrder[a.timeSlot] - timeSlotOrder[b.timeSlot];
-              if (timeSlotDiff !== 0) return timeSlotDiff;
-              
+          tripOverview: optimizationResult.tripOverview || agentResult.tripSummary?.overview || 'Trip overview not available',
+          activityFitNotes: optimizationResult.activityFitNotes || agentResult.organizationLogic?.overview || 'Activity fit notes not available',
+          schedule: optimizationResult.schedule.map(day => {
+            // Calculate the date for this day
+            const startDate = new Date(transformedRequest.startDate);
+            const dayDate = new Date(startDate);
+            dayDate.setDate(startDate.getDate() + (day.dayNumber - 1));
+            const date = dayDate.toISOString().split('T')[0];
+
+                return {
+                dayNumber: day.dayNumber,
+              date,
+              theme: day.theme || safelyCallHelper(generateDayTheme, [day.activities], 'generateDayTheme', 'Mixed Activities'),
+              mainArea: day.mainArea || safelyCallHelper(determineMainArea, [day.activities], 'determineMainArea', 'City Center'),
+              commentary: day.commentary || safelyCallHelper(generateDayCommentary, [day.activities, day.dayNumber], 'generateDayCommentary', ''),
+              highlights: day.highlights || safelyCallHelper(generateDayHighlights, [day.activities, transformedRequest.preferences], 'generateDayHighlights', []),
+              activities: day.activities.map(activity => ({
+              ...activity,
+                date,  // Ensure each activity has the correct date
+                startTime: activity.startTime || getDefaultStartTime(activity.timeSlot)
+            })).sort((a, b) => {
               if (a.startTime && b.startTime) {
                 const [aHour, aMin] = a.startTime.split(':').map(Number);
                 const [bHour, bMin] = b.startTime.split(':').map(Number);
@@ -904,19 +1014,27 @@ router.post('/calculate', async (req: Request, res: Response) => {
               }
               return 0;
             }),
-            breaks: safelyCallHelper(generateBreakSchedule, [day.activities, transformedRequest.preferences], 'generateBreakSchedule', {
+              breaks: day.breaks || safelyCallHelper(generateBreakSchedule, [day.activities, transformedRequest.preferences], 'generateBreakSchedule', {
               morning: { startTime: '10:30', endTime: '11:00', duration: 30, suggestion: 'Coffee break' },
               lunch: { startTime: '12:30', endTime: '13:30', duration: 60, suggestion: 'Lunch break' },
               afternoon: { startTime: '15:30', endTime: '16:00', duration: 30, suggestion: 'Rest break' },
               dinner: { startTime: '18:30', endTime: '20:00', duration: 90, suggestion: 'Dinner' }
             }),
-            logistics: safelyCallHelper(generateLogistics, [day.activities, transformedRequest.preferences], 'generateLogistics', {
+              logistics: day.logistics || safelyCallHelper(generateLogistics, [day.activities, transformedRequest.preferences], 'generateLogistics', {
               transportSuggestions: ['Use public transportation between major attractions'],
               walkingDistances: ['Average walking distance between activities: 15-20 minutes'],
               timeEstimates: ['Allow 30 minutes for transportation between activities']
-            })
-          })),
-          dailyHighlights: agentResult.dayHighlights || [],
+              }),
+              availabilityStats: day.availabilityStats
+            };
+          }),
+          dailyHighlights: optimizationResult.dailyHighlights || agentResult.dayHighlights || [],
+          unscheduledActivities: optimizationResult.unscheduledActivities || [],
+          statistics: optimizationResult.statistics || {
+            totalScheduled: 0,
+            totalUnscheduled: 0,
+            scheduledByDay: []
+          },
           totalBudget: transformedRequest.budget,
                 metadata: {
             perplexityCalls: 0,

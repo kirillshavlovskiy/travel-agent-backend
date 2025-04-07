@@ -1,5 +1,5 @@
 export interface Activity {
-  id?: string;
+  id: string;
   name: string;
   description: string;
   duration: number;
@@ -11,26 +11,12 @@ export interface Activity {
   location: string;
   timeSlot: 'morning' | 'afternoon' | 'evening';
   dayNumber: number;
-  selected?: boolean;
-  tier?: 'budget' | 'medium' | 'premium';
-  rating?: number;
-  numberOfReviews?: number;
-  highlights?: string[];
-  commentary?: string;
-  itineraryHighlight?: string;
-  keyHighlights?: string[];
-  scoringReason?: string;
-  preferenceScore?: number;
-  matchedPreferences?: string[];
-  openingHours?: string;
-  referenceUrl?: string;
-  productCode?: string;
   date?: string;
-  images?: Array<{
-    source: string;
-    url: string;
-  }>;
-  bookingDetails?: {
+  startTime: string;
+  selected: boolean;
+  rating: number;
+  numberOfReviews: number;
+  bookingDetails: {
     provider: string;
     productCode: string;
     referenceUrl: string;
@@ -44,40 +30,60 @@ export interface Activity {
     pickupLocation?: string;
     accessibility?: string;
     restrictions?: string[];
-    description?: string;
-    price?: {
-      amount: number;
-      currency: string;
-    };
   };
-  availability?: {
+  availability: {
     isAvailable: boolean;
     availableTimeSlots: string[];
-    operatingHours?: string;
-    bestTimeToVisit?: string;
-    nextAvailableDate?: string;
-    verifiedTimeSlot?: string;
-    realTimeVerification?: {
+    exactStartTimes: string[];
+    timesByCategory: Record<string, string[]>;
+    realTimeVerification: {
       verified: boolean;
       exactStartTimes: string[];
       lastChecked: string;
-      reason?: string;
       pricing?: {
         fromPrice: number;
         currency: string;
       };
+      reason?: string;
     };
-    tripPeriodAvailability?: {
+    operatingHours?: string;
+    bestTimeToVisit?: string;
+    nextAvailableDate?: string;
+    tripPeriodAvailability: {
       availableDates: string[];
       availabilityByDate: Record<string, string[]>;
       operatingDays: string[];
-      operatingHours: Record<string, string[]>;
+      operatingHours: Record<string, { opensAt: string; closesAt: string; }[]>;
     };
   };
-  timeSlotVerification?: {
-    isAvailable: boolean;
-    recommendedTimeSlot: 'morning' | 'afternoon' | 'evening';
-    availableTimeSlots: ('morning' | 'afternoon' | 'evening')[];
+  enrichmentStatus?: 'success' | 'failed';
+  enrichmentDuration?: number;
+  highlights?: string[];
+  commentary?: string;
+  itineraryHighlight?: string;
+  keyHighlights?: string[];
+  scoringReason?: string;
+  preferenceScore?: number;
+  matchedPreferences?: string[];
+  images?: Array<{
+    source: string;
+    url: string;
+  }>;
+  tier?: 'budget' | 'medium' | 'premium';
+  locationDetails?: {
+    coordinates?: {
+      lat: number;
+      lng: number;
+    };
+    neighborhood?: string;
+    address?: string;
+    accessibility?: string[];
+    transportOptions?: {
+      walking?: boolean;
+      publicTransport?: boolean;
+      taxi?: boolean;
+      accessibility?: boolean;
+    };
   };
 }
 
@@ -94,4 +100,5 @@ export interface GenerateActivitiesParams {
         accessibility?: string[];
         dietaryRestrictions?: string[];
     };
+} 
 } 

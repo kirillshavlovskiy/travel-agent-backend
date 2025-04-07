@@ -522,29 +522,63 @@ export class AmadeusService {
   }
 
   async searchFlights(params: {
-    segments: Array<{
+    // Allow both flat parameters and segments
+    segments?: Array<{
       originLocationCode: string;
       destinationLocationCode: string;
       departureDate: string;
     }>;
-    travelClass: string;
-    adults: number;
+    // Legacy flat parameters
+    originLocationCode?: string;
+    destinationLocationCode?: string;
+    departureDate?: string;
+    returnDate?: string;
+    travelClass?: string;
+    adults?: number;
+    currencyCode?: string;
     max?: number;
   }) {
     return this.executeWithRateLimit(async () => {
       try {
+        // First, determine if we're using legacy or segments format
+        let segments = params.segments || [];
+        
+        // If no segments provided but legacy parameters exist, create segments from them
+        if (segments.length === 0 && params.originLocationCode && params.destinationLocationCode && params.departureDate) {
+          logger.info('Converting legacy flight search params to segments format', {
+            origin: params.originLocationCode,
+            destination: params.destinationLocationCode
+          });
+          
+          // Create outbound segment
+          segments.push({
+            originLocationCode: params.originLocationCode,
+            destinationLocationCode: params.destinationLocationCode,
+            departureDate: params.departureDate
+          });
+          
+          // Add return segment if returnDate is provided
+          if (params.returnDate) {
+            segments.push({
+              originLocationCode: params.destinationLocationCode,
+              destinationLocationCode: params.originLocationCode,
+              departureDate: params.returnDate
+            });
+          }
+        }
+        
         logger.info('Searching flights with params:', {
-          segments: params.segments,
-          travelClass: params.travelClass,
-          adults: params.adults
+          segments: segments,
+          travelClass: params.travelClass || 'ECONOMY',
+          adults: params.adults || 1
         });
 
-        if (!params.segments || !Array.isArray(params.segments) || params.segments.length === 0) {
+        if (!segments || !Array.isArray(segments) || segments.length === 0) {
           throw new Error('At least one flight segment is required');
         }
 
         // Validate all segments
-        params.segments.forEach((segment, index) => {
+        segments.forEach((segment, index) => {
           if (!segment.originLocationCode || !segment.destinationLocationCode || !segment.departureDate) {
             throw new Error(`Invalid segment data at index ${index}: origin, destination, and departure date are required`);
           }
@@ -552,7 +586,7 @@ export class AmadeusService {
 
         // Format the search parameters according to Amadeus API requirements
         const searchParams = {
-          originDestinations: params.segments.map((segment, index) => ({
+          originDestinations: segments.map((segment, index) => ({
             id: String(index + 1),
             originLocationCode: segment.originLocationCode,
             destinationLocationCode: segment.destinationLocationCode,
@@ -560,7 +594,7 @@ export class AmadeusService {
               date: segment.departureDate
             }
           })),
-          travelers: Array.from({ length: params.adults }, (_, i) => ({
+          travelers: Array.from({ length: params.adults || 1 }, (_, i) => ({
             id: String(i + 1),
             travelerType: 'ADULT'
           })),
@@ -569,9 +603,9 @@ export class AmadeusService {
             maxFlightOffers: params.max || 100,
             flightFilters: {
               cabinRestrictions: [{
-                cabin: params.travelClass,
+                cabin: params.travelClass || 'ECONOMY',
                 coverage: 'MOST_SEGMENTS',
-                originDestinationIds: params.segments.map((_, i) => String(i + 1))
+                originDestinationIds: segments.map((_, i) => String(i + 1))
               }]
             }
           }
@@ -614,8 +648,8 @@ export class AmadeusService {
           dictionaries: results.dictionaries,
           firstResult: results.data[0],
           priceRange: {
-            min: Math.min(...results.data.map(f => parseFloat(f.price.total))),
-            max: Math.max(...results.data.map(f => parseFloat(f.price.total))),
+            min: Math.min(...results.data.map((f: any) => parseFloat(f.price.total))),
+            max: Math.max(...results.data.map((f: any) => parseFloat(f.price.total))),
             currency: results.data[0].price.currency
           }
         });

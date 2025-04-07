@@ -43,8 +43,19 @@ export class PerplexityService {
     async generateActivities(params) {
         try {
             logger.info('Received activity generation request', params);
-            // 1. Generate activities with essential data and insights
-            const query = this.buildActivityQuery(params);
+            // Extract destination info
+            const destination = params.destinations[0].label;
+            const destinationId = params.destinations[0].code;
+            // 1. Generate initial activities with essential data
+            const query = this.buildActivityQuery({
+                destination,
+                days: Math.ceil((new Date(params.endDate).getTime() - new Date(params.startDate).getTime()) / (1000 * 60 * 60 * 24)),
+                budget: params.budgetLimit,
+                currency: params.currency,
+                preferences: params.preferences,
+                startDate: params.startDate,
+                endDate: params.endDate
+            });
             logger.debug('Sending query to Perplexity API', { query });
             const response = await this.chat(query);
             if (!response.activities || response.activities.length === 0) {
@@ -58,7 +69,7 @@ export class PerplexityService {
                         finalCount: 0,
                         enrichedCount: 0,
                         daysPlanned: params.days,
-                        destination: params.destination
+                        destination
                     }
                 };
             }
@@ -68,120 +79,59 @@ export class PerplexityService {
                 duration: activity.duration || 120 // Default 2 hours if no duration specified
             }));
             // 2. Clean and balance activities
-            const balancedActivities = await this.cleanAndBalanceActivities(activitiesWithDuration, params);
-            logger.info('Successfully balanced activities', {
-                originalCount: activitiesWithDuration.length,
-                balancedCount: balancedActivities.length
+            const balancedActivities = await this.cleanAndBalanceActivities(activitiesWithDuration, {
+                ...params,
+                destination,
+                destinationId
             });
-            // 3. Enrich with additional details
+            // 3. Enrich with Viator details
+            const viatorService = new ViatorService();
             const enrichedActivities = await Promise.all(balancedActivities.map(async (activity) => {
                 try {
-                    // Get enriched details for the activity
-                    const enriched = await this.getEnrichedDetails(activity.name);
-                    // Preserve original price if it exists
-                    const price = activity.price?.amount > 0 ? activity.price : {
-                        amount: activity.bookingDetails?.price?.amount || 0,
-                        currency: activity.bookingDetails?.price?.currency || params.currency
-                    };
-                    logger.debug('[Activity Enrichment] Price information:', {
-                        activityName: activity.name,
-                        originalPrice: activity.price,
-                        bookingDetailsPrice: activity.bookingDetails?.price,
-                        finalPrice: price
+                    // Use destinationId from the destination code
+                    const searchResults = await viatorService.searchActivity(activity.name, destinationId, params.startDate, params.endDate);
+                    if (!searchResults || searchResults.length === 0) {
+                        logger.warn('No Viator activities found for:', {
+                            name: activity.name,
+                            destination
+                        });
+                        return activity;
+                    }
+                    // Get the best match
+                    const bestMatch = searchResults[0];
+                    // Get detailed product information
+                    const enriched = await viatorService.enrichActivityDetails({
+                        ...bestMatch,
+                        name: activity.name,
+                        timeSlot: activity.timeSlot,
+                        dayNumber: activity.dayNumber
                     });
                     // Return enriched activity with fallback to original data
                     return {
                         ...activity,
-                        name: activity.name || 'Explore Local Attractions',
-                        description: enriched.description || activity.description || activity.commentary || '',
-                        duration: activity.duration || 120,
-                        price, // Use preserved price
-                        rating: enriched.rating || activity.rating || 4.0,
-                        numberOfReviews: enriched.reviews || activity.numberOfReviews || 50,
-                        images: enriched.images?.length ? enriched.images : [{
-                                source: 'placeholder',
-                                url: `https://placehold.co/600x400?text=${encodeURIComponent(activity.name)}`
-                            }],
-                        location: activity.location || params.destination,
-                        address: activity.location || params.destination,
-                        keyHighlights: enriched.highlights || activity.keyHighlights || [],
-                        openingHours: enriched.openingHours || '',
-                        referenceUrl: activity.bookingDetails?.referenceUrl || '',
-                        commentary: activity.commentary || '',
-                        itineraryHighlight: activity.itineraryHighlight || '',
-                        category: activity.category || 'Cultural & Historical',
-                        timeSlot: activity.timeSlot || 'morning',
-                        dayNumber: activity.dayNumber || 1,
-                        bookingDetails: {
-                            provider: activity.bookingDetails?.provider || 'Viator',
-                            productCode: activity.bookingDetails?.productCode || '',
-                            referenceUrl: activity.bookingDetails?.referenceUrl || '',
-                            instantConfirmation: !!activity.bookingDetails?.instantConfirmation,
-                            mobileTicket: !!activity.bookingDetails?.mobileTicket,
-                            price // Include price in booking details
-                        }
+                        ...enriched,
+                        name: activity.name,
+                        timeSlot: activity.timeSlot,
+                        dayNumber: activity.dayNumber,
+                        enrichmentStatus: enriched.bookingDetails?.productCode ? 'success' : 'not_found'
                     };
                 }
                 catch (error) {
-                    logger.warn('Failed to enrich activity', {
+                    logger.warn('Failed to enrich activity with Viator details', {
                         name: activity.name,
                         error: error instanceof Error ? error.message : 'Unknown error'
                     });
-                    // Return original activity with minimal defaults
-                    return {
-                        ...activity,
-                        name: activity.name || 'Explore Local Attractions',
-                        description: activity.description || activity.commentary || '',
-                        duration: activity.duration || 120,
-                        price: activity.price || {
-                            amount: activity.bookingDetails?.price?.amount || 0,
-                            currency: activity.bookingDetails?.price?.currency || params.currency
-                        },
-                        rating: activity.rating || 4.0,
-                        numberOfReviews: activity.numberOfReviews || 50,
-                        images: [{
-                                source: 'placeholder',
-                                url: `https://placehold.co/600x400?text=${encodeURIComponent(activity.name || 'Activity')}`
-                            }],
-                        location: activity.location || params.destination,
-                        address: activity.location || params.destination,
-                        keyHighlights: activity.keyHighlights || [],
-                        openingHours: '',
-                        referenceUrl: activity.bookingDetails?.referenceUrl || '',
-                        commentary: activity.commentary || '',
-                        itineraryHighlight: activity.itineraryHighlight || '',
-                        category: activity.category || 'Cultural & Historical',
-                        timeSlot: activity.timeSlot || 'morning',
-                        dayNumber: activity.dayNumber || 1,
-                        bookingDetails: {
-                            provider: activity.bookingDetails?.provider || 'Viator',
-                            productCode: activity.bookingDetails?.productCode || '',
-                            referenceUrl: activity.bookingDetails?.referenceUrl || '',
-                            instantConfirmation: !!activity.bookingDetails?.instantConfirmation,
-                            mobileTicket: !!activity.bookingDetails?.mobileTicket,
-                            price: activity.bookingDetails?.price || {
-                                amount: 0,
-                                currency: params.currency
-                            }
-                        }
-                    };
+                    return activity;
                 }
             }));
-            // Log price statistics
-            const priceStats = {
+            // Log enrichment statistics
+            const enrichmentStats = {
                 totalActivities: enrichedActivities.length,
-                activitiesWithPrice: enrichedActivities.filter(a => a.price?.amount > 0).length,
-                averagePrice: enrichedActivities.reduce((sum, a) => sum + (a.price?.amount || 0), 0) / enrichedActivities.length,
-                priceDistribution: enrichedActivities.reduce((acc, a) => {
-                    const priceRange = a.price?.amount ?
-                        (a.price.amount <= 30 ? 'budget' :
-                            a.price.amount <= 100 ? 'medium' :
-                                'premium') : 'unknown';
-                    acc[priceRange] = (acc[priceRange] || 0) + 1;
-                    return acc;
-                }, {})
+                enrichedCount: enrichedActivities.filter(a => a.enrichmentStatus === 'success').length,
+                notFoundCount: enrichedActivities.filter(a => a.enrichmentStatus === 'not_found').length,
+                withProductCodes: enrichedActivities.filter(a => a.bookingDetails?.productCode).length
             };
-            logger.info('[Activity Generation] Price statistics:', priceStats);
+            logger.info('Successfully enriched activities:', enrichmentStats);
             return {
                 success: true,
                 activities: enrichedActivities,
@@ -189,10 +139,10 @@ export class PerplexityService {
                 metadata: {
                     originalCount: response.activities.length,
                     finalCount: enrichedActivities.length,
-                    enrichedCount: enrichedActivities.filter(a => a.price?.amount > 0).length,
-                    daysPlanned: params.days,
-                    destination: params.destination,
-                    priceStats
+                    enrichedCount: enrichmentStats.enrichedCount,
+                    daysPlanned: Math.ceil((new Date(params.endDate).getTime() - new Date(params.startDate).getTime()) / (1000 * 60 * 60 * 24)),
+                    destination,
+                    enrichmentStats
                 }
             };
         }
@@ -710,7 +660,13 @@ IMPORTANT: You MUST provide detailed commentary and highlights that explicitly r
                         }
                     }
                 }
-                balancedTimeSlots.set(slot, selectedActivities);
+                // Add date to each activity
+                const activitiesWithDate = selectedActivities.map(activity => ({
+                    ...activity,
+                    date: params.startDate,
+                    dayNumber: parseInt(day)
+                }));
+                balancedTimeSlots.set(slot, activitiesWithDate);
             });
             // Combine all balanced activities for this day
             return Array.from(balancedTimeSlots.values()).flat();
@@ -1164,31 +1120,28 @@ Return ONLY the summary paragraph, no additional formatting or explanation.`;
     }
     buildActivityQuery(params) {
         const { destination, days, budget, currency, preferences, flightTimes } = params;
-        return `Find ${days} days of real, bookable activities in ${destination} on Viator.com.
+        return `Find ${days} days of interesting activities in ${destination}.
 
 Key Requirements:
 - Daily budget range: Consider activities within ${budget} ${currency}
-- Activities must be currently bookable on Viator
 - Mix of morning, afternoon, and evening activities
 - Geographically sensible routing each day
 - Balance between cultural, adventure, food, and local experiences
 
 CRITICAL RULES:
 1. Return ONLY a valid JSON object - NO explanatory text
-2. ONLY suggest activities that exist on Viator.com with REAL product codes
-3. Ensure activities in the same day are geographically close
-4. Account for travel time between locations
-5. Maintain category distribution (25% each)
-6. ALWAYS include accurate price information for each activity
+2. Ensure activities in the same day are geographically close
+3. Account for travel time between locations
+4. Maintain category distribution (25% each)
+5. ALWAYS include accurate price information for each activity
 
 Return a JSON object with this EXACT structure:
 {
   "day1": {
     "theme": "Day theme based on main activities",
     "morning": [{
-      "activity": "EXACT Viator activity name",
-      "productCode": "EXACT Viator product code",
-      "time": "EXACT available time slot from Viator",
+      "activity": "Activity name",
+      "time": "Suggested time slot",
       "duration": "Duration in hours (number)",
       "location": "Specific neighborhood/area",
       "transportation": "How to get there + address",
@@ -1197,17 +1150,7 @@ Return a JSON object with this EXACT structure:
         "currency": "${currency}"
       },
       "category": "Cultural & Historical|Nature & Adventure|Food & Entertainment|Lifestyle & Local",
-      "tip": "Activity-specific tips and highlights",
-      "bookingDetails": {
-        "provider": "Viator",
-        "cancellationPolicy": "EXACT policy",
-        "instantConfirmation": boolean,
-        "mobileTicket": boolean,
-        "price": {
-          "amount": number,
-          "currency": "${currency}"
-        }
-      }
+      "tip": "Activity-specific tips and highlights"
     }],
     "afternoon": [/* Same structure as morning */],
     "evening": [/* Same structure as morning */]
@@ -1218,13 +1161,12 @@ Return a JSON object with this EXACT structure:
 IMPORTANT:
 - Each activity MUST have a valid price.amount > 0
 - All prices should be in ${currency}
-- Total daily activities cost should not exceed ${budget} ${currency}
-- Include REAL Viator product codes and prices`;
+- Total daily activities cost should not exceed ${budget} ${currency}`;
     }
     transformDailyItineraryToActivities(content) {
         try {
             const activities = [];
-            // Handle daily itinerary format
+            const seenActivities = new Set();
             Object.keys(content).forEach(key => {
                 if (key.startsWith('day')) {
                     const dayNumber = parseInt(key.replace('day', ''));
@@ -1233,51 +1175,53 @@ IMPORTANT:
                         if (dayData[timeSlot] && Array.isArray(dayData[timeSlot])) {
                             dayData[timeSlot].forEach((activity) => {
                                 try {
-                                    // Extract price information from the activity
-                                    const price = {
-                                        amount: activity.price?.amount ||
-                                            parseFloat(activity.price) ||
-                                            (activity.bookingDetails?.price?.amount) ||
-                                            0,
-                                        currency: activity.price?.currency ||
-                                            activity.bookingDetails?.price?.currency ||
-                                            'USD'
-                                    };
-                                    // Log price extraction
-                                    logger.debug('[Activity Transform] Extracting price:', {
-                                        activityName: activity.activity || activity.name,
-                                        rawPrice: activity.price,
-                                        bookingDetailsPrice: activity.bookingDetails?.price,
-                                        extractedPrice: price
-                                    });
-                                    // Create availability information
-                                    const availability = {
-                                        isAvailable: true,
-                                        availableTimeSlots: [timeSlot],
-                                        realTimeVerification: {
-                                            verified: false,
-                                            lastChecked: new Date().toISOString()
-                                        },
-                                        pricing: price // Include price in availability
-                                    };
+                                    // Create a unique key for deduplication
+                                    const activityKey = `${activity.activity || activity.name}-${dayNumber}-${timeSlot}`;
+                                    if (seenActivities.has(activityKey)) {
+                                        return; // Skip duplicate activities
+                                    }
+                                    seenActivities.add(activityKey);
+                                    // Extract price with proper validation
+                                    let price = 0;
+                                    if (typeof activity.price === 'object' && activity.price !== null) {
+                                        price = activity.price.amount || 0;
+                                    }
+                                    else if (typeof activity.price === 'number') {
+                                        price = activity.price;
+                                    }
+                                    else if (typeof activity.price === 'string') {
+                                        price = activity.price.toLowerCase() === 'free' ? 0 : parseFloat(activity.price) || 0;
+                                    }
+                                    // Determine tier based on price
+                                    const tier = price <= 30 ? 'budget' : price <= 100 ? 'medium' : 'premium';
                                     activities.push({
-                                        id: `${dayNumber}-${timeSlot}-${activities.length}`,
-                                        name: activity.activity || activity.name || 'Unnamed Activity',
-                                        description: activity.description || activity.tip || '',
-                                        duration: parseFloat(activity.duration) || 2,
-                                        category: activity.category || 'General',
-                                        location: activity.location || '',
+                                        activity: activity.activity || activity.name,
+                                        name: activity.activity || activity.name,
+                                        description: activity.description || '',
+                                        duration: activity.duration || 2,
+                                        category: activity.category || 'Sightseeing',
+                                        location: activity.location || 'City Center',
+                                        price: {
+                                            amount: price,
+                                            currency: activity.price?.currency || 'USD'
+                                        },
                                         timeSlot,
                                         dayNumber,
-                                        price, // Add price information
-                                        availability, // Add availability information
+                                        tier,
                                         bookingDetails: {
-                                            provider: activity.bookingDetails?.provider || 'Viator',
-                                            productCode: activity.productCode || activity.bookingDetails?.productCode || '',
-                                            referenceUrl: activity.bookingDetails?.referenceUrl || activity.booking_url || '',
-                                            instantConfirmation: !!activity.bookingDetails?.instantConfirmation,
-                                            mobileTicket: !!activity.bookingDetails?.mobileTicket,
-                                            price // Include price in booking details
+                                            provider: 'Viator',
+                                            productCode: activity.productCode || '',
+                                            referenceUrl: activity.referenceUrl || '',
+                                            instantConfirmation: false
+                                        },
+                                        availability: {
+                                            isAvailable: true,
+                                            availableTimeSlots: [activity.startTime || '09:00'],
+                                            exactStartTimes: [activity.startTime || '09:00'],
+                                            realTimeVerification: {
+                                                verified: false,
+                                                lastChecked: new Date().toISOString()
+                                            }
                                         }
                                     });
                                     logger.debug('[Activity Transform] Successfully transformed activity:', {
@@ -1285,8 +1229,7 @@ IMPORTANT:
                                         price,
                                         timeSlot,
                                         dayNumber,
-                                        hasBookingDetails: !!activity.bookingDetails,
-                                        productCode: activity.productCode || activity.bookingDetails?.productCode
+                                        tier
                                     });
                                 }
                                 catch (activityError) {
@@ -1377,16 +1320,36 @@ Provide enriched details including:
             const query = `Create a ${days}-day schedule for ${destination} with these activities:
 
 PRESELECTED ACTIVITIES (MUST BE INCLUDED):
-${preselectedActivities.map(a => `- ${a.name} (${a.duration || 'N/A'} minutes, ${a.timeSlot}, Day ${a.dayNumber})
-   Available times: ${a.availability?.exactStartTimes?.join(', ') || 'Any time'}
-   Operating hours: ${a.availability?.operatingHours || 'Standard hours'}
-   Real-time verified: ${a.availability?.realTimeVerification?.verified ? 'Yes' : 'No'}`).join('\n')}
+${preselectedActivities.map(a => {
+                const availableTimes = a.availability?.exactStartTimes || [];
+                const operatingHours = a.availability?.operatingHours || 'Standard hours';
+                const timesByCategory = a.availability?.timesByCategory || {};
+                return `- ${a.name} (${a.duration || 'N/A'} minutes, ${a.timeSlot}, Day ${a.dayNumber})
+   Available exact times: ${availableTimes.join(', ') || 'Any time'}
+   Operating hours: ${operatingHours}
+   Available time slots by category:
+     Morning: ${timesByCategory.morning?.join(', ') || 'None'}
+     Afternoon: ${timesByCategory.afternoon?.join(', ') || 'None'}
+     Evening: ${timesByCategory.evening?.join(', ') || 'None'}
+   Real-time verified: ${a.availability?.realTimeVerification?.verified ? 'Yes' : 'No'}
+   Trip period availability: ${a.availability?.tripPeriodAvailability?.availableDates?.join(', ') || 'All dates'}`;
+            }).join('\n')}
 
 AVAILABLE ACTIVITIES TO FILL GAPS:
-${unselectedActivities.map(a => `- ${a.name} (${a.duration || 'N/A'} minutes)
-   Available slots: ${a.availability?.availableTimeSlots?.join(', ') || 'Any'}
-   Operating hours: ${a.availability?.operatingHours || 'Standard hours'}
-   Best time to visit: ${a.availability?.bestTimeToVisit || 'Flexible'}`).join('\n')}
+${unselectedActivities.map(a => {
+                const availableTimes = a.availability?.exactStartTimes || [];
+                const operatingHours = a.availability?.operatingHours || 'Standard hours';
+                const timesByCategory = a.availability?.timesByCategory || {};
+                return `- ${a.name} (${a.duration || 'N/A'} minutes)
+   Available exact times: ${availableTimes.join(', ') || 'Any time'}
+   Operating hours: ${operatingHours}
+   Available time slots by category:
+     Morning: ${timesByCategory.morning?.join(', ') || 'None'}
+     Afternoon: ${timesByCategory.afternoon?.join(', ') || 'None'}
+     Evening: ${timesByCategory.evening?.join(', ') || 'None'}
+   Real-time verified: ${a.availability?.realTimeVerification?.verified ? 'Yes' : 'No'}
+   Trip period availability: ${a.availability?.tripPeriodAvailability?.availableDates?.join(', ') || 'All dates'}`;
+            }).join('\n')}
 
 REQUIREMENTS:
 1. CRITICAL: Include ALL preselected activities in their specified days and time slots
@@ -1396,11 +1359,12 @@ REQUIREMENTS:
 5. Consider activity durations and operating hours
 6. Allow multiple options per time slot for flexibility
 7. IMPORTANT: Only schedule activities during their available time slots and operating hours
+8. CRITICAL: Use EXACT available times from the provided data when scheduling activities
 
 PROVIDE FOR EACH DAY:
-1. Morning activities (2-3 options if no preselected)
-2. Afternoon activities (2-3 options if no preselected)
-3. Evening activities (2-3 options if no preselected)
+1. Morning activities (2-3 options if no preselected, using verified available times)
+2. Afternoon activities (2-3 options if no preselected, using verified available times)
+3. Evening activities (2-3 options if no preselected, using verified available times)
 4. Reasoning for activity grouping and timing
 5. Travel logistics between activities
 6. Special considerations (opening hours, crowds, weather)
@@ -1460,51 +1424,95 @@ Return as JSON with:
                 throw new Error('Schedule optimization failed - some preselected activities are missing');
             }
             // Preserve activity details when transforming schedule
-            const enrichedSchedule = response.schedule.map((day) => ({
-                ...day,
-                activities: day.activities.map((scheduledActivity) => {
-                    // First try to find a matching preselected activity
-                    const preselected = preselectedActivities.find(a => a.name === scheduledActivity.name &&
-                        a.dayNumber === day.dayNumber &&
-                        a.timeSlot === scheduledActivity.timeSlot);
-                    if (preselected) {
+            const enrichedSchedule = response.schedule.map((day) => {
+                // Get all activities for this day from the original activities array
+                const dayActivities = activities.filter(a => a.dayNumber === day.dayNumber);
+                // Get activities from mapData.locations
+                const locationActivities = (day.mapData?.locations || []).map(location => {
+                    // Find matching activity from original enriched activities
+                    const originalActivity = dayActivities.find(a => a.name === location.name ||
+                        a.name.toLowerCase().includes(location.name.toLowerCase()) ||
+                        location.name.toLowerCase().includes(a.name.toLowerCase()));
+                    if (originalActivity) {
                         return {
-                            ...preselected,
-                            ...scheduledActivity,
-                            selected: true,
-                            commentary: scheduledActivity.commentary || preselected.commentary,
-                            itineraryHighlight: scheduledActivity.itineraryHighlight || preselected.itineraryHighlight,
-                            scoringReason: scheduledActivity.scoringReason || preselected.scoringReason,
-                            availabilityNotes: this.generateAvailabilityNotes(preselected)
+                            ...originalActivity,
+                            name: location.name,
+                            description: location.description,
+                            category: location.category,
+                            location: location.address,
+                            timeSlot: location.timeSlot,
+                            duration: location.duration,
+                            coordinates: location.coordinates,
+                            order: location.order
                         };
                     }
-                    // If not preselected, look for the original activity
-                    const originalActivity = activities.find(a => a.name === scheduledActivity.name);
-                    if (!originalActivity) {
-                        logger.warn('Could not find original activity details:', {
-                            activityName: scheduledActivity.name,
-                            dayNumber: day.dayNumber,
-                            timeSlot: scheduledActivity.timeSlot
-                        });
-                        return scheduledActivity;
-                    }
+                    // If no match found, create a new activity with location data
                     return {
-                        ...originalActivity,
-                        ...scheduledActivity,
-                        timeSlot: scheduledActivity.timeSlot || originalActivity.timeSlot,
-                        startTime: this.determineStartTime(scheduledActivity, originalActivity),
-                        commentary: scheduledActivity.commentary || originalActivity.commentary,
-                        itineraryHighlight: scheduledActivity.itineraryHighlight || originalActivity.itineraryHighlight,
-                        scoringReason: scheduledActivity.scoringReason || originalActivity.scoringReason,
-                        availabilityNotes: this.generateAvailabilityNotes(originalActivity)
+                        name: location.name,
+                        description: location.description,
+                        category: location.category,
+                        location: location.address,
+                        timeSlot: location.timeSlot,
+                        duration: location.duration,
+                        coordinates: location.coordinates,
+                        order: location.order,
+                        dayNumber: day.dayNumber,
+                        date: this.getDateForActivity(day.dayNumber, activities[0]?.date)
                     };
-                })
-            }));
+                });
+                // Sort activities by order
+                const sortedActivities = locationActivities.sort((a, b) => (a.order || 0) - (b.order || 0));
+                // Add availability notes and other metadata
+                const mappedActivities = sortedActivities.map(activity => {
+                    const originalActivity = dayActivities.find(a => a.name === activity.name ||
+                        a.name.toLowerCase().includes(activity.name.toLowerCase()) ||
+                        activity.name.toLowerCase().includes(a.name.toLowerCase()));
+                    if (originalActivity) {
+                        return {
+                            ...activity,
+                            ...originalActivity,
+                            name: activity.name, // Keep the location name as it's more specific
+                            description: activity.description || originalActivity.description,
+                            category: activity.category || originalActivity.category,
+                            location: activity.location || originalActivity.location,
+                            timeSlot: activity.timeSlot || originalActivity.timeSlot,
+                            duration: activity.duration || originalActivity.duration,
+                            coordinates: activity.coordinates,
+                            order: activity.order,
+                            commentary: originalActivity.commentary,
+                            itineraryHighlight: originalActivity.itineraryHighlight,
+                            scoringReason: originalActivity.scoringReason,
+                            availabilityNotes: this.generateAvailabilityNotes(originalActivity)
+                        };
+                    }
+                    // For activities without a match, try to find availability from similar activities
+                    const similarActivity = activities.find(a => a.name.toLowerCase().includes(activity.name.toLowerCase()) ||
+                        activity.name.toLowerCase().includes(a.name.toLowerCase()));
+                    return {
+                        ...activity,
+                        availability: similarActivity?.availability,
+                        bookingDetails: similarActivity?.bookingDetails,
+                        rating: similarActivity?.rating,
+                        numberOfReviews: similarActivity?.numberOfReviews,
+                        price: similarActivity?.price || { amount: 0, currency: 'EUR' },
+                        availabilityNotes: similarActivity ?
+                            this.generateAvailabilityNotes(similarActivity) :
+                            'Availability information pending'
+                    };
+                });
+                return {
+                    ...day,
+                    activities: mappedActivities,
+                    dayPlanningLogic: day.dayPlanningLogic || `Day ${day.dayNumber} activities have been scheduled based on availability and optimal timing.`
+                };
+            });
+            // Add availability considerations to the response
+            const availabilityConsiderations = this.generateAvailabilityConsiderations(enrichedSchedule);
             return {
                 schedule: enrichedSchedule,
-                tripOverview: response.tripOverview,
-                activityFitNotes: response.activityFitNotes,
-                availabilityConsiderations: response.availabilityConsiderations
+                tripOverview: response.tripOverview || 'A carefully planned itinerary balancing cultural experiences with leisure activities.',
+                activityFitNotes: response.activityFitNotes || 'Activities have been selected based on your preferences and scheduled at optimal times.',
+                availabilityConsiderations
             };
         }
         catch (error) {
@@ -1512,28 +1520,52 @@ Return as JSON with:
             throw error;
         }
     }
-    isTimeSlotAvailable(activity, availability) {
-        if (!availability)
-            return true;
-        const timeSlot = activity.timeSlot;
-        return availability.availableTimeSlots?.includes(timeSlot) ||
-            availability.realTimeVerification?.exactStartTimes?.some(time => this.getTimeSlotCategory(time) === timeSlot) || false;
+    generateAvailabilityConsiderations(schedule) {
+        const considerations = [];
+        schedule.forEach(day => {
+            const dayActivities = day.activities || [];
+            const unavailableActivities = dayActivities.filter(a => !a.availability?.isAvailable);
+            const limitedAvailability = dayActivities.filter(a => a.availability?.isAvailable &&
+                a.availability.exactStartTimes?.length === 1);
+            if (unavailableActivities.length > 0) {
+                considerations.push(`Day ${day.dayNumber}: ${unavailableActivities.map(a => a.name).join(', ')} require alternative dates or times.`);
+            }
+            if (limitedAvailability.length > 0) {
+                considerations.push(`Day ${day.dayNumber}: ${limitedAvailability.map(a => a.name).join(', ')} have limited time slots available.`);
+            }
+        });
+        return considerations.join('\n') || 'All activities have good availability for the selected dates.';
     }
     determineStartTime(scheduledActivity, originalActivity) {
-        if (scheduledActivity.startTime)
-            return scheduledActivity.startTime;
-        if (originalActivity.availability?.realTimeVerification?.exactStartTimes?.length > 0) {
-            const timeSlot = scheduledActivity.timeSlot;
-            const matchingTimes = originalActivity.availability.realTimeVerification.exactStartTimes
-                .filter(time => this.getTimeSlotCategory(time) === timeSlot);
-            if (matchingTimes.length > 0)
-                return matchingTimes[0];
+        // If we have exact start times from availability data, use the appropriate one
+        if (originalActivity.availability?.timesByCategory) {
+            const timeSlot = scheduledActivity.timeSlot || originalActivity.timeSlot;
+            const availableTimes = originalActivity.availability.timesByCategory[timeSlot] || [];
+            if (availableTimes.length > 0) {
+                // Sort times and return the earliest one for the time slot
+                return availableTimes.sort()[0];
+            }
         }
-        return this.getDefaultStartTime(scheduledActivity.timeSlot);
+        // If we have exact start times but not categorized
+        if (originalActivity.availability?.exactStartTimes?.length > 0) {
+            return originalActivity.availability.exactStartTimes[0];
+        }
+        // If we have real-time verification data
+        if (originalActivity.availability?.realTimeVerification?.exactStartTimes?.length > 0) {
+            return originalActivity.availability.realTimeVerification.exactStartTimes[0];
+        }
+        // If no real availability data found, log warning and throw error
+        logger.warn('[Schedule] No real availability times found for activity', {
+            activityName: originalActivity.name,
+            timeSlot: scheduledActivity.timeSlot,
+            availability: originalActivity.availability
+        });
+        throw new Error(`No real availability times found for activity: ${originalActivity.name}`);
     }
     generateAvailabilityNotes(activity) {
-        if (!activity.availability)
+        if (!activity.availability) {
             return 'Standard operating hours';
+        }
         const notes = [];
         if (activity.availability.realTimeVerification?.verified) {
             notes.push('Real-time availability verified');
@@ -1544,8 +1576,13 @@ Return as JSON with:
         if (activity.availability.operatingHours) {
             notes.push(`Operating hours: ${activity.availability.operatingHours}`);
         }
-        if (activity.availability.bestTimeToVisit) {
-            notes.push(`Best time to visit: ${activity.availability.bestTimeToVisit}`);
+        if (activity.availability.timesByCategory) {
+            const slots = Object.entries(activity.availability.timesByCategory)
+                .filter(([_, times]) => times.length > 0)
+                .map(([slot, times]) => `${slot}: ${times.join(', ')}`);
+            if (slots.length > 0) {
+                notes.push(`Available time slots: ${slots.join(' | ')}`);
+            }
         }
         return notes.join('. ') || 'Standard operating hours';
     }
