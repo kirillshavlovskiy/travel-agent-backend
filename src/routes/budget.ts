@@ -3,7 +3,7 @@ import { VacationBudgetAgent } from '../services/agents.js';
 import { PrismaClient } from '@prisma/client';
 import { cities } from '../data/cities.js';
 import { airports } from '../data/airports.js';
-import { AmadeusService } from '../services/amadeus.js';
+import { AmadeusService } from '../services/amadeus';
 import { FlightService } from '../services/flights.js';
 import { AirlineInfo } from '../types.js';
 import { AmadeusSegment, AmadeusFare, AmadeusFareDetail, AmadeusFlightOffer } from '../types/amadeus.js';
@@ -26,6 +26,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { enhanceDailyPlansWithPreferences } from '../utils/itinerary';
 import { createProximityBasedSchedule } from '../utils/proximity';
+import amadeusService from '../services/amadeus';
 
 const router = Router();
 const amadeusService = new AmadeusService();
@@ -1108,6 +1109,23 @@ router.post('/calculate', async (req: Request, res: Response) => {
             scheduledByDay: []
           },
           totalBudget: transformedRequest.budget,
+          // Add flights data to the response
+          flights: {
+            all: transformedRequest.flightData || [],
+            stats: {
+              totalFlights: transformedRequest.flightData?.length || 0,
+              byClass: {
+                economy: transformedRequest.flightData?.filter(f => 
+                  f.travelerPricings[0]?.fareDetailsBySegment[0]?.cabin === 'ECONOMY').length || 0,
+                premiumEconomy: transformedRequest.flightData?.filter(f => 
+                  f.travelerPricings[0]?.fareDetailsBySegment[0]?.cabin === 'PREMIUM_ECONOMY').length || 0,
+                business: transformedRequest.flightData?.filter(f => 
+                  f.travelerPricings[0]?.fareDetailsBySegment[0]?.cabin === 'BUSINESS').length || 0,
+                first: transformedRequest.flightData?.filter(f => 
+                  f.travelerPricings[0]?.fareDetailsBySegment[0]?.cabin === 'FIRST').length || 0
+              }
+            }
+          },
                 metadata: {
             perplexityCalls: 0,
             scheduleGeneration: {
