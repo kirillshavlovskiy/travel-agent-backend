@@ -12,6 +12,7 @@ const SYSTEM_MESSAGE = `You are an AI travel budget expert. Your role is to:
 export class VacationBudgetAgent {
     constructor(flightService) {
         this.startTime = Date.now();
+        this.dayThemes = null;
         this.flightService = flightService;
     }
     async fetchWithRetry(url, options, retries = 3) {
@@ -90,6 +91,22 @@ export class VacationBudgetAgent {
         const returnSegments = flight.itineraries[1]?.segments || [];
         const returnFirstSegment = returnSegments[0];
         const returnLastSegment = returnSegments[returnSegments.length - 1];
+        // Collect all airport codes for city name lookup
+        const airportCodes = [];
+        // Add outbound segment airport codes
+        segments.forEach(segment => {
+            if (segment.departure?.iataCode)
+                airportCodes.push(segment.departure.iataCode);
+            if (segment.arrival?.iataCode)
+                airportCodes.push(segment.arrival.iataCode);
+        });
+        // Add return segment airport codes
+        returnSegments.forEach(segment => {
+            if (segment.departure?.iataCode)
+                airportCodes.push(segment.departure.iataCode);
+            if (segment.arrival?.iataCode)
+                airportCodes.push(segment.arrival.iataCode);
+        });
         const route = `${firstSegment.departure.iataCode} to ${lastSegment.arrival.iataCode}`;
         const flightRef = {
             id: `${firstSegment.carrierCode}${firstSegment.number}-${Date.now()}`,
@@ -110,6 +127,8 @@ export class VacationBudgetAgent {
                 outbound: firstSegment.departure.at,
                 inbound: returnFirstSegment ? returnFirstSegment.departure.at : '',
             }),
+            // Add airportCodes for city name lookup in the frontend
+            airportCodes: [...new Set(airportCodes)],
             details: {
                 outbound: {
                     duration: flight.itineraries[0].duration,
@@ -220,93 +239,109 @@ export class VacationBudgetAgent {
     }
     async handleTravelRequest(request) {
         try {
+            // Add missing variable declarations
+            let flightData = [];
+            let errors = [];
             const response = {
-                requestDetails: {
-                    departureLocation: request.departureLocation,
-                    destinations: request.destinations,
-                    travelers: Number(request.travelers),
-                    startDate: request.startDate,
-                    endDate: request.endDate,
-                    currency: request.currency || 'USD'
-                }
+                success: true,
+                type: 'vacation',
+                summary: {
+                    totalCost: 0,
+                    accommodation: 0,
+                    transportation: 0,
+                    activities: 0,
+                    food: 0,
+                    other: 0
+                },
+                breakdown: {
+                    accommodation: [],
+                    transportation: [],
+                    activities: [],
+                    food: [],
+                    other: []
+                },
             };
-            // Search for flights first
-            try {
-                logger.info('[Flights] Searching for flights:', {
+            // Determine budget distribution based on the country
+            const budgetDistribution = this.getBudgetDistribution(request.destinations[0].label);
+            // If we have flight data in the request, use it
+            if (request.flightData && request.flightData.length > 0) {
+                flightData = request.flightData;
+                logger.info('[VacationBudgetAgent] Using provided flight data', {
+                    count: flightData.length,
+                    firstFlight: flightData[0]?.id
+                });
+            }
+            else {
+                // Try to get flight data with retries
+                const cabinClasses = ['ECONOMY', 'PREMIUM_ECONOMY', 'BUSINESS', 'FIRST'];
+                logger.info('[VacationBudgetAgent] Searching for flights', {
                     origin: request.departureLocation.code,
                     destination: request.destinations[0].code,
-                    startDate: request.startDate,
-                    endDate: request.endDate,
-                    travelers: request.travelers
+                    outboundDate: new Date(request.startDate).toISOString().split('T')[0],
+                    returnDate: new Date(request.endDate).toISOString().split('T')[0],
+                    travelers: Number(request.travelers)
                 });
-                const flightResults = await this.flightService.searchFlights({
-                    origin: request.departureLocation.code,
-                    destination: request.destinations[0].code,
-                    departureDate: request.startDate,
-                    returnDate: request.endDate,
-                    adults: Number(request.travelers),
-                    currency: request.currency
-                });
-                if (flightResults.success && flightResults.data) {
-                    const flightOffers = flightResults.data;
-                    response.flights = {
-                        budget: {
-                            min: 0,
-                            max: 0,
-                            average: 0,
-                            confidence: 0.8,
-                            source: 'Amadeus API',
-                            references: flightOffers.filter(offer => this.determineFlightTier(offer) === 'budget')
-                                .map(offer => this.transformAmadeusFlight(offer))
-                        },
-                        medium: {
-                            min: 0,
-                            max: 0,
-                            average: 0,
-                            confidence: 0.8,
-                            source: 'Amadeus API',
-                            references: flightOffers.filter(offer => this.determineFlightTier(offer) === 'medium')
-                                .map(offer => this.transformAmadeusFlight(offer))
-                        },
-                        premium: {
-                            min: 0,
-                            max: 0,
-                            average: 0,
-                            confidence: 0.8,
-                            source: 'Amadeus API',
-                            references: flightOffers.filter(offer => this.determineFlightTier(offer) === 'premium')
-                                .map(offer => this.transformAmadeusFlight(offer))
+                // Sequential search with delay between requests to avoid rate limiting
+                for (const travelClass of cabinClasses) {
+                    try {
+                        logger.info(`[VacationBudgetAgent] Searching for ${travelClass} flights`);
+                        const formattedDepartureDate = new Date(request.startDate).toISOString().split('T')[0];
+                        const formattedReturnDate = new Date(request.endDate).toISOString().split('T')[0];
+                        const result = await this.flightService.searchFlights({
+                            segments: [{
+                                    originLocationCode: request.departureLocation.code,
+                                    destinationLocationCode: request.destinations[0].code,
+                                    departureDate: formattedDepartureDate
+                                }, {
+                                    originLocationCode: request.destinations[0].code,
+                                    destinationLocationCode: request.departureLocation.code,
+                                    departureDate: formattedReturnDate
+                                }],
+                            adults: Number(request.travelers),
+                            travelClass
+                        });
+                        if (result && result.length > 0) {
+                            logger.info(`[VacationBudgetAgent] Found ${result.length} ${travelClass} flights`);
+                            flightData.push(...result);
                         }
-                    };
-                    // Calculate min, max, and average for each tier
-                    ['budget', 'medium', 'premium'].forEach(tier => {
-                        const references = response.flights[tier].references;
-                        if (references.length > 0) {
-                            const prices = references.map(ref => ref.price.amount);
-                            response.flights[tier].min = Math.min(...prices);
-                            response.flights[tier].max = Math.max(...prices);
-                            response.flights[tier].average = prices.reduce((a, b) => a + b, 0) / prices.length;
+                        else {
+                            logger.warn(`[VacationBudgetAgent] No ${travelClass} flights found`);
                         }
-                    });
-                    logger.info('[Flights] Successfully retrieved flight offers:', {
-                        totalFlights: flightOffers.length,
-                        budgetFlights: response.flights.budget.references.length,
-                        mediumFlights: response.flights.medium.references.length,
-                        premiumFlights: response.flights.premium.references.length
-                    });
-                }
-                else {
-                    logger.warn('[Flights] No flight results found, using default flight data');
-                    response.flights = this.getDefaultCategoryData('flights').flights;
+                        // Add delay between requests to avoid rate limiting
+                        await new Promise(resolve => setTimeout(resolve, 1000));
+                    }
+                    catch (error) {
+                        logger.warn(`[VacationBudgetAgent] Failed to fetch ${travelClass} flights`, {
+                            error: error instanceof Error ? error.message : 'Unknown error'
+                        });
+                        errors.push(error);
+                        // Add longer delay after error
+                        await new Promise(resolve => setTimeout(resolve, 2000));
+                    }
                 }
             }
-            catch (error) {
-                logger.error('[Flights] Error searching flights:', {
-                    error: error instanceof Error ? error.message : 'Unknown error',
-                    stack: error instanceof Error ? error.stack : undefined
+            // Only throw error if we have no flight data at all
+            if (flightData.length === 0) {
+                logger.error('[VacationBudgetAgent] No flight data available after all attempts', {
+                    errors: errors.map(e => e.message)
                 });
-                response.flights = this.getDefaultCategoryData('flights').flights;
+                throw new Error('No flights available for the specified dates and route. Please try different dates or destinations.');
             }
+            // Log the flight search results with statistics by cabin class
+            logger.info('[VacationBudgetAgent] Flight search results:', {
+                totalFlights: flightData.length,
+                byClass: {
+                    economy: flightData.filter(f => f.travelerPricings[0]?.fareDetailsBySegment[0]?.cabin === 'ECONOMY').length,
+                    premiumEconomy: flightData.filter(f => f.travelerPricings[0]?.fareDetailsBySegment[0]?.cabin === 'PREMIUM_ECONOMY').length,
+                    business: flightData.filter(f => f.travelerPricings[0]?.fareDetailsBySegment[0]?.cabin === 'BUSINESS').length,
+                    first: flightData.filter(f => f.travelerPricings[0]?.fareDetailsBySegment[0]?.cabin === 'FIRST').length
+                },
+                priceRange: flightData.length > 0 ? {
+                    min: Math.min(...flightData.map(f => parseFloat(f.price.total))),
+                    max: Math.max(...flightData.map(f => parseFloat(f.price.total))),
+                    currency: flightData[0].price.currency
+                } : null
+            });
             // Calculate number of days
             const days = Math.ceil((new Date(request.endDate).getTime() - new Date(request.startDate).getTime()) / (1000 * 60 * 60 * 24));
             // Ensure we have a valid API base URL
@@ -504,6 +539,34 @@ export class VacationBudgetAgent {
                         }
                     }
                     response.dailyPlans = dailyPlans;
+                    // Create our own dayHighlights using the optimized themes
+                    const customDayHighlights = dailyPlans.map(plan => {
+                        // Get the activities for this day
+                        const dayActivities = transformedActivities.filter(activity => activity.dayNumber === plan.dayNumber);
+                        // Create highlights for the activities
+                        const activityHighlights = dayActivities.map(activity => {
+                            const duration = Math.round(activity.duration / 60);
+                            return `${activity.name} (${duration}h) - ${activity.description.split('.')[0]}.`;
+                        });
+                        // Filter activities by rating, checking if the rating property exists
+                        const topAttractions = dayActivities
+                            .filter(a => {
+                            // Check if the rating property exists and is >= 4.5
+                            return typeof a['rating'] !== 'undefined' && a['rating'] >= 4.5;
+                        })
+                            .map(a => a.name);
+                        return {
+                            dayNumber: plan.dayNumber,
+                            theme: plan.theme, // Use our optimized theme from the dailyPlan
+                            highlights: activityHighlights,
+                            mainAttractions: topAttractions.length > 0 ? topAttractions : [dayActivities[0]?.name || 'City exploration']
+                        };
+                    });
+                    // Override the dayHighlights with our custom ones if we have them
+                    if (customDayHighlights.length > 0) {
+                        logger.info('[VacationBudgetAgent] Using custom day highlights with optimized themes');
+                        response.dayHighlights = customDayHighlights;
+                    }
                 }
                 return response;
             }
@@ -1069,11 +1132,15 @@ For each activity you find, include:
             // Extract price and availability information
             const price = activity.price?.amount || 0;
             const availabilityData = activity.availability || {};
-            // Get real-time availability data
-            const exactStartTimes = availabilityData.exactStartTimes || [];
+            // Get real-time availability data or use defaults
+            let exactStartTimes = availabilityData.exactStartTimes || [];
+            // If no times available, provide defaults based on timeSlot
             if (exactStartTimes.length === 0) {
-                logger.error(`[Activity] No available times found for activity: ${activity.name}`);
-                throw new Error(`No available times found for activity: ${activity.name}`);
+                logger.warn(`[Activity] No available times found for activity: ${activity.name}, using defaults`);
+                const defaultTime = activity.timeSlot === 'morning' ? '09:00' :
+                    activity.timeSlot === 'afternoon' ? '14:00' :
+                        activity.timeSlot === 'evening' ? '19:00' : '09:00';
+                exactStartTimes = [defaultTime];
             }
             // Categorize times into slots
             const timesByCategory = {
@@ -1130,7 +1197,7 @@ For each activity you find, include:
             const transformedActivity = {
                 ...activity,
                 timeSlot,
-                startTime, // This will override any default start time
+                startTime,
                 availability: {
                     isAvailable: true,
                     availableTimeSlots,
@@ -1147,10 +1214,6 @@ For each activity you find, include:
                     }
                 }
             };
-            // Ensure we're not carrying over any default times
-            if (transformedActivity.startTime === "09:00" && exactStartTimes[0] !== "09:00") {
-                transformedActivity.startTime = startTime;
-            }
             return transformedActivity;
         }
         catch (error) {
@@ -1159,7 +1222,30 @@ For each activity you find, include:
                 error: error instanceof Error ? error.message : 'Unknown error',
                 stack: error instanceof Error ? error.stack : undefined
             });
-            throw error;
+            // Return activity with default values instead of throwing
+            const defaultTime = activity.timeSlot === 'morning' ? '09:00' :
+                activity.timeSlot === 'afternoon' ? '14:00' :
+                    activity.timeSlot === 'evening' ? '19:00' : '09:00';
+            return {
+                ...activity,
+                timeSlot: activity.timeSlot || 'morning',
+                startTime: defaultTime,
+                availability: {
+                    isAvailable: true,
+                    availableTimeSlots: [activity.timeSlot || 'morning'],
+                    exactStartTimes: [defaultTime],
+                    timesByCategory: {
+                        morning: activity.timeSlot === 'morning' ? [defaultTime] : [],
+                        afternoon: activity.timeSlot === 'afternoon' ? [defaultTime] : [],
+                        evening: activity.timeSlot === 'evening' ? [defaultTime] : []
+                    },
+                    realTimeVerification: {
+                        verified: false,
+                        exactStartTimes: [defaultTime],
+                        lastChecked: new Date().toISOString()
+                    }
+                }
+            };
         }
     }
     getDefaultActivities(params) {
@@ -1256,9 +1342,27 @@ For each activity you find, include:
                 location: 'Restaurant district'
             }
         };
-        // Generate theme based on activities
-        const activityCategories = new Set(activities.map(a => a.category));
-        const theme = Array.from(activityCategories).join(' & ') || 'City Exploration';
+        // Generate theme based on activities - use optimized theme from Perplexity if available
+        let theme;
+        if (this.dayThemes && this.dayThemes.has(dayNumber)) {
+            // Use the optimized theme from Perplexity
+            theme = this.dayThemes.get(dayNumber).theme;
+            logger.info('[Agents] Using optimized theme for day', {
+                dayNumber,
+                theme,
+                explanation: this.dayThemes.get(dayNumber).explanation
+            });
+        }
+        else {
+            // Fall back to calculating a theme based on activities
+            const activityCategories = new Set(activities.map(a => a.category));
+            theme = Array.from(activityCategories).join(' & ') || 'City Exploration';
+            logger.info('[Agents] Generated fallback theme for day', {
+                dayNumber,
+                theme,
+                method: 'category-based'
+            });
+        }
         // Determine main area based on activities
         const mainArea = activities.length > 0
             ? activities[0].location.split(',')[0]
@@ -1417,9 +1521,21 @@ Requirements:
 4. Consider typical meal times (lunch 12:00-14:00, dinner after 18:00)
 5. Account for travel time between locations
 6. Ensure activities don't overlap
+7. Generate a specific, descriptive day theme based on the activities' focus
 
-Return a JSON schedule with exact start times for each activity:
+For the day theme, DO NOT use generic themes like "Mixed Activities". Instead:
+- If activities share common categories, create a theme that captures their essence
+- Consider the specific attractions (e.g., "Seine River Exploration" instead of "Water Activities")
+- Use specific adjectives that highlight the unique appeal (e.g., "Historic Paris Discovery")
+- For varied activities, find a cohesive narrative (e.g., "Paris Highlights: Art & Cuisine")
+- Museum-focused days should highlight the specific collections or styles
+- Food activities should reference the cuisine type or dining experience
+- Outdoor activities should reference the specific landmarks or natural features
+
+Return a JSON schedule with exact start times for each activity and day theme:
 {
+  "dayTheme": "Specific themed name for this day's activities",
+  "themeExplanation": "Brief explanation of why this theme fits",
   "optimizedSchedule": [
     {
       "activityName": "string",
@@ -1432,6 +1548,19 @@ Return a JSON schedule with exact start times for each activity:
             // Get optimized schedule from Perplexity
             const result = await perplexityClient.chat(prompt);
             const schedule = JSON.parse(result.choices[0].message.content);
+            // Log the theme information
+            logger.info(`[Schedule] Day ${dayNumber} theme generated:`, {
+                theme: schedule.dayTheme,
+                explanation: schedule.themeExplanation
+            });
+            // Store the theme in a global map for later use
+            if (!this.dayThemes) {
+                this.dayThemes = new Map();
+            }
+            this.dayThemes.set(dayNumber, {
+                theme: schedule.dayTheme,
+                explanation: schedule.themeExplanation
+            });
             // Map the optimized times back to activities
             return activities.map(activity => {
                 const optimizedActivity = schedule.optimizedSchedule.find((opt) => opt.activityName === activity.name);
@@ -1549,6 +1678,69 @@ Return a JSON schedule with exact start times for each activity:
             case 2: return 'evening';
             default: return 'morning';
         }
+    }
+    // Add this method to the VacationBudgetAgent class
+    /**
+     * Returns the budget distribution percentages based on destination
+     * @param destination The destination to get budget distribution for
+     * @returns Budget distribution percentages for different categories
+     */
+    getBudgetDistribution(destination) {
+        logger.info('[VacationBudgetAgent] Getting budget distribution for', { destination });
+        // Default distribution
+        const defaultDistribution = {
+            flights: 40,
+            accommodation: 30,
+            activities: 15,
+            food: 10,
+            other: 5
+        };
+        // You can add destination-specific distributions here if needed
+        const destinationMap = {
+            'Paris': {
+                flights: 35,
+                accommodation: 35,
+                activities: 15,
+                food: 12,
+                other: 3
+            },
+            'London': {
+                flights: 30,
+                accommodation: 40,
+                activities: 15,
+                food: 10,
+                other: 5
+            },
+            'Tokyo': {
+                flights: 45,
+                accommodation: 30,
+                activities: 10,
+                food: 12,
+                other: 3
+            },
+            'New York': {
+                flights: 30,
+                accommodation: 40,
+                activities: 12,
+                food: 13,
+                other: 5
+            }
+        };
+        // Check if we have a specific distribution for this destination
+        for (const [key, distribution] of Object.entries(destinationMap)) {
+            if (destination.includes(key)) {
+                logger.info('[VacationBudgetAgent] Using custom budget distribution for', {
+                    destination,
+                    distribution
+                });
+                return distribution;
+            }
+        }
+        // Fall back to default distribution
+        logger.info('[VacationBudgetAgent] Using default budget distribution', {
+            distribution: defaultDistribution
+        });
+        return defaultDistribution;
     }
 }
 // Helper function to determine time slot based on start time and duration

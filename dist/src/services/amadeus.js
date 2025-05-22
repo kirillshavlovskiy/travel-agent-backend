@@ -1,5 +1,6 @@
-import Amadeus from 'amadeus';
-import { logger } from '../utils/logger.js';
+// Using require since Amadeus seems to be a CommonJS module
+const Amadeus = require('amadeus');
+import { logger } from '../utils/logger';
 const AIRCRAFT_CODES = {
     '319': 'Airbus A319',
     '320': 'Airbus A320',
@@ -61,29 +62,20 @@ export class AmadeusService {
         this.CACHE_TTL = 24 * 60 * 60 * 1000; // 24 hours in milliseconds
         const clientId = process.env.AMADEUS_CLIENT_ID;
         const clientSecret = process.env.AMADEUS_CLIENT_SECRET;
-        logger.info('Initializing Amadeus service', {
-            hasClientId: !!clientId,
-            hasClientSecret: !!clientSecret
-        });
         if (!clientId || !clientSecret) {
-            logger.error('Missing Amadeus API credentials', {
-                clientIdPresent: !!clientId,
-                clientSecretPresent: !!clientSecret
-            });
-            throw new Error('Missing Amadeus API credentials');
+            throw new Error('Amadeus credentials are not configured');
         }
         try {
-            this.amadeus = new Amadeus({
+            console.log('Initializing Amadeus client with environment:', process.env.NODE_ENV);
+            this.client = new Amadeus({
                 clientId,
                 clientSecret,
+                logLevel: 'debug'
             });
-            logger.info('Amadeus client initialized successfully');
+            console.log('Amadeus client initialized successfully');
         }
         catch (error) {
-            logger.error('Failed to initialize Amadeus client', {
-                error: error instanceof Error ? error.message : 'Unknown error',
-                stack: error instanceof Error ? error.stack : undefined
-            });
+            console.error('Error initializing Amadeus client:', error);
             throw error;
         }
     }
@@ -91,7 +83,7 @@ export class AmadeusService {
         try {
             logger.info('Searching for hotels in city', { params });
             // Get hotels with offers
-            const hotelsResponse = await this.amadeus.shopping.hotelOffers.get({
+            const hotelsResponse = await this.client.shopping.hotelOffers.get({
                 cityCode: params.cityCode,
                 checkInDate: params.checkInDate,
                 checkOutDate: params.checkOutDate,
@@ -287,23 +279,41 @@ export class AmadeusService {
     async searchFlights(params) {
         return this.executeWithRateLimit(async () => {
             try {
-                logger.info('Searching flights with params:', {
-                    segments: params.segments,
+                // First, determine if we're using legacy or segments format
+                let segments = params.segments || [];
+                // If no segments provided but legacy parameters are available, create segments
+                if (segments.length === 0 && params.originLocationCode && params.destinationLocationCode && params.departureDate) {
+                    // Create outbound segment
+                    segments.push({
+                        originLocationCode: params.originLocationCode,
+                        destinationLocationCode: params.destinationLocationCode,
+                        departureDate: params.departureDate
+                    });
+                    // Add return segment if return date is provided
+                    if (params.returnDate) {
+                        segments.push({
+                            originLocationCode: params.destinationLocationCode,
+                            destinationLocationCode: params.originLocationCode,
+                            departureDate: params.returnDate
+                        });
+                    }
+                }
+                // Now validate the segments
+                if (!segments || segments.length === 0) {
+                    logger.error('Flight search error: No segments defined', {
+                        originalParams: params,
+                        segments
+                    });
+                    throw new Error('At least one flight segment is required');
+                }
+                logger.info('Searching flights with segments:', {
+                    segments,
                     travelClass: params.travelClass,
                     adults: params.adults
                 });
-                if (!params.segments || !Array.isArray(params.segments) || params.segments.length === 0) {
-                    throw new Error('At least one flight segment is required');
-                }
-                // Validate all segments
-                params.segments.forEach((segment, index) => {
-                    if (!segment.originLocationCode || !segment.destinationLocationCode || !segment.departureDate) {
-                        throw new Error(`Invalid segment data at index ${index}: origin, destination, and departure date are required`);
-                    }
-                });
                 // Format the search parameters according to Amadeus API requirements
                 const searchParams = {
-                    originDestinations: params.segments.map((segment, index) => ({
+                    originDestinations: segments.map((segment, index) => ({
                         id: String(index + 1),
                         originLocationCode: segment.originLocationCode,
                         destinationLocationCode: segment.destinationLocationCode,
@@ -311,7 +321,7 @@ export class AmadeusService {
                             date: segment.departureDate
                         }
                     })),
-                    travelers: Array.from({ length: params.adults }, (_, i) => ({
+                    travelers: Array.from({ length: params.adults || 1 }, (_, i) => ({
                         id: String(i + 1),
                         travelerType: 'ADULT'
                     })),
@@ -320,50 +330,37 @@ export class AmadeusService {
                         maxFlightOffers: params.max || 100,
                         flightFilters: {
                             cabinRestrictions: [{
-                                    cabin: params.travelClass,
+                                    cabin: params.travelClass || 'ECONOMY',
                                     coverage: 'MOST_SEGMENTS',
-                                    originDestinationIds: params.segments.map((_, i) => String(i + 1))
+                                    originDestinationIds: segments.map((_, i) => String(i + 1))
                                 }]
                         }
                     }
                 };
-                logger.info('Making Amadeus API call with formatted params:', searchParams);
-                const response = await this.amadeus.shopping.flightOffersSearch.post(JSON.stringify(searchParams));
+                logger.info('Making Amadeus API call with formatted params:', {
+                    originDestinations: searchParams.originDestinations,
+                    travelers: searchParams.travelers.length,
+                    cabin: params.travelClass || 'ECONOMY'
+                });
+                const response = await this.client.shopping.flightOffersSearch.post(JSON.stringify(searchParams));
                 if (!response || !response.body) {
-                    logger.error('Empty response from Amadeus API', {
-                        response,
-                        params: searchParams
-                    });
-                    throw new Error('No response received from flight search');
+                    logger.warn('Empty response from Amadeus API');
+                    return [];
                 }
                 const results = typeof response.body === 'string' ? JSON.parse(response.body) : response.body;
-                if (!results.data || !Array.isArray(results.data)) {
-                    logger.error('Invalid response format from Amadeus API', {
-                        results,
-                        params: searchParams
-                    });
-                    throw new Error('Invalid flight search response format');
-                }
-                if (results.data.length === 0) {
-                    logger.warn('No flights found for the given criteria', {
-                        params: searchParams,
-                        response: results
-                    });
-                    throw new Error('No flights available for the specified criteria');
-                }
                 logger.info('Flight search successful', {
-                    count: results.data.length,
+                    count: results.data?.length || 0,
                     dictionaries: results.dictionaries,
-                    firstResult: results.data[0],
-                    priceRange: {
-                        min: Math.min(...results.data.map(f => parseFloat(f.price.total))),
-                        max: Math.max(...results.data.map(f => parseFloat(f.price.total))),
+                    firstResult: results.data?.[0],
+                    priceRange: results.data?.length > 0 ? {
+                        min: Math.min(...results.data.map((f) => parseFloat(f.price.total))),
+                        max: Math.max(...results.data.map((f) => parseFloat(f.price.total))),
                         currency: results.data[0].price.currency
-                    }
+                    } : null
                 });
                 // Store dictionaries for later use
                 this.lastFlightSearchDictionaries = results.dictionaries || null;
-                return results.data;
+                return results.data || [];
             }
             catch (error) {
                 logger.error('Failed to search flights', {
@@ -384,25 +381,10 @@ export class AmadeusService {
                         }
                     } : 'Unknown error',
                     params,
-                    amadeusInitialized: !!this.amadeus,
-                    hasShoppingAPI: !!this.amadeus?.shopping?.flightOffersSearch?.post
+                    amadeusInitialized: !!this.client,
+                    hasShoppingAPI: !!this.client?.shopping?.flightOffersSearch?.post
                 });
-                // Throw a more descriptive error
-                if (error instanceof Error) {
-                    if (error.message.includes('No flights available')) {
-                        throw new Error('No flights available for the specified dates and route');
-                    }
-                    else if (error?.response?.statusCode === 401) {
-                        throw new Error('Authentication failed with Amadeus API');
-                    }
-                    else if (error?.response?.statusCode === 429) {
-                        throw new Error('Rate limit exceeded for flight search');
-                    }
-                    else {
-                        throw new Error(`Flight search failed: ${error.message}`);
-                    }
-                }
-                throw new Error('Failed to search for flights');
+                throw error; // Re-throw to handle upstream
             }
         });
     }
@@ -412,7 +394,7 @@ export class AmadeusService {
                 offerId: flightOffer.id,
                 price: flightOffer.price
             });
-            const response = await this.amadeus.shopping.flightOffersSearch.pricing.post(JSON.stringify({
+            const response = await this.client.shopping.flightOffersSearch.pricing.post(JSON.stringify({
                 data: {
                     type: 'flight-offers-pricing',
                     flightOffers: [flightOffer]
@@ -432,6 +414,77 @@ export class AmadeusService {
             });
             throw error;
         }
+    }
+    /**
+     * Creates a flight booking using the Amadeus Flight Orders API
+     * @param flightOffer The flight offer to book
+     * @param travelers The travelers information
+     * @param contacts Contact information
+     * @param remarks Optional remarks
+     * @returns The booking information including PNR
+     */
+    async createFlightBooking(params) {
+        logger.info('Creating flight booking', {
+            originDestination: `${params.flightOffer.itineraries[0]?.segments[0]?.departure?.iataCode} - ${params.flightOffer.itineraries[0]?.segments[params.flightOffer.itineraries[0]?.segments.length - 1]?.arrival?.iataCode}`,
+            travelers: params.travelers.length,
+            flightOfferId: params.flightOffer.id
+        });
+        return this.executeWithRateLimit(async () => {
+            try {
+                // Prepare the request payload
+                const payload = {
+                    data: {
+                        type: 'flight-order',
+                        flightOffers: [params.flightOffer],
+                        travelers: params.travelers,
+                        remarks: params.remarks || {
+                            general: [
+                                {
+                                    subType: 'GENERAL_MISCELLANEOUS',
+                                    text: 'ONLINE BOOKING FROM CHIPTRIP'
+                                }
+                            ]
+                        },
+                        ticketingAgreement: params.ticketingAgreement || {
+                            option: 'DELAY_TO_CANCEL',
+                            delay: '6D'
+                        },
+                        contacts: params.contacts
+                    }
+                };
+                // Make the Amadeus API call
+                const response = await this.client.booking.flightOrders.post(JSON.stringify(payload));
+                // Parse the response
+                const result = JSON.parse(response.body);
+                logger.info('Flight booking created successfully', {
+                    pnr: result.data?.id,
+                    flightOfferId: params.flightOffer.id,
+                    associatedRecords: result.data?.associatedRecords
+                });
+                return {
+                    id: result.data?.id,
+                    associatedRecords: result.data?.associatedRecords,
+                    success: true
+                };
+            }
+            catch (error) {
+                logger.error('Error creating flight booking', {
+                    error: error instanceof Error ? error.message : 'Unknown error',
+                    stack: error instanceof Error ? error.stack : undefined,
+                    flightOfferId: params.flightOffer.id
+                });
+                // Check if we have detailed API error information
+                let errors = [];
+                if (error.response && error.response.data && error.response.data.errors) {
+                    errors = error.response.data.errors.map((e) => e.detail || e.title || JSON.stringify(e));
+                }
+                return {
+                    id: '',
+                    success: false,
+                    errors: errors.length ? errors : [(error instanceof Error) ? error.message : 'Unknown booking error']
+                };
+            }
+        });
     }
     calculateTotalDuration(segments) {
         let totalMinutes = 0;
@@ -541,7 +594,7 @@ export class AmadeusService {
         return this.executeWithRateLimit(async () => {
             try {
                 logger.info('Searching locations with keyword', { keyword });
-                const response = await this.amadeus.referenceData.locations.get({
+                const response = await this.client.referenceData.locations.get({
                     keyword,
                     subType: 'CITY,AIRPORT',
                     view: 'LIGHT'
@@ -566,5 +619,142 @@ export class AmadeusService {
                 throw error;
             }
         });
+    }
+    // Add a method to get city name for an airport code
+    async getAirportCityName(airportCode) {
+        if (!airportCode || airportCode.length < 3) {
+            logger.warn('Invalid airport code provided', { airportCode });
+            return null;
+        }
+        // Check if we have it in cache first
+        const cacheKey = `airport-${airportCode.toUpperCase()}`;
+        const cached = this.locationCache.get(cacheKey);
+        if (cached && this.isCacheValid(cached.timestamp)) {
+            logger.info('Returning cached airport city name', {
+                airportCode,
+                cacheAge: Math.round((Date.now() - cached.timestamp) / 1000 / 60) + ' minutes'
+            });
+            return cached.data[0]?.address?.cityName || null;
+        }
+        return this.executeWithRateLimit(async () => {
+            try {
+                logger.info('Looking up city name for airport code', { airportCode });
+                const response = await this.client.referenceData.locations.get({
+                    keyword: airportCode,
+                    subType: 'AIRPORT', // Specifically looking for airports
+                    page: {
+                        limit: 1, // We only need one result
+                        offset: 0
+                    },
+                    view: 'FULL'
+                });
+                const result = JSON.parse(response.body);
+                const locations = result.data || [];
+                if (locations.length === 0) {
+                    logger.warn('No location found for airport code', { airportCode });
+                    return null;
+                }
+                const cityName = locations[0]?.address?.cityName || null;
+                logger.info('Successfully retrieved city name for airport code', {
+                    airportCode,
+                    cityName,
+                    locationData: locations[0]
+                });
+                // Cache the results
+                this.locationCache.set(cacheKey, {
+                    data: locations,
+                    timestamp: Date.now()
+                });
+                return cityName;
+            }
+            catch (error) {
+                logger.error('Failed to get city name for airport code', {
+                    error: error instanceof Error ? error.message : 'Unknown error',
+                    stack: error instanceof Error ? error.stack : undefined,
+                    airportCode
+                });
+                return null; // Return null instead of throwing on error
+            }
+        });
+    }
+    // New method to get city names for multiple airport codes at once
+    async getAirportCityNames(airportCodes) {
+        if (!airportCodes || airportCodes.length === 0) {
+            return {};
+        }
+        logger.info('Getting city names for multiple airport codes', {
+            count: airportCodes.length,
+            codes: airportCodes.slice(0, 5).join(', ') + (airportCodes.length > 5 ? '...' : '')
+        });
+        const result = {};
+        // Process in batches to avoid rate limiting
+        const batchSize = 5;
+        const uniqueCodes = [...new Set(airportCodes.filter(code => code && code.length >= 3))];
+        for (let i = 0; i < uniqueCodes.length; i += batchSize) {
+            const batch = uniqueCodes.slice(i, i + batchSize);
+            const promises = batch.map(code => this.getAirportCityName(code));
+            try {
+                const cityNames = await Promise.all(promises);
+                batch.forEach((code, index) => {
+                    if (cityNames[index]) {
+                        result[code] = cityNames[index];
+                    }
+                });
+                // Small delay to prevent hitting rate limits
+                if (i + batchSize < uniqueCodes.length) {
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                }
+            }
+            catch (error) {
+                logger.error('Error processing batch of airport codes', {
+                    error: error instanceof Error ? error.message : 'Unknown error',
+                    batchStart: i,
+                    batchSize,
+                    affectedCodes: batch
+                });
+                // Continue with next batch despite errors
+            }
+        }
+        logger.info('Completed city name lookup for airport codes', {
+            requestedCount: airportCodes.length,
+            uniqueCount: uniqueCodes.length,
+            resultCount: Object.keys(result).length
+        });
+        return result;
+    }
+    /**
+     * Calls the Amadeus SeatMap API with a flight offer object (POST)
+     * @param flightOffer The flight offer object (as per Amadeus API)
+     * @returns The seat map data
+     */
+    async getSeatMap(flightOffer) {
+        try {
+            console.log('Requesting seat map with flight offer:', JSON.stringify(flightOffer, null, 2));
+            const response = await this.client.shopping.seatmaps.post({
+                data: [flightOffer]
+            });
+            if (!response.data || !Array.isArray(response.data) || response.data.length === 0) {
+                throw new Error('Invalid seat map response format');
+            }
+            console.log('Received seat map response:', JSON.stringify(response.data, null, 2));
+            return response;
+        }
+        catch (error) {
+            const errorDetails = error instanceof Error ? {
+                message: error.message,
+                stack: error.stack,
+                name: error.name,
+                raw: error
+            } : error;
+            console.error('Error in getSeatMap:', {
+                error: errorDetails,
+                flightOffer
+            });
+            if (error instanceof Error && 'description' in error) {
+                const amadeusError = error;
+                throw new Error(`Amadeus API error: ${amadeusError.description || amadeusError.message}`);
+            }
+            throw error;
+        }
     }
 }

@@ -202,4 +202,58 @@ router.get('/:id', (req: Request, res: Response) => {
   });
 });
 
+// Endpoint to get city names for airport codes
+router.get('/airport-city-names', async (req: Request, res: Response) => {
+  try {
+    const { codes } = req.query;
+    
+    if (!codes) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing airport codes'
+      });
+    }
+    
+    // Handle both comma-separated string and array formats
+    const airportCodes = Array.isArray(codes) 
+      ? codes 
+      : (typeof codes === 'string' ? codes.split(',') : []);
+    
+    if (airportCodes.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'No valid airport codes provided'
+      });
+    }
+    
+    // Clean up the codes (trim whitespace, convert to uppercase)
+    const cleanedCodes = airportCodes
+      .map(code => typeof code === 'string' ? code.trim().toUpperCase() : '')
+      .filter(code => code.length >= 3);
+
+    logger.info('Airport city names requested', {
+      originalCodes: airportCodes,
+      cleanedCodes,
+      count: cleanedCodes.length
+    });
+
+    const cityNames = await amadeusService.getAirportCityNames(cleanedCodes);
+    
+    return res.json({
+      success: true,
+      data: cityNames
+    });
+  } catch (error) {
+    logger.error('Error retrieving airport city names', {
+      error: error instanceof Error ? error.message : 'Unknown error',
+      stack: error instanceof Error ? error.stack : undefined
+    });
+    
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to retrieve airport city names'
+    });
+  }
+});
+
 export default router; 

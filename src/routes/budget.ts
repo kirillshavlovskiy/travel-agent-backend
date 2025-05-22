@@ -559,6 +559,276 @@ function calculateDays(startDate: string, endDate: string): number {
   return Math.ceil(diffTime / (1000 * 60 * 60 * 24)) + 1; // +1 to include both start and end days
 }
 
+// Add flight data transformation function
+function transformFlightData(flightData: AmadeusFlightOffer[]): any[] {
+  // Create a cache to store city names for airport codes
+  const cityNamesCache: Record<string, string> = {};
+  
+  // Helper function to get city name for an airport code
+  const getCityName = (airportCode: string): string => {
+    // If we already have it in cache, return it
+    if (cityNamesCache[airportCode]) {
+      return cityNamesCache[airportCode];
+    }
+    
+    // Otherwise return the airport code as fallback
+    // We'll populate the cache with actual values later when possible
+    return airportCode;
+  };
+
+  // Extract all unique airport codes from all flights
+  const airportCodes = new Set<string>();
+  flightData.forEach(flight => {
+    flight.itineraries.forEach(itinerary => {
+      itinerary.segments.forEach(segment => {
+        if (segment.departure?.iataCode) {
+          airportCodes.add(segment.departure.iataCode);
+        }
+        if (segment.arrival?.iataCode) {
+          airportCodes.add(segment.arrival.iataCode);
+        }
+      });
+    });
+  });
+
+  // Try to get city codes from flight dictionaries
+  flightData.forEach(flight => {
+    if (flight.dictionaries?.locations) {
+      Object.entries(flight.dictionaries.locations).forEach(([code, location]) => {
+        if (location?.address?.cityName) {
+          cityNamesCache[code] = location.address.cityName;
+        }
+      });
+    }
+  });
+  
+  return flightData.map(flight => {
+    // Get outbound and inbound segments
+    const outboundSegments = flight.itineraries[0]?.segments || [];
+    const inboundSegments = flight.itineraries[1]?.segments || [];
+    
+    // Calculate layovers
+    const totalStops = outboundSegments.length + inboundSegments.length - 2;
+
+    // Get cabin class
+    const cabinClass = flight.travelerPricings[0]?.fareDetailsBySegment[0]?.cabin || 'ECONOMY';
+
+    // Get airline info directly from the carrier data
+    const firstSegment = outboundSegments[0];
+    const carrierCode = firstSegment?.carrierCode || '';
+    
+    // Get the carrier name from the dictionaries if available
+    const carrierName = flight.dictionaries?.carriers?.[carrierCode] || // Use carrier name from dictionaries
+                       firstSegment?.operating?.carrierName || // Or use operating carrier name
+                       firstSegment?.carrier?.name || // Or use marketing carrier name
+                       `Airline ${carrierCode}`; // Fallback
+
+    // Calculate route
+    const route = `${outboundSegments[0]?.departure.iataCode || ''} to ${outboundSegments[outboundSegments.length - 1]?.arrival.iataCode || ''}`;
+
+    return {
+      id: flight.id,
+      airline: carrierName,
+      airlineCode: carrierCode,
+      route,
+      duration: flight.itineraries[0]?.duration || '',
+      layovers: totalStops,
+      outbound: outboundSegments[0]?.departure.at || '',
+      inbound: inboundSegments[0]?.departure.at || '',
+      price: {
+        amount: parseFloat(flight.price.total),
+        currency: flight.price.currency,
+        numberOfTravelers: 1
+      },
+      flightNumber: outboundSegments[0]?.number || '',
+      cabinClass,
+      cityNames: cityNamesCache,
+      details: {
+        outbound: {
+          departure: {
+            airport: outboundSegments[0]?.departure.iataCode || '',
+            terminal: outboundSegments[0]?.departure.terminal,
+            time: outboundSegments[0]?.departure.at || '',
+            cityName: getCityName(outboundSegments[0]?.departure.iataCode || '')
+          },
+          arrival: {
+            airport: outboundSegments[outboundSegments.length - 1]?.arrival.iataCode || '',
+            terminal: outboundSegments[outboundSegments.length - 1]?.arrival.terminal,
+            time: outboundSegments[outboundSegments.length - 1]?.arrival.at || '',
+            cityName: getCityName(outboundSegments[outboundSegments.length - 1]?.arrival.iataCode || '')
+          },
+          duration: flight.itineraries[0]?.duration || '',
+          segments: outboundSegments.map(segment => ({
+            departure: {
+              airport: segment.departure.iataCode,
+              terminal: segment.departure.terminal,
+              time: segment.departure.at,
+              cityName: getCityName(segment.departure.iataCode)
+            },
+            arrival: {
+              airport: segment.arrival.iataCode,
+              terminal: segment.arrival.terminal,
+              time: segment.arrival.at,
+              cityName: getCityName(segment.arrival.iataCode)
+            },
+            carrier: segment.carrierCode,
+            carrierName: flight.dictionaries?.carriers?.[segment.carrierCode] || // Use carrier name from dictionaries
+                        segment.operating?.carrierName || // Or use operating carrier name
+                        segment.carrier?.name || // Or use marketing carrier name
+                        `Airline ${segment.carrierCode}`, // Fallback
+            flightNumber: segment.number,
+            aircraft: {
+              code: segment.aircraft.code,
+              name: AIRCRAFT_CODES[segment.aircraft.code] || 'Unknown'
+            },
+            duration: segment.duration,
+            cabin: segment.cabin || cabinClass
+          }))
+        },
+        inbound: inboundSegments.length ? {
+          departure: {
+            airport: inboundSegments[0]?.departure.iataCode || '',
+            terminal: inboundSegments[0]?.departure.terminal,
+            time: inboundSegments[0]?.departure.at || '',
+            cityName: getCityName(inboundSegments[0]?.departure.iataCode || '')
+          },
+          arrival: {
+            airport: inboundSegments[inboundSegments.length - 1]?.arrival.iataCode || '',
+            terminal: inboundSegments[inboundSegments.length - 1]?.arrival.terminal,
+            time: inboundSegments[inboundSegments.length - 1]?.arrival.at || '',
+            cityName: getCityName(inboundSegments[inboundSegments.length - 1]?.arrival.iataCode || '')
+          },
+          duration: flight.itineraries[1]?.duration || '',
+          segments: inboundSegments.map(segment => ({
+            departure: {
+              airport: segment.departure.iataCode,
+              terminal: segment.departure.terminal,
+              time: segment.departure.at,
+              cityName: getCityName(segment.departure.iataCode)
+            },
+            arrival: {
+              airport: segment.arrival.iataCode,
+              terminal: segment.arrival.terminal,
+              time: segment.arrival.at,
+              cityName: getCityName(segment.arrival.iataCode)
+            },
+            carrier: segment.carrierCode,
+            carrierName: flight.dictionaries?.carriers?.[segment.carrierCode] || // Use carrier name from dictionaries
+                        segment.operating?.carrierName || // Or use operating carrier name
+                        segment.carrier?.name || // Or use marketing carrier name
+                        `Airline ${segment.carrierCode}`, // Fallback
+            flightNumber: segment.number,
+            aircraft: {
+              code: segment.aircraft.code,
+              name: AIRCRAFT_CODES[segment.aircraft.code] || 'Unknown'
+            },
+            duration: segment.duration,
+            cabin: segment.cabin || cabinClass
+          }))
+        } : undefined,
+        policies: {
+          cancellation: 'Cancellation policy varies by fare',
+          changes: 'Change fees may apply',
+          refund: flight.nonHomogeneous ? 'Non-refundable' : 'Refundable',
+          checkedBags: flight.travelerPricings[0]?.fareDetailsBySegment[0]?.includedCheckedBags?.quantity || 0,
+          carryOn: flight.travelerPricings[0]?.fareDetailsBySegment[0]?.includedCabinBags?.quantity || 1,
+          seatSelection: true
+        }
+      }
+    };
+  });
+}
+
+// Add a new function to enrich flight data with city names
+async function enrichFlightsWithCityNames(flightData: any, amadeusService: any) {
+  try {
+    // Step 1: Extract all unique airport codes from the flights
+    const airportCodes = new Set<string>();
+    
+    // Function to extract codes from tiers
+    const extractCodesFromTier = (tier: any) => {
+      if (!tier || !tier.references || !Array.isArray(tier.references)) return;
+      
+      tier.references.forEach((flight: any) => {
+        // Add codes from airportCodes array if it exists
+        if (flight.airportCodes && Array.isArray(flight.airportCodes)) {
+          flight.airportCodes.forEach((code: string) => airportCodes.add(code));
+          return;
+        }
+        
+        // Otherwise extract from segments
+        if (flight.details?.outbound?.segments) {
+          flight.details.outbound.segments.forEach((segment: any) => {
+            if (segment.departure?.airport) airportCodes.add(segment.departure.airport);
+            if (segment.arrival?.airport) airportCodes.add(segment.arrival.airport);
+          });
+        }
+        
+        if (flight.details?.inbound?.segments) {
+          flight.details.inbound.segments.forEach((segment: any) => {
+            if (segment.departure?.airport) airportCodes.add(segment.departure.airport);
+            if (segment.arrival?.airport) airportCodes.add(segment.arrival.airport);
+          });
+        }
+      });
+    };
+    
+    // Extract codes from all tiers if they exist
+    if (flightData.flights) {
+      extractCodesFromTier(flightData.flights.budget);
+      extractCodesFromTier(flightData.flights.medium);
+      extractCodesFromTier(flightData.flights.premium);
+    }
+    
+    const uniqueCodes = Array.from(airportCodes);
+    if (uniqueCodes.length === 0) {
+      logger.warn('No airport codes found in flight data for city name enrichment');
+      return flightData;
+    }
+    
+    // Step 2: Fetch city names for these codes
+    logger.info('Fetching city names for flight data enrichment', { 
+      count: uniqueCodes.length,
+      sampleCodes: uniqueCodes.slice(0, 5)
+    });
+    
+    const cityNames = await amadeusService.getAirportCityNames(uniqueCodes);
+    
+    // Step 3: Add city names to the flight data
+    // Function to add city names to flights in a tier
+    const addCityNamesToTier = (tier: any) => {
+      if (!tier || !tier.references || !Array.isArray(tier.references)) return;
+      
+      tier.references.forEach((flight: any) => {
+        // Add cityNames dictionary to each flight
+        flight.cityNames = cityNames;
+      });
+    };
+    
+    // Add city names to all tiers
+    if (flightData.flights) {
+      addCityNamesToTier(flightData.flights.budget);
+      addCityNamesToTier(flightData.flights.medium);
+      addCityNamesToTier(flightData.flights.premium);
+    }
+    
+    logger.info('Successfully enriched flight data with city names', {
+      uniqueCodesCount: uniqueCodes.length,
+      cityNamesCount: Object.keys(cityNames).length
+    });
+    
+    return flightData;
+  } catch (error) {
+    logger.error('Error enriching flights with city names', {
+      error: error instanceof Error ? error.message : 'Unknown error',
+      stack: error instanceof Error ? error.stack : undefined
+    });
+    
+    // Return original data if enrichment fails
+    return flightData;
+  }
+}
+
 // Calculate budget endpoint
 router.post('/calculate', async (req: Request, res: Response) => {
   // Reset product codes at the start of each request
@@ -1111,7 +1381,7 @@ router.post('/calculate', async (req: Request, res: Response) => {
           totalBudget: transformedRequest.budget,
           // Add flights data to the response
           flights: {
-            all: transformedRequest.flightData || [],
+            all: transformFlightData(transformedRequest.flightData || []),
             stats: {
               totalFlights: transformedRequest.flightData?.length || 0,
               byClass: {
@@ -1123,7 +1393,12 @@ router.post('/calculate', async (req: Request, res: Response) => {
                   f.travelerPricings[0]?.fareDetailsBySegment[0]?.cabin === 'BUSINESS').length || 0,
                 first: transformedRequest.flightData?.filter(f => 
                   f.travelerPricings[0]?.fareDetailsBySegment[0]?.cabin === 'FIRST').length || 0
-              }
+              },
+              priceRange: transformedRequest.flightData?.length ? {
+                min: Math.min(...transformedRequest.flightData.map(f => parseFloat(f.price.total))),
+                max: Math.max(...transformedRequest.flightData.map(f => parseFloat(f.price.total))),
+                currency: transformedRequest.flightData[0].price.currency
+              } : null
             }
           },
                 metadata: {
@@ -1151,9 +1426,21 @@ router.post('/calculate', async (req: Request, res: Response) => {
 
     logger.info('[Budget Route] ====== END BUDGET CALCULATION ======');
 
-    // Send the response
-    return res.json(result);
-
+    // Enrich flight data with city names before sending the response
+    try {
+      const enrichedResult = await enrichFlightsWithCityNames(result, req.app.locals.amadeusService);
+      
+      // Send the enriched result
+      return res.json(enrichedResult);
+    } catch (error) {
+      logger.error('[Budget Route] Error enriching flight data with city names:', {
+        error: error instanceof Error ? error.message : 'Unknown error',
+        stack: error instanceof Error ? error.stack : undefined
+      });
+      
+      // Fall back to sending the original result
+      return res.json(result);
+    }
   } catch (error) {
     logger.error('[Budget Route] Error in budget calculation:', {
       error: error instanceof Error ? error.message : 'Unknown error',

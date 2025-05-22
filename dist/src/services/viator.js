@@ -688,8 +688,9 @@ export class ViatorService {
             const response = await fetch(`${this.baseUrl}/products/${productCode}`, {
                 method: 'GET',
                 headers: {
-                    'Accept': 'application/json',
-                    'Accept-Version': '2.0',
+                    'Accept': 'application/json;version=2.0',
+                    'Content-Type': 'application/json',
+                    'Accept-Language': 'en-US',
                     'exp-api-key': this.apiKey
                 }
             });
@@ -989,8 +990,8 @@ export class ViatorService {
                     }]
             }, {
                 headers: {
-                    'Accept': 'application/json',
-                    'Accept-Version': '2.0',
+                    'Accept': 'application/json;version=2.0', // Changed from 'Accept': 'application/json', 'Accept-Version': '2.0'
+                    'Content-Type': 'application/json',
                     'Accept-Language': 'en-US',
                     'exp-api-key': this.apiKey
                 }
@@ -1285,6 +1286,11 @@ export class ViatorService {
                 },
                 stage: 'enrichment_complete'
             });
+            // Enhance activity with accessibility information
+            if (activity.bookingDetails) {
+                activity.bookingDetails.accessibility = this.determineAccessibility(productDetails);
+                activity.bookingDetails.restrictions = this.extractRestrictions(productDetails);
+            }
             return enrichedActivity;
         }
         catch (error) {
@@ -1475,6 +1481,147 @@ export class ViatorService {
     resetProductCodes() {
         this.usedProductCodes.clear();
         logger.info('[Viator] Reset product code tracking');
+    }
+    /**
+     * Determines accessibility features for an activity
+     */
+    determineAccessibility(productDetails) {
+        // Default to unknown if no product details
+        if (!productDetails || !productDetails.additionalInfo) {
+            return 'Information not available';
+        }
+        try {
+            const { additionalInfo } = productDetails;
+            // Check if accessibility information is directly provided
+            if (additionalInfo.accessibility && additionalInfo.accessibility.length > 0) {
+                return additionalInfo.accessibility.join(', ');
+            }
+            // Check overview text for accessibility mentions
+            const accessibilityKeywords = [
+                'wheelchair', 'accessible', 'mobility', 'disabled',
+                'elevator', 'lift', 'ramp', 'limited mobility'
+            ];
+            const overview = productDetails.overview || '';
+            const matchedKeywords = accessibilityKeywords.filter(keyword => overview.toLowerCase().includes(keyword.toLowerCase()));
+            if (matchedKeywords.length > 0) {
+                return `Possible accessibility features: ${matchedKeywords.join(', ')}`;
+            }
+            return 'Information not available';
+        }
+        catch (error) {
+            logger.error('[Viator] Error determining accessibility:', error);
+            return 'Information not available';
+        }
+    }
+    /**
+     * Extracts restrictions and requirements from product details
+     */
+    extractRestrictions(productDetails) {
+        if (!productDetails || !productDetails.additionalInfo) {
+            return [];
+        }
+        try {
+            const { additionalInfo } = productDetails;
+            if (additionalInfo.restrictions && additionalInfo.restrictions.length > 0) {
+                return additionalInfo.restrictions;
+            }
+            return [];
+        }
+        catch (error) {
+            logger.error('[Viator] Error extracting restrictions:', error);
+            return [];
+        }
+    }
+    /**
+     * Filters activities based on accessibility and dietary requirements
+     */
+    filterActivitiesByRequirements(activities, requirements) {
+        // If no requirements, return all activities
+        if (!requirements ||
+            (!requirements.accessibility?.length && !requirements.dietaryRestrictions?.length)) {
+            return activities;
+        }
+        return activities.filter(activity => {
+            // Check accessibility requirements
+            if (requirements.accessibility?.length && activity.bookingDetails?.accessibility) {
+                const activityAccessibility = activity.bookingDetails.accessibility.toLowerCase();
+                // Check if activity specifically mentions being NOT accessible
+                const notAccessible = [
+                    'not wheelchair accessible',
+                    'not suitable for mobility impaired',
+                    'not recommended for travelers with mobility concerns'
+                ].some(phrase => activityAccessibility.includes(phrase.toLowerCase()));
+                if (notAccessible) {
+                    return false;
+                }
+                // For specific accessibility requirements
+                if (requirements.accessibility.includes('wheelchair_accessible') &&
+                    !activityAccessibility.includes('wheelchair')) {
+                    // If wheelchair accessibility is required but not mentioned, filter out
+                    // unless it's a standard accessible venue like museum or theater
+                    if (!this.isLikelyAccessible(activity)) {
+                        return false;
+                    }
+                }
+            }
+            // Check dietary restrictions for food activities
+            if (requirements.dietaryRestrictions?.length &&
+                (activity.category === 'Food & Dining' ||
+                    activity.category === 'Food & Wine' ||
+                    activity.name.toLowerCase().includes('food') ||
+                    activity.name.toLowerCase().includes('dinner') ||
+                    activity.name.toLowerCase().includes('lunch') ||
+                    activity.name.toLowerCase().includes('cuisine') ||
+                    activity.name.toLowerCase().includes('tasting'))) {
+                // Look for mentions of dietary accommodations in description
+                const description = activity.description?.toLowerCase() || '';
+                // Default to allowing the activity unless it specifically mentions NOT accommodating
+                let canAccommodate = true;
+                for (const restriction of requirements.dietaryRestrictions) {
+                    const restrictionLower = restriction.toLowerCase();
+                    // Check for phrases indicating the restriction cannot be accommodated
+                    if (description.includes(`no ${restrictionLower} options`) ||
+                        description.includes(`not suitable for ${restrictionLower}`) ||
+                        description.includes(`cannot accommodate ${restrictionLower}`)) {
+                        canAccommodate = false;
+                        break;
+                    }
+                    // Check for phrases indicating the restriction can be accommodated
+                    if (description.includes(`${restrictionLower} options`) ||
+                        description.includes(`${restrictionLower} menu`) ||
+                        description.includes(`${restrictionLower} friendly`) ||
+                        description.includes(`accommodates ${restrictionLower}`)) {
+                        // Found positive indication, keep this as true
+                        canAccommodate = true;
+                    }
+                }
+                return canAccommodate;
+            }
+            return true;
+        });
+    }
+    /**
+     * Determines if an activity is likely to be accessible based on type/venue
+     */
+    isLikelyAccessible(activity) {
+        const name = activity.name.toLowerCase();
+        const category = activity.category.toLowerCase();
+        const description = activity.description?.toLowerCase() || '';
+        // Major museums and attractions are typically accessible
+        const accessibleVenues = [
+            'museum', 'gallery', 'louvre', 'palace', 'cathedral',
+            'theatre', 'theater', 'opera', 'cruise', 'boat'
+        ];
+        // Activities unlikely to be accessible
+        const inaccessibleActivities = [
+            'hiking', 'climbing', 'steps', 'stairs', 'walk up',
+            'steep', 'narrow', 'medieval'
+        ];
+        // Check if any accessible venue keywords are present
+        const isAccessibleVenue = accessibleVenues.some(venue => name.includes(venue) || category.includes(venue) || description.includes(venue));
+        // Check if any inaccessible activity keywords are present
+        const isInaccessibleActivity = inaccessibleActivities.some(activity => name.includes(activity) || description.includes(activity));
+        return isAccessibleVenue && !isInaccessibleActivity;
     }
 }
 // Singleton instance

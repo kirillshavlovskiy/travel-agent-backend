@@ -124,6 +124,7 @@ interface FlightReference {
   cabinClass: string;
   bookingClass: string;
   airlineCode: string;
+  airportCodes?: string[];
 }
 
 interface HotelReference {
@@ -722,6 +723,21 @@ export class VacationBudgetAgent {
     const returnFirstSegment = returnSegments[0];
     const returnLastSegment = returnSegments[returnSegments.length - 1];
 
+    // Collect all airport codes for city name lookup
+    const airportCodes: string[] = [];
+    
+    // Add outbound segment airport codes
+    segments.forEach(segment => {
+      if (segment.departure?.iataCode) airportCodes.push(segment.departure.iataCode);
+      if (segment.arrival?.iataCode) airportCodes.push(segment.arrival.iataCode);
+    });
+    
+    // Add return segment airport codes
+    returnSegments.forEach(segment => {
+      if (segment.departure?.iataCode) airportCodes.push(segment.departure.iataCode);
+      if (segment.arrival?.iataCode) airportCodes.push(segment.arrival.iataCode);
+    });
+
     const route = `${firstSegment.departure.iataCode} to ${lastSegment.arrival.iataCode}`;
     const flightRef: FlightReference = {
       id: `${firstSegment.carrierCode}${firstSegment.number}-${Date.now()}`,
@@ -742,6 +758,8 @@ export class VacationBudgetAgent {
         outbound: firstSegment.departure.at,
         inbound: returnFirstSegment ? returnFirstSegment.departure.at : '',
       } as FlightReference),
+      // Add airportCodes for city name lookup in the frontend
+      airportCodes: [...new Set(airportCodes)],
       details: {
         outbound: {
           duration: flight.itineraries[0].duration,
@@ -927,13 +945,13 @@ export class VacationBudgetAgent {
             if (result && result.length > 0) {
               logger.info(`[VacationBudgetAgent] Found ${result.length} ${travelClass} flights`);
               flightData.push(...result);
-            } else {
+        } else {
               logger.warn(`[VacationBudgetAgent] No ${travelClass} flights found`);
-            }
+        }
             
             // Add delay between requests to avoid rate limiting
             await new Promise(resolve => setTimeout(resolve, 1000));
-          } catch (error) {
+      } catch (error) {
             logger.warn(`[VacationBudgetAgent] Failed to fetch ${travelClass} flights`, { 
               error: error instanceof Error ? error.message : 'Unknown error'
             });
@@ -1920,11 +1938,11 @@ For each activity you find, include:
             afternoon: timesByCategory.afternoon,
             evening: timesByCategory.evening
           },
-          realTimeVerification: {
-            verified: true,
-            exactStartTimes,
-            lastChecked: new Date().toISOString()
-          }
+            realTimeVerification: {
+              verified: true,
+              exactStartTimes,
+              lastChecked: new Date().toISOString()
+            }
         }
       };
 
@@ -2079,7 +2097,7 @@ For each activity you find, include:
           });
         } else {
           // Fall back to calculating a theme based on activities
-          const activityCategories = new Set(activities.map(a => a.category));
+    const activityCategories = new Set(activities.map(a => a.category));
           theme = Array.from(activityCategories).join(' & ') || 'City Exploration';
           logger.info('[Agents] Generated fallback theme for day', {
             dayNumber,

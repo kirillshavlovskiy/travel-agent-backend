@@ -2,15 +2,17 @@ import { Router } from 'express';
 import { VacationBudgetAgent } from '../services/agents.js';
 import { PrismaClient } from '@prisma/client';
 import { airports } from '../data/airports.js';
-import { AmadeusService } from '../services/amadeus.js';
+import { AmadeusService } from '../services/amadeus';
 import { FlightService } from '../services/flights.js';
 import { normalizeCategory } from '../constants/categories.js';
 import { logger } from '../utils/logger.js';
-import { generateDayTheme, determineMainArea, generateBreakSchedule, generateLogistics, generateDayCommentary, generateDayHighlights, optimizeSchedule } from './activities.js';
+import { generateDayTheme, determineMainArea, generateBreakSchedule, generateLogistics, generateDayCommentary, generateDayHighlights, optimizeSchedule, getDefaultStartTime } from './activities.js';
 import { DestinationsService } from '../services/destinations.js';
 import { ViatorService } from '../services/viator.js';
 import * as fs from 'fs';
 import * as path from 'path';
+import { enhanceDailyPlansWithPreferences } from '../utils/itinerary';
+import { createProximityBasedSchedule } from '../utils/proximity';
 const router = Router();
 const amadeusService = new AmadeusService();
 const agent = new VacationBudgetAgent(new FlightService());
@@ -59,6 +61,10 @@ const AIRCRAFT_CODES = {
     'B78X': 'Boeing 787-10 Dreamliner',
     '7M9': 'Boeing 737 MAX 9'
 };
+// Add at the top of the file where other constants are defined, typically after the imports
+// Near line 49 where TIMEOUT is defined
+const TIMEOUT = 600000; // 10 minutes to account for multiple flight searches
+const SEARCH_TIMEOUT = 120000; // 2 minutes per search
 // Add at the beginning of the file, after imports
 const usedProductCodes = new Set();
 // Add function to reset product codes at the start of each request
@@ -262,6 +268,263 @@ const transformAvailability = (realTimeCheck) => {
         operatingHours: realTimeCheck.schedule.openingHours?.join(', ')
     };
 };
+// Add calculateDays function if it's not available elsewhere
+function calculateDays(startDate, endDate) {
+    const start = new Date(startDate);
+    const end = new Date(endDate);
+    const diffTime = Math.abs(end.getTime() - start.getTime());
+    return Math.ceil(diffTime / (1000 * 60 * 60 * 24)) + 1; // +1 to include both start and end days
+}
+// Add flight data transformation function
+function transformFlightData(flightData) {
+    // Create a cache to store city names for airport codes
+    const cityNamesCache = {};
+    // Helper function to get city name for an airport code
+    const getCityName = (airportCode) => {
+        // If we already have it in cache, return it
+        if (cityNamesCache[airportCode]) {
+            return cityNamesCache[airportCode];
+        }
+        // Otherwise return the airport code as fallback
+        // We'll populate the cache with actual values later when possible
+        return airportCode;
+    };
+    // Extract all unique airport codes from all flights
+    const airportCodes = new Set();
+    flightData.forEach(flight => {
+        flight.itineraries.forEach(itinerary => {
+            itinerary.segments.forEach(segment => {
+                if (segment.departure?.iataCode) {
+                    airportCodes.add(segment.departure.iataCode);
+                }
+                if (segment.arrival?.iataCode) {
+                    airportCodes.add(segment.arrival.iataCode);
+                }
+            });
+        });
+    });
+    // Try to get city codes from flight dictionaries
+    flightData.forEach(flight => {
+        if (flight.dictionaries?.locations) {
+            Object.entries(flight.dictionaries.locations).forEach(([code, location]) => {
+                if (location?.address?.cityName) {
+                    cityNamesCache[code] = location.address.cityName;
+                }
+            });
+        }
+    });
+    return flightData.map(flight => {
+        // Get outbound and inbound segments
+        const outboundSegments = flight.itineraries[0]?.segments || [];
+        const inboundSegments = flight.itineraries[1]?.segments || [];
+        // Calculate layovers
+        const totalStops = outboundSegments.length + inboundSegments.length - 2;
+        // Get cabin class
+        const cabinClass = flight.travelerPricings[0]?.fareDetailsBySegment[0]?.cabin || 'ECONOMY';
+        // Get airline info directly from the carrier data
+        const firstSegment = outboundSegments[0];
+        const carrierCode = firstSegment?.carrierCode || '';
+        // Get the carrier name from the dictionaries if available
+        const carrierName = flight.dictionaries?.carriers?.[carrierCode] || // Use carrier name from dictionaries
+            firstSegment?.operating?.carrierName || // Or use operating carrier name
+            firstSegment?.carrier?.name || // Or use marketing carrier name
+            `Airline ${carrierCode}`; // Fallback
+        // Calculate route
+        const route = `${outboundSegments[0]?.departure.iataCode || ''} to ${outboundSegments[outboundSegments.length - 1]?.arrival.iataCode || ''}`;
+        return {
+            id: flight.id,
+            airline: carrierName,
+            airlineCode: carrierCode,
+            route,
+            duration: flight.itineraries[0]?.duration || '',
+            layovers: totalStops,
+            outbound: outboundSegments[0]?.departure.at || '',
+            inbound: inboundSegments[0]?.departure.at || '',
+            price: {
+                amount: parseFloat(flight.price.total),
+                currency: flight.price.currency,
+                numberOfTravelers: 1
+            },
+            flightNumber: outboundSegments[0]?.number || '',
+            cabinClass,
+            cityNames: cityNamesCache,
+            details: {
+                outbound: {
+                    departure: {
+                        airport: outboundSegments[0]?.departure.iataCode || '',
+                        terminal: outboundSegments[0]?.departure.terminal,
+                        time: outboundSegments[0]?.departure.at || '',
+                        cityName: getCityName(outboundSegments[0]?.departure.iataCode || '')
+                    },
+                    arrival: {
+                        airport: outboundSegments[outboundSegments.length - 1]?.arrival.iataCode || '',
+                        terminal: outboundSegments[outboundSegments.length - 1]?.arrival.terminal,
+                        time: outboundSegments[outboundSegments.length - 1]?.arrival.at || '',
+                        cityName: getCityName(outboundSegments[outboundSegments.length - 1]?.arrival.iataCode || '')
+                    },
+                    duration: flight.itineraries[0]?.duration || '',
+                    segments: outboundSegments.map(segment => ({
+                        departure: {
+                            airport: segment.departure.iataCode,
+                            terminal: segment.departure.terminal,
+                            time: segment.departure.at,
+                            cityName: getCityName(segment.departure.iataCode)
+                        },
+                        arrival: {
+                            airport: segment.arrival.iataCode,
+                            terminal: segment.arrival.terminal,
+                            time: segment.arrival.at,
+                            cityName: getCityName(segment.arrival.iataCode)
+                        },
+                        carrier: segment.carrierCode,
+                        carrierName: flight.dictionaries?.carriers?.[segment.carrierCode] || // Use carrier name from dictionaries
+                            segment.operating?.carrierName || // Or use operating carrier name
+                            segment.carrier?.name || // Or use marketing carrier name
+                            `Airline ${segment.carrierCode}`, // Fallback
+                        flightNumber: segment.number,
+                        aircraft: {
+                            code: segment.aircraft.code,
+                            name: AIRCRAFT_CODES[segment.aircraft.code] || 'Unknown'
+                        },
+                        duration: segment.duration,
+                        cabin: segment.cabin || cabinClass
+                    }))
+                },
+                inbound: inboundSegments.length ? {
+                    departure: {
+                        airport: inboundSegments[0]?.departure.iataCode || '',
+                        terminal: inboundSegments[0]?.departure.terminal,
+                        time: inboundSegments[0]?.departure.at || '',
+                        cityName: getCityName(inboundSegments[0]?.departure.iataCode || '')
+                    },
+                    arrival: {
+                        airport: inboundSegments[inboundSegments.length - 1]?.arrival.iataCode || '',
+                        terminal: inboundSegments[inboundSegments.length - 1]?.arrival.terminal,
+                        time: inboundSegments[inboundSegments.length - 1]?.arrival.at || '',
+                        cityName: getCityName(inboundSegments[inboundSegments.length - 1]?.arrival.iataCode || '')
+                    },
+                    duration: flight.itineraries[1]?.duration || '',
+                    segments: inboundSegments.map(segment => ({
+                        departure: {
+                            airport: segment.departure.iataCode,
+                            terminal: segment.departure.terminal,
+                            time: segment.departure.at,
+                            cityName: getCityName(segment.departure.iataCode)
+                        },
+                        arrival: {
+                            airport: segment.arrival.iataCode,
+                            terminal: segment.arrival.terminal,
+                            time: segment.arrival.at,
+                            cityName: getCityName(segment.arrival.iataCode)
+                        },
+                        carrier: segment.carrierCode,
+                        carrierName: flight.dictionaries?.carriers?.[segment.carrierCode] || // Use carrier name from dictionaries
+                            segment.operating?.carrierName || // Or use operating carrier name
+                            segment.carrier?.name || // Or use marketing carrier name
+                            `Airline ${segment.carrierCode}`, // Fallback
+                        flightNumber: segment.number,
+                        aircraft: {
+                            code: segment.aircraft.code,
+                            name: AIRCRAFT_CODES[segment.aircraft.code] || 'Unknown'
+                        },
+                        duration: segment.duration,
+                        cabin: segment.cabin || cabinClass
+                    }))
+                } : undefined,
+                policies: {
+                    cancellation: 'Cancellation policy varies by fare',
+                    changes: 'Change fees may apply',
+                    refund: flight.nonHomogeneous ? 'Non-refundable' : 'Refundable',
+                    checkedBags: flight.travelerPricings[0]?.fareDetailsBySegment[0]?.includedCheckedBags?.quantity || 0,
+                    carryOn: flight.travelerPricings[0]?.fareDetailsBySegment[0]?.includedCabinBags?.quantity || 1,
+                    seatSelection: true
+                }
+            }
+        };
+    });
+}
+// Add a new function to enrich flight data with city names
+async function enrichFlightsWithCityNames(flightData, amadeusService) {
+    try {
+        // Step 1: Extract all unique airport codes from the flights
+        const airportCodes = new Set();
+        // Function to extract codes from tiers
+        const extractCodesFromTier = (tier) => {
+            if (!tier || !tier.references || !Array.isArray(tier.references))
+                return;
+            tier.references.forEach((flight) => {
+                // Add codes from airportCodes array if it exists
+                if (flight.airportCodes && Array.isArray(flight.airportCodes)) {
+                    flight.airportCodes.forEach((code) => airportCodes.add(code));
+                    return;
+                }
+                // Otherwise extract from segments
+                if (flight.details?.outbound?.segments) {
+                    flight.details.outbound.segments.forEach((segment) => {
+                        if (segment.departure?.airport)
+                            airportCodes.add(segment.departure.airport);
+                        if (segment.arrival?.airport)
+                            airportCodes.add(segment.arrival.airport);
+                    });
+                }
+                if (flight.details?.inbound?.segments) {
+                    flight.details.inbound.segments.forEach((segment) => {
+                        if (segment.departure?.airport)
+                            airportCodes.add(segment.departure.airport);
+                        if (segment.arrival?.airport)
+                            airportCodes.add(segment.arrival.airport);
+                    });
+                }
+            });
+        };
+        // Extract codes from all tiers if they exist
+        if (flightData.flights) {
+            extractCodesFromTier(flightData.flights.budget);
+            extractCodesFromTier(flightData.flights.medium);
+            extractCodesFromTier(flightData.flights.premium);
+        }
+        const uniqueCodes = Array.from(airportCodes);
+        if (uniqueCodes.length === 0) {
+            logger.warn('No airport codes found in flight data for city name enrichment');
+            return flightData;
+        }
+        // Step 2: Fetch city names for these codes
+        logger.info('Fetching city names for flight data enrichment', {
+            count: uniqueCodes.length,
+            sampleCodes: uniqueCodes.slice(0, 5)
+        });
+        const cityNames = await amadeusService.getAirportCityNames(uniqueCodes);
+        // Step 3: Add city names to the flight data
+        // Function to add city names to flights in a tier
+        const addCityNamesToTier = (tier) => {
+            if (!tier || !tier.references || !Array.isArray(tier.references))
+                return;
+            tier.references.forEach((flight) => {
+                // Add cityNames dictionary to each flight
+                flight.cityNames = cityNames;
+            });
+        };
+        // Add city names to all tiers
+        if (flightData.flights) {
+            addCityNamesToTier(flightData.flights.budget);
+            addCityNamesToTier(flightData.flights.medium);
+            addCityNamesToTier(flightData.flights.premium);
+        }
+        logger.info('Successfully enriched flight data with city names', {
+            uniqueCodesCount: uniqueCodes.length,
+            cityNamesCount: Object.keys(cityNames).length
+        });
+        return flightData;
+    }
+    catch (error) {
+        logger.error('Error enriching flights with city names', {
+            error: error instanceof Error ? error.message : 'Unknown error',
+            stack: error instanceof Error ? error.stack : undefined
+        });
+        // Return original data if enrichment fails
+        return flightData;
+    }
+}
 // Calculate budget endpoint
 router.post('/calculate', async (req, res) => {
     // Reset product codes at the start of each request
@@ -278,6 +541,62 @@ router.post('/calculate', async (req, res) => {
         // Transform request
         const transformedRequest = transformBudgetRequest(req.body);
         logger.info('[Budget Route] Transformed request:', transformedRequest);
+        // First search for real-time flights with Amadeus
+        logger.info('[Budget Route] Searching for real-time flights with Amadeus...');
+        const formattedDepartureDate = transformedRequest.startDate.split('T')[0];
+        const formattedReturnDate = transformedRequest.endDate.split('T')[0];
+        // Search for flights in all cabin classes with individual timeouts
+        const cabinClasses = ['ECONOMY', 'PREMIUM_ECONOMY', 'BUSINESS', 'FIRST'];
+        const searchPromises = cabinClasses.map(async (cabinClass) => {
+            try {
+                const searchPromise = amadeusService.searchFlights({
+                    segments: [{
+                            originLocationCode: transformedRequest.departureLocation.airport,
+                            destinationLocationCode: transformedRequest.destinations[0].airport,
+                            departureDate: formattedDepartureDate
+                        }, {
+                            originLocationCode: transformedRequest.destinations[0].airport,
+                            destinationLocationCode: transformedRequest.departureLocation.airport,
+                            departureDate: formattedReturnDate
+                        }],
+                    adults: transformedRequest.travelers,
+                    travelClass: cabinClass
+                });
+                // Add timeout to individual search
+                const result = await Promise.race([
+                    searchPromise,
+                    new Promise((_, reject) => setTimeout(() => reject(new Error(`Search timeout for ${cabinClass}`)), SEARCH_TIMEOUT))
+                ]);
+                return result;
+            }
+            catch (error) {
+                logger.warn(`[Budget Route] Search failed for ${cabinClass}:`, error);
+                return [];
+            }
+        });
+        // Wait for all searches to complete
+        const allFlights = (await Promise.all(searchPromises)).flat();
+        if (allFlights.length === 0) {
+            logger.warn('[Budget Route] No flights found for any cabin class');
+        }
+        else {
+            logger.info('[Budget Route] Flight search results:', {
+                totalFlights: allFlights.length,
+                byClass: {
+                    economy: allFlights.filter((f) => f.travelerPricings[0]?.fareDetailsBySegment[0]?.cabin === 'ECONOMY').length,
+                    premiumEconomy: allFlights.filter((f) => f.travelerPricings[0]?.fareDetailsBySegment[0]?.cabin === 'PREMIUM_ECONOMY').length,
+                    business: allFlights.filter((f) => f.travelerPricings[0]?.fareDetailsBySegment[0]?.cabin === 'BUSINESS').length,
+                    first: allFlights.filter((f) => f.travelerPricings[0]?.fareDetailsBySegment[0]?.cabin === 'FIRST').length
+                },
+                priceRange: allFlights.length > 0 ? {
+                    min: Math.min(...allFlights.map((f) => parseFloat(f.price.total))),
+                    max: Math.max(...allFlights.map((f) => parseFloat(f.price.total))),
+                    currency: allFlights[0].price.currency
+                } : null
+            });
+            // Add flight data to the transformed request
+            transformedRequest.flightData = allFlights;
+        }
         // Create a timeout promise
         const timeoutPromise = new Promise((_, reject) => {
             setTimeout(() => reject(new Error('Budget calculation timed out')), 590000); // 9.8 minutes
@@ -529,27 +848,81 @@ router.post('/calculate', async (req, res) => {
                             }, {}),
                             stage: 'enrichment_summary'
                         });
-                        // Update daily plans with enriched activities
-                        const updatedDailyPlans = agentResult.dailyPlans?.map((plan) => ({
-                            ...plan,
-                            activities: plan.activities?.map((activity) => {
-                                const enriched = enrichedActivities.find((ea) => ea.name === activity.name && ea.dayNumber === plan.dayNumber);
+                        // First, we'll declare the variable outside the if/else block
+                        let optimizationResult;
+                        // Then in the if block
+                        if (req.body.preferences.accessibility?.length || req.body.preferences.dietaryRestrictions?.length) {
+                            logger.info('[Budget Route] Filtering activities based on accessibility and dietary preferences', {
+                                accessibility: req.body.preferences.accessibility || [],
+                                dietaryRestrictions: req.body.preferences.dietaryRestrictions || []
+                            });
+                            // Filter enriched activities
+                            const requirementsFilter = {
+                                accessibility: req.body.preferences.accessibility,
+                                dietaryRestrictions: req.body.preferences.dietaryRestrictions
+                            };
+                            const filteredActivities = viatorService.filterActivitiesByRequirements(enrichedActivities, requirementsFilter);
+                            logger.info('[Budget Route] Activity filtering results', {
+                                totalActivities: enrichedActivities.length,
+                                filteredActivities: filteredActivities.length,
+                                filteredOut: enrichedActivities.length - filteredActivities.length
+                            });
+                            // Now apply proximity-based scheduling if accessibility needs or pace preferences are specified
+                            if (req.body.preferences.accessibility?.length ||
+                                req.body.preferences.pacePreference) {
+                                logger.info('[Budget Route] Using proximity-based scheduling with pace:', {
+                                    pacePreference: req.body.preferences.pacePreference || 'moderate',
+                                    accessibility: (req.body.preferences.accessibility || []).length > 0
+                                });
+                                // Determine number of days
+                                const days = calculateDays(transformedRequest.startDate, transformedRequest.endDate);
+                                // Apply proximity-based scheduling with pace preference
+                                const proximityScheduledActivities = createProximityBasedSchedule(filteredActivities, days, req.body.preferences.accessibility || [], req.body.preferences.pacePreference || 'moderate');
+                                logger.info('[Budget Route] Created proximity-based schedule', {
+                                    totalActivities: proximityScheduledActivities.length,
+                                    days,
+                                    pacePreference: req.body.preferences.pacePreference || 'moderate'
+                                });
+                                // Use these activities for the schedule optimization
+                                optimizationResult = await optimizeSchedule(proximityScheduledActivities, days, transformedRequest.startDate);
+                            }
+                            else {
+                                // Use filtered activities without proximity scheduling
+                                optimizationResult = await optimizeSchedule(filteredActivities, calculateDays(transformedRequest.startDate, transformedRequest.endDate), transformedRequest.startDate);
+                            }
+                        }
+                        else {
+                            // Original code to execute if no filtering needed
+                            optimizationResult = await optimizeSchedule(enrichedActivities, calculateDays(transformedRequest.startDate, transformedRequest.endDate), transformedRequest.startDate);
+                        }
+                        // Make sure we have a valid result before enhancing plans
+                        if (!optimizationResult) {
+                            throw new Error('Failed to optimize schedule');
+                        }
+                        // Enhance daily plans with preference-specific information
+                        if (optimizationResult?.schedule?.length) {
+                            logger.info('[Budget Route] Enhancing daily plans with preference-specific information');
+                            optimizationResult.schedule = enhanceDailyPlansWithPreferences(optimizationResult.schedule, {
+                                accessibility: req.body.preferences.accessibility,
+                                dietaryRestrictions: req.body.preferences.dietaryRestrictions,
+                                pacePreference: req.body.preferences.pacePreference
+                            });
+                        }
+                        // Update daily plans with optimized schedule
+                        const updatedDailyPlans = optimizationResult.schedule.map(day => ({
+                            ...day,
+                            activities: day.activities?.map((activity) => {
+                                const enriched = enrichedActivities.find((ea) => ea.name === activity.name && ea.dayNumber === day.dayNumber);
                                 return enriched || activity;
                             }) || []
                         })) || [];
-                        // Create optimized schedule using the optimizeSchedule function
-                        const optimizedSchedule = await optimizeSchedule(enrichedActivities.map(activity => ({
-                            ...activity,
-                            id: activity.bookingDetails?.productCode || `local-${activity.name}-${activity.dayNumber}`,
-                            location: cityName
-                        })), transformedRequest.days, cityName, req.body.preferences);
                         // Log the optimized plan to a file
                         const logEntry = {
                             timestamp: new Date().toISOString(),
-                            destination: cityName,
+                            destination: transformedRequest.destinations[0].label,
                             days: transformedRequest.days,
                             input_activities: enrichedActivities.length,
-                            optimized_schedule: optimizedSchedule
+                            optimized_schedule: optimizationResult
                         };
                         const logDir = path.join(process.cwd(), 'logs');
                         const logFile = path.join(logDir, 'optimized_plan.log');
@@ -569,45 +942,73 @@ router.post('/calculate', async (req, res) => {
                             },
                             activities: enrichedActivities,
                             dailyPlans: updatedDailyPlans,
-                            tripOverview: agentResult.tripSummary?.overview || 'Trip overview not available',
-                            activityFitNotes: agentResult.organizationLogic?.overview || 'Activity fit notes not available',
-                            schedule: updatedDailyPlans.map(day => ({
-                                dayNumber: day.dayNumber,
-                                theme: safelyCallHelper(generateDayTheme, [day.activities], 'generateDayTheme', 'Mixed Activities'),
-                                mainArea: safelyCallHelper(determineMainArea, [day.activities], 'determineMainArea', 'City Center'),
-                                commentary: safelyCallHelper(generateDayCommentary, [day.activities, transformedRequest.preferences, day.dayNumber], 'generateDayCommentary', ''),
-                                highlights: safelyCallHelper(generateDayHighlights, [day.activities, transformedRequest.preferences], 'generateDayHighlights', []),
-                                activities: enrichedActivities.filter(activity => activity.dayNumber === day.dayNumber)
-                                    .sort((a, b) => {
-                                    const timeSlotOrder = {
-                                        morning: 0,
-                                        afternoon: 1,
-                                        evening: 2
-                                    };
-                                    const timeSlotDiff = timeSlotOrder[a.timeSlot] - timeSlotOrder[b.timeSlot];
-                                    if (timeSlotDiff !== 0)
-                                        return timeSlotDiff;
-                                    if (a.startTime && b.startTime) {
-                                        const [aHour, aMin] = a.startTime.split(':').map(Number);
-                                        const [bHour, bMin] = b.startTime.split(':').map(Number);
-                                        return (aHour * 60 + aMin) - (bHour * 60 + bMin);
-                                    }
-                                    return 0;
-                                }),
-                                breaks: safelyCallHelper(generateBreakSchedule, [day.activities, transformedRequest.preferences], 'generateBreakSchedule', {
-                                    morning: { startTime: '10:30', endTime: '11:00', duration: 30, suggestion: 'Coffee break' },
-                                    lunch: { startTime: '12:30', endTime: '13:30', duration: 60, suggestion: 'Lunch break' },
-                                    afternoon: { startTime: '15:30', endTime: '16:00', duration: 30, suggestion: 'Rest break' },
-                                    dinner: { startTime: '18:30', endTime: '20:00', duration: 90, suggestion: 'Dinner' }
-                                }),
-                                logistics: safelyCallHelper(generateLogistics, [day.activities, transformedRequest.preferences], 'generateLogistics', {
-                                    transportSuggestions: ['Use public transportation between major attractions'],
-                                    walkingDistances: ['Average walking distance between activities: 15-20 minutes'],
-                                    timeEstimates: ['Allow 30 minutes for transportation between activities']
-                                })
-                            })),
-                            dailyHighlights: agentResult.dayHighlights || [],
+                            tripOverview: optimizationResult.tripOverview || agentResult.tripSummary?.overview || 'Trip overview not available',
+                            activityFitNotes: optimizationResult.activityFitNotes || agentResult.organizationLogic?.overview || 'Activity fit notes not available',
+                            schedule: optimizationResult.schedule.map(day => {
+                                // Calculate the date for this day
+                                const startDate = new Date(transformedRequest.startDate);
+                                const dayDate = new Date(startDate);
+                                dayDate.setDate(startDate.getDate() + (day.dayNumber - 1));
+                                const date = dayDate.toISOString().split('T')[0];
+                                return {
+                                    dayNumber: day.dayNumber,
+                                    date,
+                                    theme: day.theme || safelyCallHelper(generateDayTheme, [day.activities], 'generateDayTheme', 'Mixed Activities'),
+                                    mainArea: day.mainArea || safelyCallHelper(determineMainArea, [day.activities], 'determineMainArea', 'City Center'),
+                                    commentary: day.commentary || safelyCallHelper(generateDayCommentary, [day.activities, day.dayNumber], 'generateDayCommentary', ''),
+                                    highlights: day.highlights || safelyCallHelper(generateDayHighlights, [day.activities, transformedRequest.preferences], 'generateDayHighlights', []),
+                                    activities: day.activities.map(activity => ({
+                                        ...activity,
+                                        date, // Ensure each activity has the correct date
+                                        startTime: activity.startTime || getDefaultStartTime(activity.timeSlot)
+                                    })).sort((a, b) => {
+                                        if (a.startTime && b.startTime) {
+                                            const [aHour, aMin] = a.startTime.split(':').map(Number);
+                                            const [bHour, bMin] = b.startTime.split(':').map(Number);
+                                            return (aHour * 60 + aMin) - (bHour * 60 + bMin);
+                                        }
+                                        return 0;
+                                    }),
+                                    breaks: day.breaks || safelyCallHelper(generateBreakSchedule, [day.activities, transformedRequest.preferences], 'generateBreakSchedule', {
+                                        morning: { startTime: '10:30', endTime: '11:00', duration: 30, suggestion: 'Coffee break' },
+                                        lunch: { startTime: '12:30', endTime: '13:30', duration: 60, suggestion: 'Lunch break' },
+                                        afternoon: { startTime: '15:30', endTime: '16:00', duration: 30, suggestion: 'Rest break' },
+                                        dinner: { startTime: '18:30', endTime: '20:00', duration: 90, suggestion: 'Dinner' }
+                                    }),
+                                    logistics: day.logistics || safelyCallHelper(generateLogistics, [day.activities, transformedRequest.preferences], 'generateLogistics', {
+                                        transportSuggestions: ['Use public transportation between major attractions'],
+                                        walkingDistances: ['Average walking distance between activities: 15-20 minutes'],
+                                        timeEstimates: ['Allow 30 minutes for transportation between activities']
+                                    }),
+                                    availabilityStats: day.availabilityStats
+                                };
+                            }),
+                            dailyHighlights: optimizationResult.dailyHighlights || agentResult.dayHighlights || [],
+                            unscheduledActivities: optimizationResult.unscheduledActivities || [],
+                            statistics: optimizationResult.statistics || {
+                                totalScheduled: 0,
+                                totalUnscheduled: 0,
+                                scheduledByDay: []
+                            },
                             totalBudget: transformedRequest.budget,
+                            // Add flights data to the response
+                            flights: {
+                                all: transformFlightData(transformedRequest.flightData || []),
+                                stats: {
+                                    totalFlights: transformedRequest.flightData?.length || 0,
+                                    byClass: {
+                                        economy: transformedRequest.flightData?.filter(f => f.travelerPricings[0]?.fareDetailsBySegment[0]?.cabin === 'ECONOMY').length || 0,
+                                        premiumEconomy: transformedRequest.flightData?.filter(f => f.travelerPricings[0]?.fareDetailsBySegment[0]?.cabin === 'PREMIUM_ECONOMY').length || 0,
+                                        business: transformedRequest.flightData?.filter(f => f.travelerPricings[0]?.fareDetailsBySegment[0]?.cabin === 'BUSINESS').length || 0,
+                                        first: transformedRequest.flightData?.filter(f => f.travelerPricings[0]?.fareDetailsBySegment[0]?.cabin === 'FIRST').length || 0
+                                    },
+                                    priceRange: transformedRequest.flightData?.length ? {
+                                        min: Math.min(...transformedRequest.flightData.map(f => parseFloat(f.price.total))),
+                                        max: Math.max(...transformedRequest.flightData.map(f => parseFloat(f.price.total))),
+                                        currency: transformedRequest.flightData[0].price.currency
+                                    } : null
+                                }
+                            },
                             metadata: {
                                 perplexityCalls: 0,
                                 scheduleGeneration: {
@@ -632,8 +1033,20 @@ router.post('/calculate', async (req, res) => {
             timeoutPromise
         ]);
         logger.info('[Budget Route] ====== END BUDGET CALCULATION ======');
-        // Send the response
-        return res.json(result);
+        // Enrich flight data with city names before sending the response
+        try {
+            const enrichedResult = await enrichFlightsWithCityNames(result, req.app.locals.amadeusService);
+            // Send the enriched result
+            return res.json(enrichedResult);
+        }
+        catch (error) {
+            logger.error('[Budget Route] Error enriching flight data with city names:', {
+                error: error instanceof Error ? error.message : 'Unknown error',
+                stack: error instanceof Error ? error.stack : undefined
+            });
+            // Fall back to sending the original result
+            return res.json(result);
+        }
     }
     catch (error) {
         logger.error('[Budget Route] Error in budget calculation:', {

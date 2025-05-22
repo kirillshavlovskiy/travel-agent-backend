@@ -1,3 +1,34 @@
+declare module 'amadeus' {
+  class Amadeus {
+    constructor(options: { clientId: string; clientSecret: string; hostname?: string });
+    shopping: {
+      flightOffersSearch: {
+        get(params: any): Promise<any>;
+        post(body: string): Promise<any>;
+        pricing: {
+          post(params: any): Promise<any>;
+        };
+      };
+      hotelOffers: {
+        get(params: any): Promise<any>;
+      };
+      seatmaps: {
+        post(body: string): Promise<any>;
+      };
+    };
+    booking: {
+      flightOrders: {
+        post(body: string): Promise<any>;
+      };
+    };
+    referenceData: {
+      locations: {
+        get(params: { keyword: string; subType: string; view?: string }): Promise<any>;
+      };
+    };
+  }
+}
+
 export interface AmadeusService {
   amadeus: {
     shopping: {
@@ -66,15 +97,22 @@ export interface AmadeusFareDetail {
   segmentId: string;
   cabin: string;
   fareBasis: string;
-  brandedFare?: string;
-  brandedFareLabel?: string;
+  brandedFare: string;
   class: string;
   includedCheckedBags: {
     quantity: number;
-    weight?: number;
-    weightUnit?: string;
   };
-  amenities?: AmadeusAmenity[];
+  includedCabinBags?: {
+    quantity: number;
+  };
+  amenities?: Array<{
+    description: string;
+    isChargeable: boolean;
+    amenityType: string;
+    amenityProvider: {
+      name: string;
+    };
+  }>;
 }
 
 export interface AmadeusFlightOffer {
@@ -149,13 +187,14 @@ export interface AmadeusSegment {
   aircraft: {
     code: string;
   };
-  operating?: {
+  operating: {
     carrierCode: string;
   };
   duration: string;
   id: string;
   numberOfStops: number;
   blacklistedInEU: boolean;
+  cabin?: string;
 }
 
 export interface AmadeusItinerary {
@@ -301,4 +340,30 @@ export interface Amadeus {
       }>;
     };
   };
+}
+
+export interface SeatMapResponse {
+  segments: Array<{
+    id: string;
+    cabin: string;
+    class: string;
+    deck: string;
+    seats: Array<{
+      number: string;
+      characteristics: string[];
+      travelerPricing?: {
+        price: {
+          total: string;
+        };
+      };
+      coordinates?: {
+        x: number;
+        y: number;
+      };
+    }>;
+    facilities?: Array<{
+      code: string;
+      description: string;
+    }>;
+  }>;
 } 

@@ -1,176 +1,329 @@
 import express from 'express';
-import { prisma } from '../lib/prisma.js';
+import { PrismaClient } from '@prisma/client';
+import { handleRedditCallback } from '../controllers/auth.js';
+// Create a function to generate a session token
+function generateSessionToken() {
+    return Math.random().toString(36).substring(2) + Date.now().toString(36);
+}
 const router = express.Router();
-// Base auth route
-router.get('/', async (req, res) => {
-    try {
-        // Add your base auth logic here
-        res.json({ status: 'success' });
-    }
-    catch (error) {
-        console.error('Auth error:', error);
-        res.status(500).json({ error: 'Internal server error' });
-    }
+// Add providers endpoint
+router.get('/providers', (_req, res) => {
+    res.json({
+        google: {
+            id: 'google',
+            name: 'Google',
+            type: 'oauth',
+            signinUrl: '/api/auth/signin/google',
+            callbackUrl: '/api/auth/callback/google'
+        },
+        reddit: {
+            id: 'reddit',
+            name: 'Reddit',
+            type: 'oauth',
+            signinUrl: '/api/auth/signin/reddit',
+            callbackUrl: '/api/auth/callback/reddit'
+        }
+    });
 });
-// Session validation route
+// Get current user
+router.get('/user', async (req, res) => {
+    // First check for custom session token
+    const sessionToken = req.cookies.session_token;
+    if (sessionToken) {
+        try {
+            const prisma = new PrismaClient();
+            const session = await prisma.session.findUnique({
+                where: {
+                    sessionToken,
+                },
+                include: {
+                    user: true,
+                },
+            });
+            await prisma.$disconnect();
+            if (session && session.expires > new Date()) {
+                return res.json({
+                    id: session.user.id,
+                    username: session.user.username,
+                    profileImage: session.user.profileImage,
+                    verified: session.user.verified
+                });
+            }
+        }
+        catch (error) {
+            console.error('[User] Error checking session token:', error);
+        }
+    }
+    // Fallback to Express session
+    if (req.session?.user) {
+        return res.json(req.session.user);
+    }
+    return res.status(401).json({ error: 'Not authenticated' });
+});
+// Add logging endpoint
+router.post('/_log', (req, res) => {
+    console.log('[Auth Log]', req.body);
+    res.status(200).json({ success: true });
+});
+// Session management
 router.get('/session', async (req, res) => {
+    const sessionToken = req.cookies.session_token;
+    console.log('[Session] Checking session:', {
+        hasToken: !!sessionToken,
+        cookies: req.cookies
+    });
     try {
-        const sessionToken = req.cookies.session_token;
         if (!sessionToken) {
-            return res.status(401).json({
+            console.log('[Session] No session token found');
+            return res.status(200).json({
                 authenticated: false,
-                user: null,
-                message: 'No session token found'
+                user: null
             });
         }
+        // Find session and associated user
+        const prisma = new PrismaClient();
         const session = await prisma.session.findUnique({
-            where: { sessionToken },
-            include: { user: true }
+            where: {
+                sessionToken,
+            },
+            include: {
+                user: true,
+            },
         });
+        console.log('[Session] Session lookup result:', {
+            found: !!session,
+            expired: session ? session.expires < new Date() : null,
+            userId: session?.user?.id
+        });
+        await prisma.$disconnect();
         if (!session || session.expires < new Date()) {
-            return res.status(401).json({
+            console.log('[Session] Session invalid or expired');
+            // Clear the invalid session token
+            res.clearCookie('session_token', {
+                httpOnly: true,
+                secure: process.env.NODE_ENV === 'production',
+                sameSite: 'lax',
+                path: '/'
+            });
+            return res.status(200).json({
                 authenticated: false,
-                user: null,
-                message: 'Invalid or expired session'
+                user: null
             });
         }
-        res.json({
+        console.log('[Session] Valid session found, returning user data');
+        return res.json({
             authenticated: true,
             user: {
                 id: session.user.id,
                 username: session.user.username,
-                profileImage: session.user.profileImage
+                profileImage: session.user.profileImage,
+                verified: session.user.verified
             }
         });
     }
     catch (error) {
-        console.error('Session validation error:', error);
-        res.status(500).json({
-            authenticated: false,
-            user: null,
-            error: 'Internal server error'
-        });
+        console.error('[Session] Error checking session:', error);
+        return res.status(500).json({ error: 'Internal server error' });
     }
 });
-// Reddit callback route
-router.post('/reddit/callback', async (req, res) => {
+router.delete('/session', (req, res) => {
+    req.session.destroy((err) => {
+        if (err) {
+            console.error('Error destroying session:', err);
+            return res.status(500).json({ error: 'Failed to destroy session' });
+        }
+        res.clearCookie('connect.sid');
+        return res.status(200).json({ message: 'Session destroyed' });
+    });
+});
+// Logout endpoint
+router.post('/logout', async (req, res) => {
+    try {
+        // Clear Express session
+        await new Promise((resolve, reject) => {
+            req.session.destroy((err) => {
+                if (err) {
+                    console.error('Error destroying Express session:', err);
+                    reject(err);
+                }
+                else {
+                    resolve();
+                }
+            });
+        });
+        // Clear session token from database if it exists
+        const sessionToken = req.cookies.session_token;
+        if (sessionToken) {
+            const prisma = new PrismaClient();
+            await prisma.session.delete({
+                where: {
+                    sessionToken
+                }
+            }).catch(err => {
+                console.error('Error deleting session from database:', err);
+            });
+            await prisma.$disconnect();
+        }
+        // Clear all cookies
+        res.clearCookie('connect.sid');
+        res.clearCookie('session_token');
+        return res.status(200).json({ message: 'Logged out successfully' });
+    }
+    catch (error) {
+        console.error('Error during logout:', error);
+        return res.status(500).json({ error: 'Failed to logout' });
+    }
+});
+// Reddit auth endpoints
+router.post('/reddit/callback', handleRedditCallback);
+// Google auth endpoints
+router.get('/google/authorize', (_req, res) => {
+    const clientId = process.env.GOOGLE_CLIENT_ID;
+    const redirectUri = process.env.NODE_ENV === 'production'
+        ? 'https://ai-trip-advisor-web.vercel.app/api/auth/callback/google'
+        : 'http://localhost:3003/api/auth/callback/google';
+    const scope = encodeURIComponent('openid email profile');
+    const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?` +
+        `client_id=${clientId}` +
+        `&redirect_uri=${encodeURIComponent(redirectUri)}` +
+        `&response_type=code` +
+        `&scope=${scope}` +
+        `&access_type=offline` +
+        `&prompt=consent`;
+    res.json({ authUrl });
+});
+// Single callback endpoint for Google
+router.post('/google/callback', async (req, res) => {
     try {
         const { code, redirectUri } = req.body;
-        if (!code || !redirectUri) {
-            return res.status(400).json({
-                success: false,
-                error: 'Missing required parameters'
-            });
+        console.log('[Google Callback] Processing code:', { code, redirectUri });
+        if (!code) {
+            return res.status(400).json({ error: 'Missing authorization code' });
         }
-        // Exchange code for Reddit access token
-        const tokenResponse = await fetch('https://www.reddit.com/api/v1/access_token', {
+        // Exchange code for tokens
+        const clientId = process.env.GOOGLE_CLIENT_ID;
+        const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+        const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
             method: 'POST',
             headers: {
-                'Authorization': `Basic ${Buffer.from(`${process.env.REDDIT_CLIENT_ID}:${process.env.REDDIT_CLIENT_SECRET}`).toString('base64')}`,
-                'Content-Type': 'application/x-www-form-urlencoded'
+                'Content-Type': 'application/x-www-form-urlencoded',
             },
             body: new URLSearchParams({
-                grant_type: 'authorization_code',
                 code,
-                redirect_uri: redirectUri
-            })
+                client_id: clientId,
+                client_secret: clientSecret,
+                redirect_uri: redirectUri,
+                grant_type: 'authorization_code',
+            }),
         });
         if (!tokenResponse.ok) {
-            console.error('Reddit token error:', await tokenResponse.text());
-            return res.status(401).json({
-                success: false,
-                error: 'Failed to obtain access token'
-            });
+            const error = await tokenResponse.text();
+            console.error('[Google Callback] Token error:', error);
+            return res.status(401).json({ error: 'Failed to exchange code for token' });
         }
-        const tokenData = await tokenResponse.json();
-        // Get user info from Reddit
-        const userResponse = await fetch('https://oauth.reddit.com/api/v1/me', {
+        const tokens = await tokenResponse.json();
+        console.log('[Google Callback] Got tokens:', { accessToken: tokens.access_token ? 'present' : 'missing' });
+        // Get user info
+        const userInfoResponse = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
             headers: {
-                'Authorization': `Bearer ${tokenData.access_token}`,
-                'User-Agent': 'AI Trip Advisor/1.0.0'
-            }
+                'Authorization': `Bearer ${tokens.access_token}`,
+            },
         });
-        if (!userResponse.ok) {
-            console.error('Reddit user info error:', await userResponse.text());
-            return res.status(401).json({
-                success: false,
-                error: 'Failed to get user info'
-            });
+        if (!userInfoResponse.ok) {
+            const error = await userInfoResponse.text();
+            console.error('[Google Callback] User info error:', error);
+            return res.status(401).json({ error: 'Failed to get user info' });
         }
-        const userData = await userResponse.json();
-        // Create or update user
-        const user = await prisma.user.upsert({
-            where: { redditId: userData.id },
-            update: {
-                username: userData.name,
-                profileImage: userData.icon_img,
-                lastLogin: new Date()
-            },
-            create: {
-                redditId: userData.id,
-                username: userData.name,
-                profileImage: userData.icon_img,
-                lastLogin: new Date()
-            }
+        const userInfo = await userInfoResponse.json();
+        console.log('[Google Callback] Got user info:', { id: userInfo.id, name: userInfo.name });
+        // Database transaction
+        const prisma = new PrismaClient();
+        console.log('[Google Callback] Starting database transaction');
+        const result = await prisma.$transaction(async (tx) => {
+            // Find or create user
+            const user = await tx.user.upsert({
+                where: { email: userInfo.email },
+                update: {
+                    name: userInfo.name,
+                    profileImage: userInfo.picture,
+                    lastLogin: new Date(),
+                },
+                create: {
+                    email: userInfo.email,
+                    name: userInfo.name,
+                    username: userInfo.name,
+                    profileImage: userInfo.picture,
+                    verified: userInfo.verified_email,
+                },
+            });
+            // Create or update account
+            const account = await tx.account.upsert({
+                where: {
+                    provider_providerAccountId: {
+                        provider: 'google',
+                        providerAccountId: userInfo.id,
+                    },
+                },
+                update: {
+                    access_token: tokens.access_token,
+                    refresh_token: tokens.refresh_token,
+                    expires_at: Math.floor(Date.now() / 1000 + tokens.expires_in),
+                    token_type: tokens.token_type,
+                    scope: 'openid email profile',
+                    id_token: tokens.id_token,
+                },
+                create: {
+                    userId: user.id,
+                    type: 'oauth',
+                    provider: 'google',
+                    providerAccountId: userInfo.id,
+                    access_token: tokens.access_token,
+                    refresh_token: tokens.refresh_token,
+                    expires_at: Math.floor(Date.now() / 1000 + tokens.expires_in),
+                    token_type: tokens.token_type,
+                    scope: 'openid email profile',
+                    id_token: tokens.id_token,
+                },
+            });
+            // Create new session
+            const session = await tx.session.create({
+                data: {
+                    userId: user.id,
+                    sessionToken: generateSessionToken(),
+                    expires: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), // 30 days
+                },
+            });
+            return { user, account, session };
         });
-        // Create or update Reddit account
-        await prisma.account.upsert({
-            where: {
-                provider_providerAccountId: {
-                    provider: 'reddit',
-                    providerAccountId: userData.id
-                }
-            },
-            update: {
-                access_token: tokenData.access_token,
-                refresh_token: tokenData.refresh_token,
-                expires_at: Math.floor(Date.now() / 1000 + tokenData.expires_in),
-                token_type: tokenData.token_type,
-                scope: tokenData.scope
-            },
-            create: {
-                userId: user.id,
-                type: 'oauth',
-                provider: 'reddit',
-                providerAccountId: userData.id,
-                access_token: tokenData.access_token,
-                refresh_token: tokenData.refresh_token,
-                expires_at: Math.floor(Date.now() / 1000 + tokenData.expires_in),
-                token_type: tokenData.token_type,
-                scope: tokenData.scope
-            }
-        });
-        // Create session
-        const session = await prisma.session.create({
-            data: {
-                userId: user.id,
-                sessionToken: Math.random().toString(36).substring(2) + Date.now().toString(36),
-                expires: new Date(Date.now() + 24 * 60 * 60 * 1000) // 24 hours
-            }
+        await prisma.$disconnect();
+        console.log('[Google Callback] Database transaction completed', {
+            userId: result.user.id,
+            sessionId: result.session.id,
+            sessionToken: result.session.sessionToken,
         });
         // Set session cookie
-        res.cookie('session_token', session.sessionToken, {
+        res.cookie('session_token', result.session.sessionToken, {
             httpOnly: true,
             secure: process.env.NODE_ENV === 'production',
             sameSite: 'lax',
-            maxAge: 24 * 60 * 60 * 1000 // 24 hours
+            path: '/',
+            expires: result.session.expires,
         });
-        res.json({
+        // Return success with user data
+        return res.status(200).json({
             success: true,
             user: {
-                id: user.id,
-                username: user.username,
-                profileImage: user.profileImage
-            }
+                id: result.user.id,
+                username: result.user.username,
+                email: result.user.email,
+                profileImage: result.user.profileImage,
+                verified: result.user.verified,
+            },
         });
     }
     catch (error) {
-        console.error('Reddit auth callback error:', error);
-        res.status(500).json({
-            success: false,
-            error: 'Internal server error'
-        });
+        console.error('[Google Callback] Error:', error);
+        return res.status(500).json({ error: 'Internal server error' });
     }
 });
 export default router;
-//# sourceMappingURL=auth.js.map

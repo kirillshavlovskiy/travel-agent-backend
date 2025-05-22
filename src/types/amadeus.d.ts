@@ -18,9 +18,14 @@ declare module 'amadeus' {
     get(params: any): Promise<any>;
   }
 
+  interface AmadeusShoppingSeatmaps {
+    post(params: any): Promise<AmadeusResponse>;
+  }
+
   interface AmadeusShopping {
     flightOffersSearch: AmadeusShoppingFlightOffersSearch;
     hotelOffers: AmadeusShoppingHotelOffers;
+    seatmaps: AmadeusShoppingSeatmaps;
   }
 
   interface AmadeusReferenceDataLocations {
@@ -35,6 +40,26 @@ declare module 'amadeus' {
     clientId: string;
     clientSecret: string;
     hostname?: string;
+    logLevel?: string;
+  }
+
+  interface AmadeusError extends Error {
+    code?: string;
+    response?: {
+      statusCode: number;
+      result?: {
+        errors?: Array<{
+          detail?: string;
+          title?: string;
+        }>;
+      };
+    };
+    description?: string;
+  }
+
+  interface AmadeusResponse {
+    data: any;
+    meta?: any;
   }
 
   class Amadeus {

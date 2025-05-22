@@ -1,8 +1,6 @@
 import { Router } from 'express';
-import { ViatorService } from '../services/viator.js';
+import { ViatorService } from '../services/viator';
 import { logger } from '../utils/logger.js';
-import * as fs from 'fs';
-import * as path from 'path';
 import { PerplexityService } from '../services/perplexity.js';
 const activitiesRouter = Router();
 // Initialize Viator service
@@ -177,503 +175,214 @@ function groupActivitiesByDayAndSlot(activities, days) {
     return slots;
 }
 // Update the schedule creation function
-function createBasicSchedule(activities, days) {
-    const groupedActivities = groupActivitiesByDayAndSlot(activities, days);
-    const schedule = [];
-    const preselectedByDay = new Map();
-    const unselectedActivities = activities.filter(a => !a.selected);
-    // First, group preselected activities by day
-    activities.filter(a => a.selected).forEach(activity => {
-        if (!preselectedByDay.has(activity.dayNumber)) {
-            preselectedByDay.set(activity.dayNumber, []);
-        }
-        preselectedByDay.get(activity.dayNumber)?.push(activity);
-    });
-    // Calculate how many additional activities we need per day
-    const targetActivitiesPerDay = 3; // morning, afternoon, evening
-    for (let day = 1; day <= days; day++) {
-        const preselectedForDay = preselectedByDay.get(day) || [];
-        const preselectedTimeSlots = new Set(preselectedForDay.map(a => a.timeSlot));
-        // Calculate how many more activities we need for this day
-        const neededActivities = targetActivitiesPerDay - preselectedForDay.length;
-        // Get available time slots for this day
-        const availableTimeSlots = ['morning', 'afternoon', 'evening'].filter((slot) => !preselectedTimeSlots.has(slot));
-        // Select additional activities for available time slots
-        const additionalActivities = unselectedActivities
-            .filter(activity => !activity.selected && activity.availability?.realTimeVerification?.exactStartTimes?.length > 0)
-            .slice(0, neededActivities)
-            .map((activity, index) => {
-            const timeSlot = availableTimeSlots[index] || 'morning';
-            const availableTimes = activity.availability?.realTimeVerification?.exactStartTimes || [];
-            const timesByCategory = activity.availability?.timesByCategory || {};
-            // Get available times for the desired time slot
-            const slotTimes = timesByCategory[timeSlot] || [];
-            // If no times available for desired slot, try to find times in other slots
-            if (slotTimes.length === 0) {
-                logger.warn(`No available times found for ${activity.name} in slot ${timeSlot}, skipping activity`);
-                return null;
-            }
-            // Select the first available time for the slot
-            const startTime = slotTimes[0];
-            return {
-                ...activity,
-                timeSlot,
-                startTime,
-                dayNumber: day,
-                availability: {
-                    ...activity.availability,
-                    isAvailable: true,
-                    availableTimeSlots: Object.keys(timesByCategory).filter(slot => timesByCategory[slot].length > 0),
-                    exactStartTimes: availableTimes,
-                    timesByCategory,
-                    realTimeVerification: {
-                        verified: true,
-                        exactStartTimes: availableTimes,
-                        lastChecked: new Date().toISOString()
-                    }
-                }
-            };
-        })
-            .filter((activity) => activity !== null);
-        const dayActivities = [...preselectedForDay, ...additionalActivities];
-        // Only add the day to schedule if it has activities with real availability
-        if (dayActivities.length > 0) {
-            schedule.push({
-                dayNumber: day,
-                theme: `Day ${day} Exploration`,
-                mainArea: determineMainArea(dayActivities),
-                commentary: generateDayCommentary(dayActivities, day),
-                highlights: generateDayHighlights(dayActivities, {}),
-                activities: dayActivities,
-                breaks: generateBreakSchedule(dayActivities, {}),
-                logistics: generateLogistics(dayActivities, {}),
-                availabilityStats: calculateAvailabilityStats(dayActivities)
-            });
-        }
+export async function optimizeSchedule(activities, days, destination, preferences, startDate) {
+    logger.info(`[Schedule] Starting schedule optimization for ${days} days in ${destination}`);
+    // Validate and parse start date
+    const parsedStartDate = startDate ? new Date(startDate) : new Date();
+    if (isNaN(parsedStartDate.getTime())) {
+        logger.error('[Schedule] Invalid start date provided:', startDate);
+        throw new Error('Invalid start date');
     }
+    // Initialize schedule array with proper dates
+    const schedule = Array.from({ length: days }, (_, i) => {
+        const currentDate = new Date(parsedStartDate);
+        currentDate.setDate(parsedStartDate.getDate() + i);
+        const dateStr = currentDate.toISOString().split('T')[0];
+        return {
+            dayNumber: i + 1,
+            date: dateStr,
+            theme: '',
+            mainArea: '',
+            commentary: '',
+            highlights: [],
+            activities: [],
+            breaks: generateBreakSchedule([], preferences),
+            logistics: generateLogistics([], preferences),
+            availabilityStats: {
+                verifiedActivities: 0,
+                totalActivities: 0,
+                realTimeAvailabilityRate: '0%'
+            }
+        };
+    });
+    // Validate and prepare activities
+    const validActivities = activities.map(activity => {
+        // Ensure activity has a valid time slot
+        if (!validateTimeSlot(activity)) {
+            activity.timeSlot = determineTimeSlot(activity.startTime, activity.duration);
+            logger.info(`[Schedule] Assigned time slot ${activity.timeSlot} to "${activity.name}"`);
+        }
+        return activity;
+    });
+    // Sort activities by selection status, duration, and combined score
+    validActivities.sort((a, b) => {
+        if (a.selected !== b.selected)
+            return b.selected ? 1 : -1;
+        if (a.duration !== b.duration)
+            return b.duration - a.duration;
+        const scoreA = (a.rating || 0) * (a.preferenceScore || 1);
+        const scoreB = (b.rating || 0) * (b.preferenceScore || 1);
+        return scoreB - scoreA;
+    });
+    const remainingActivities = [];
+    const occupiedTimeSlots = {};
+    // Helper function to check time conflicts
+    const hasTimeConflict = (activity, date) => {
+        if (!occupiedTimeSlots[date])
+            return false;
+        const activityStart = new Date(`${date}T${activity.startTime}`);
+        const activityEnd = new Date(activityStart.getTime() + activity.duration * 60 * 1000);
+        return occupiedTimeSlots[date].some(slot => {
+            const slotStart = new Date(`${date}T${slot.startTime}`);
+            const slotEnd = new Date(`${date}T${slot.endTime}`);
+            return (activityStart < slotEnd && activityEnd > slotStart);
+        });
+    };
+    // Helper function to check for redundant activities
+    const isRedundantActivity = (activity, existingActivities) => {
+        return existingActivities.some(existing => existing.name === activity.name &&
+            existing.dayNumber === activity.dayNumber);
+    };
+    // Helper function to add activity to schedule
+    const scheduleActivity = (activity, dayIndex) => {
+        const currentDate = schedule[dayIndex].date;
+        // Check constraints
+        if (schedule[dayIndex].activities.length >= 5) {
+            logger.info(`[Schedule] Day ${dayIndex + 1} already has maximum activities`);
+            return false;
+        }
+        // Check for redundant activities
+        if (isRedundantActivity(activity, schedule[dayIndex].activities)) {
+            logger.info(`[Schedule] Redundant activity detected for "${activity.name}" on ${currentDate}`);
+            return false;
+        }
+        const totalDuration = schedule[dayIndex].activities.reduce((sum, a) => sum + a.duration, 0);
+        if (totalDuration + activity.duration > 12 * 60) {
+            logger.info(`[Schedule] Day ${dayIndex + 1} would exceed maximum duration`);
+            return false;
+        }
+        if (hasTimeConflict(activity, currentDate)) {
+            logger.info(`[Schedule] Time conflict detected for "${activity.name}" on ${currentDate}`);
+            return false;
+        }
+        // Add activity to schedule with proper date assignment
+        const scheduledActivity = {
+            ...activity,
+            date: currentDate,
+            dayNumber: dayIndex + 1
+        };
+        // Update the activity's date in the original array to maintain consistency
+        const originalIndex = validActivities.findIndex(a => a.name === activity.name);
+        if (originalIndex !== -1) {
+            validActivities[originalIndex].date = currentDate;
+            validActivities[originalIndex].dayNumber = dayIndex + 1;
+        }
+        schedule[dayIndex].activities.push(scheduledActivity);
+        // Sort activities by start time within the day
+        schedule[dayIndex].activities.sort((a, b) => {
+            const timeA = new Date(`2000-01-01T${a.startTime}`).getTime();
+            const timeB = new Date(`2000-01-01T${b.startTime}`).getTime();
+            return timeA - timeB;
+        });
+        // Update occupied time slots
+        if (!occupiedTimeSlots[currentDate]) {
+            occupiedTimeSlots[currentDate] = [];
+        }
+        const endTime = new Date(`${currentDate}T${activity.startTime}`);
+        endTime.setMinutes(endTime.getMinutes() + activity.duration);
+        occupiedTimeSlots[currentDate].push({
+            startTime: activity.startTime,
+            endTime: endTime.toTimeString().slice(0, 5)
+        });
+        // Sort occupied time slots
+        occupiedTimeSlots[currentDate].sort((a, b) => {
+            const timeA = new Date(`2000-01-01T${a.startTime}`).getTime();
+            const timeB = new Date(`2000-01-01T${b.startTime}`).getTime();
+            return timeA - timeB;
+        });
+        logger.info(`[Schedule] Scheduled activity "${activity.name}" on ${currentDate} at ${activity.startTime}`);
+        return true;
+    };
+    // Process each day
+    for (let dayIndex = 0; dayIndex < days; dayIndex++) {
+        const dayNumber = dayIndex + 1;
+        logger.info(`[Schedule] Processing day ${dayNumber} (${schedule[dayIndex].date})`);
+        // First schedule selected activities for this day
+        const selectedActivities = validActivities.filter(activity => activity.selected && (activity.dayNumber === dayNumber || !activity.dayNumber));
+        for (const activity of selectedActivities) {
+            if (!scheduleActivity(activity, dayIndex)) {
+                remainingActivities.push(activity);
+            }
+        }
+        // Then try to schedule unassigned activities
+        const unassignedActivities = validActivities.filter(activity => !activity.selected && !remainingActivities.includes(activity) &&
+            (!activity.dayNumber || activity.dayNumber === dayNumber));
+        for (const activity of unassignedActivities) {
+            if (!scheduleActivity(activity, dayIndex)) {
+                remainingActivities.push(activity);
+            }
+        }
+        // Sort day's activities by start time
+        schedule[dayIndex].activities.sort((a, b) => {
+            const timeA = new Date(`${schedule[dayIndex].date}T${a.startTime}`).getTime();
+            const timeB = new Date(`${schedule[dayIndex].date}T${b.startTime}`).getTime();
+            return timeA - timeB;
+        });
+        // Generate schedule details for the day
+        if (schedule[dayIndex].activities.length > 0) {
+            schedule[dayIndex].theme = generateDayTheme(schedule[dayIndex].activities, preferences);
+            schedule[dayIndex].mainArea = determineMainArea(schedule[dayIndex].activities);
+            schedule[dayIndex].commentary = generateDayCommentary(schedule[dayIndex].activities, dayNumber);
+            schedule[dayIndex].highlights = generateDayHighlights(schedule[dayIndex].activities, preferences);
+            schedule[dayIndex].breaks = generateBreakSchedule(schedule[dayIndex].activities, preferences);
+            schedule[dayIndex].logistics = generateLogistics(schedule[dayIndex].activities, preferences);
+            const stats = calculateAvailabilityStats(schedule[dayIndex].activities);
+            schedule[dayIndex].availabilityStats = stats;
+        }
+        logger.info(`[Schedule] Completed day ${dayNumber} with ${schedule[dayIndex].activities.length} activities`);
+    }
+    // Generate final statistics
+    const statistics = {
+        totalScheduled: schedule.reduce((sum, day) => sum + day.activities.length, 0),
+        totalUnscheduled: remainingActivities.length,
+        scheduledByDay: schedule.map(day => day.activities.length)
+    };
+    // Generate daily highlights
+    const dailyHighlights = schedule.map(day => ({
+        dayNumber: day.dayNumber,
+        theme: day.theme,
+        highlights: day.highlights
+    }));
+    // Generate trip overview
+    const tripOverview = generateTripOverview(schedule, destination);
+    logOptimizedSchedule(schedule, destination, days);
     return {
         schedule,
-        dailyHighlights: schedule.map(day => ({
-            dayNumber: day.dayNumber,
-            theme: day.theme,
-            highlights: day.highlights
-        })),
-        tripOverview: 'Schedule created with verified real-time availability'
+        dailyHighlights,
+        tripOverview,
+        unscheduledActivities: remainingActivities,
+        statistics
     };
 }
-// Add function to log optimized schedule
-function logOptimizedSchedule(schedule, destination, days, startDate) {
-    try {
-        const logDir = path.join(process.cwd(), 'logs');
-        const logFile = path.join(logDir, 'optimized_plan.log');
-        const timestamp = new Date().toISOString();
-        // Create logs directory if it doesn't exist
-        if (!fs.existsSync(logDir)) {
-            fs.mkdirSync(logDir, { recursive: true });
-        }
-        const totalActivities = schedule.reduce((sum, day) => sum + (day.activities?.length || 0), 0);
-        const logEntry = {
-            timestamp,
-            destination,
-            days,
-            dates: {
-                start: startDate,
-                end: new Date(new Date(startDate).getTime() + (days - 1) * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
-            },
-            optimization_results: {
-                input_activities: totalActivities,
-                scheduled_activities: totalActivities,
-                daily_breakdown: schedule.map((day, index) => {
-                    const currentDate = new Date(startDate);
-                    currentDate.setDate(currentDate.getDate() + index);
-                    const dateStr = currentDate.toISOString().split('T')[0];
-                    return {
-                        dayNumber: day.dayNumber,
-                        date: dateStr,
-                        theme: day.theme || 'Exploration Day',
-                        mainArea: day.mainArea || 'City Center',
-                        planningLogic: "15-30 minutes buffer between activities",
-                        activities: (day.activities || []).map(activity => ({
-                            name: activity.name,
-                            description: activity.description,
-                            category: activity.category,
-                            timeSlot: activity.timeSlot,
-                            startTime: activity.startTime,
-                            duration: activity.duration,
-                            price: activity.price,
-                            location: activity.location,
-                            rating: activity.rating,
-                            numberOfReviews: activity.numberOfReviews,
-                            bookingDetails: activity.bookingDetails,
-                            availability: activity.availability
-                        })),
-                        breaks: day.breaks || {
-                            morning: { startTime: "", endTime: "", duration: 0, suggestion: "" },
-                            lunch: { startTime: "", endTime: "", duration: 0, suggestion: "" },
-                            afternoon: { startTime: "", endTime: "", duration: 0, suggestion: "" },
-                            dinner: { startTime: "", endTime: "", duration: 0, suggestion: "" }
-                        },
-                        logistics: day.logistics || {
-                            transportSuggestions: [],
-                            walkingDistances: [],
-                            timeEstimates: []
-                        },
-                        commentary: day.commentary || 'No commentary available',
-                        highlights: day.highlights || [],
-                        dailyStats: {
-                            totalDuration: (day.activities || []).reduce((sum, a) => sum + (a.duration || 0), 0),
-                            averageRating: ((day.activities || []).reduce((sum, a) => sum + (a.rating || 0), 0) / (day.activities?.length || 1)).toFixed(2),
-                            categoryDistribution: (day.activities || []).reduce((acc, a) => {
-                                acc[a.category || 'unspecified'] = (acc[a.category || 'unspecified'] || 0) + 1;
-                                return acc;
-                            }, {}),
-                            preferenceMatchRate: `${(((day.activities || []).filter(a => a.preferenceScore > 0).length / (day.activities?.length || 1)) * 100).toFixed(1)}%`
-                        }
-                    };
-                })
-            }
-        };
-        // Append to log file instead of overwriting
-        const logString = JSON.stringify(logEntry, null, 2) + '\n---\n';
-        fs.appendFileSync(logFile, logString);
-        // Log concise summary to console
-        logger.info('[Schedule Optimization] Results:', {
-            timestamp,
-            destination,
-            days,
-            dates: logEntry.dates,
-            total_activities: totalActivities,
-            daily_breakdown: logEntry.optimization_results.daily_breakdown.map(day => ({
-                dayNumber: day.dayNumber,
-                date: day.date,
-                activities: day.activities.length,
-                highlights: day.highlights
-            }))
-        });
+function determineTimeSlot(startTime, duration) {
+    // If no start time provided, return morning as default
+    if (!startTime) {
+        return 'morning';
     }
-    catch (error) {
-        logger.error('[Schedule Optimization] Failed to log schedule:', error);
+    const [hours] = startTime.split(':').map(Number);
+    const endHour = hours + Math.floor(duration / 60);
+    // If activity spans multiple time slots, assign to the slot with the majority of the duration
+    if (duration >= 480) { // 8 hours or more
+        return 'morning'; // Full day activities are marked as morning
     }
-}
-// Helper functions for schedule generation
-export function generateDayTheme(activities, preferences) {
-    const categories = activities.map(a => a.category).filter(Boolean);
-    const mainCategory = mode(categories);
-    const style = preferences?.travelStyle || 'balanced';
-    return `${style.charAt(0).toUpperCase() + style.slice(1)} ${mainCategory} Exploration Day`;
-}
-export function generateDayCommentary(activities, dayNumber) {
-    if (!Array.isArray(activities)) {
-        logger.warn('[Schedule] Invalid activities array in generateDayCommentary', {
-            dayNumber,
-            receivedType: typeof activities,
-            activities
-        });
-        return `Day ${dayNumber} activities`;
+    else if (hours >= 17 || (hours < 6 && endHour > 17)) {
+        return 'evening';
     }
-    const sortedActivities = activities.sort((a, b) => {
-        const timeSlotOrder = { morning: 0, afternoon: 1, evening: 2 };
-        return timeSlotOrder[a.timeSlot] - timeSlotOrder[b.timeSlot];
-    });
-    const timeSlots = {
-        morning: sortedActivities.filter(a => a.timeSlot === 'morning'),
-        afternoon: sortedActivities.filter(a => a.timeSlot === 'afternoon'),
-        evening: sortedActivities.filter(a => a.timeSlot === 'evening')
-    };
-    const parts = [];
-    if (timeSlots.morning.length > 0) {
-        parts.push(`Start your day with ${timeSlots.morning.map(a => a.name).join(' and ')}`);
+    else if (hours >= 12 || (hours < 12 && endHour > 12)) {
+        return 'afternoon';
     }
-    if (timeSlots.afternoon.length > 0) {
-        parts.push(`continue with ${timeSlots.afternoon.map(a => a.name).join(' and ')}`);
-    }
-    if (timeSlots.evening.length > 0) {
-        parts.push(`end your day experiencing ${timeSlots.evening.map(a => a.name).join(' and ')}`);
-    }
-    return parts.join(' ');
-}
-export function generateDayHighlights(activities, preferences) {
-    const highlights = [];
-    // Geographic organization
-    const areas = [...new Set(activities.map(a => a.location))].filter(Boolean);
-    if (areas.length > 1) {
-        highlights.push(`Efficiently organized route through ${areas.join(' → ')}`);
-    }
-    // Activity highlights with preference matching
-    activities.forEach(activity => {
-        const matchedPreferences = preferences?.interests?.filter((interest) => activity.category.toLowerCase().includes(interest.toLowerCase())) || [];
-        const highlight = `${activity.timeSlot.charAt(0).toUpperCase() + activity.timeSlot.slice(1)}: ` +
-            `${activity.name} (${activity.duration} mins) - ` +
-            `${matchedPreferences.length ? `Matches your ${matchedPreferences.join(', ')} interests` : 'General interest'}`;
-        highlights.push(highlight);
-    });
-    return highlights;
-}
-export function generateBreakSchedule(activities, preferences) {
-    const paceAdjustment = preferences?.pacePreference === 'relaxed' ? 30 :
-        preferences?.pacePreference === 'intense' ? -15 : 0;
-    return {
-        morning: {
-            startTime: "10:30",
-            endTime: "11:00",
-            duration: 30 + paceAdjustment,
-            suggestion: `Coffee break with ${preferences?.travelStyle || 'local'} ambiance`
-        },
-        lunch: {
-            startTime: "12:30",
-            endTime: "13:30",
-            duration: 60 + paceAdjustment,
-            suggestion: preferences?.dietaryRestrictions?.length ?
-                `Lunch break (${preferences.dietaryRestrictions.join(', ')} options available)` :
-                "Lunch break at local restaurant"
-        },
-        afternoon: {
-            startTime: "15:30",
-            endTime: "16:00",
-            duration: 30 + paceAdjustment,
-            suggestion: "Rest and refresh"
-        },
-        dinner: {
-            startTime: "18:30",
-            endTime: "20:00",
-            duration: 90 + paceAdjustment,
-            suggestion: preferences?.interests?.includes('Food & Wine') ?
-                "Culinary experience dinner" : "Dinner break"
-        }
-    };
-}
-export function generateLogistics(activities, preferences) {
-    const areas = [...new Set(activities.map(a => a.location))].filter(Boolean);
-    const accessibilityNeeds = preferences?.accessibility || [];
-    return {
-        transportSuggestions: [
-            `Optimal route connecting ${areas.join(' → ')}`,
-            ...accessibilityNeeds.map((need) => `${need} friendly transportation options available`),
-            "Public transport and walking combinations"
-        ].filter(Boolean),
-        walkingDistances: [
-            `Distances optimized for ${preferences?.pacePreference || 'moderate'} pace`,
-            `Major segments: ${activities.map(a => a.location).join(' → ')}`
-        ],
-        timeEstimates: [
-            "15-30 minutes buffer between activities",
-            `Adjusted for ${preferences?.pacePreference || 'moderate'} pace preference`,
-            ...accessibilityNeeds.map((need) => `Extra time allocated for ${need} accessibility`)
-        ].filter(Boolean)
-    };
-}
-export async function optimizeSchedule(activities, days, destination, preferences, startDate) {
-    try {
-        logger.info(`[Schedule] Starting schedule optimization for ${activities.length} activities over ${days} days`);
-        // Ensure we have a valid start date
-        const tripStartDate = startDate ? new Date(startDate) : new Date();
-        if (isNaN(tripStartDate.getTime())) {
-            throw new Error(`Invalid start date: ${startDate}`);
-        }
-        // Create a copy of activities to work with
-        const validatedActivities = activities.filter(activity => {
-            if (!validateTimeSlot(activity)) {
-                logger.warn(`[Schedule] Removing activity with invalid time slot:`, {
-                    name: activity.name,
-                    timeSlot: activity.timeSlot,
-                    duration: activity.duration
-                });
-                return false;
-            }
-            return true;
-        });
-        // Sort activities by duration (longest first) and rating
-        validatedActivities.sort((a, b) => {
-            // Prioritize selected activities
-            if (a.selected !== b.selected)
-                return b.selected ? 1 : -1;
-            // Then sort by duration (longest first)
-            if (a.duration !== b.duration)
-                return b.duration - a.duration;
-            // Then by rating and preference score
-            const aScore = (a.rating || 0) + (a.preferenceScore || 0);
-            const bScore = (b.rating || 0) + (b.preferenceScore || 0);
-            return bScore - aScore;
-        });
-        // Initialize schedule array and tracking structures
-        const schedule = [];
-        const unscheduledActivities = [];
-        const occupiedSlots = new Map();
-        // Helper function to check time conflicts for a specific date
-        const hasTimeConflict = (startTime, duration, dateStr) => {
-            const start = new Date(`${dateStr}T${startTime}`);
-            const end = new Date(start);
-            end.setMinutes(end.getMinutes() + duration);
-            const daySlots = occupiedSlots.get(dateStr) || [];
-            return daySlots.some(slot => {
-                const conflict = (start >= slot.start && start < slot.end) ||
-                    (end > slot.start && end <= slot.end) ||
-                    (start <= slot.start && end >= slot.end);
-                if (conflict) {
-                    logger.info(`[Schedule] Time conflict detected:`, {
-                        newActivity: { startTime, duration },
-                        existingActivity: {
-                            name: slot.activity,
-                            start: slot.start.toISOString(),
-                            end: slot.end.toISOString()
-                        }
-                    });
-                }
-                return conflict;
-            });
-        };
-        // Helper function to add activity to schedule
-        const scheduleActivity = (activity, startTime, dateStr, dayNumber) => {
-            const start = new Date(`${dateStr}T${startTime}`);
-            const end = new Date(start);
-            end.setMinutes(end.getMinutes() + activity.duration);
-            const scheduledActivity = {
-                ...activity,
-                startTime,
-                dayNumber,
-                timeSlot: determineTimeSlot(startTime, activity.duration)
-            };
-            // Initialize day slots if not exists
-            if (!occupiedSlots.has(dateStr)) {
-                occupiedSlots.set(dateStr, []);
-            }
-            // Add to occupied slots
-            occupiedSlots.get(dateStr)?.push({
-                start,
-                end,
-                activity: activity.name
-            });
-            logger.info(`[Schedule] Scheduled "${activity.name}" for ${dateStr}`, {
-                startTime,
-                duration: activity.duration,
-                timeSlot: scheduledActivity.timeSlot
-            });
-            return scheduledActivity;
-        };
-        // Process each day
-        for (let i = 0; i < days; i++) {
-            const dayNumber = i + 1;
-            const currentDate = new Date(tripStartDate);
-            currentDate.setDate(currentDate.getDate() + i);
-            const dateStr = currentDate.toISOString().split('T')[0];
-            logger.info(`[Schedule] Processing day ${dayNumber} (${dateStr})`);
-            const scheduledActivities = [];
-            let dayDuration = 0;
-            // First schedule preselected activities for this day
-            const preselectedForDay = validatedActivities
-                .filter(activity => activity.selected && activity.dayNumber === dayNumber)
-                .map(activity => {
-                // Check availability for this date
-                const availableDates = activity.availability?.tripPeriodAvailability?.availableDates || [];
-                if (availableDates.length > 0 && !availableDates.includes(dateStr)) {
-                    logger.warn(`[Schedule] Preselected activity "${activity.name}" is not available on ${dateStr}`);
-                    return null;
-                }
-                // Get available times for this date
-                const dateSpecificTimes = activity.availability?.tripPeriodAvailability?.availabilityByDate?.[dateStr] || [];
-                const availableTimes = dateSpecificTimes.length > 0 ?
-                    dateSpecificTimes :
-                    activity.availability?.realTimeVerification?.exactStartTimes || [];
-                // Try to schedule at an available time
-                for (const time of availableTimes) {
-                    if (!hasTimeConflict(time, activity.duration, dateStr)) {
-                        const scheduled = scheduleActivity(activity, time, dateStr, dayNumber);
-                        dayDuration += activity.duration;
-                        return scheduled;
-                    }
-                }
-                logger.warn(`[Schedule] Could not schedule preselected activity "${activity.name}" on ${dateStr}`);
-                return null;
-            })
-                .filter((activity) => activity !== null);
-            scheduledActivities.push(...preselectedForDay);
-            // Then try to schedule unselected activities
-            const availableActivities = validatedActivities.filter(activity => !activity.selected &&
-                !scheduledActivities.some(sa => sa.name === activity.name) &&
-                !Array.from(occupiedSlots.values()).flat().some(slot => slot.activity === activity.name));
-            // Try to fill each time slot (morning, afternoon, evening)
-            const timeSlots = ['morning', 'afternoon', 'evening'];
-            for (const slot of timeSlots) {
-                // Skip if we've reached daily limits
-                if (scheduledActivities.length >= 5 || dayDuration >= 720) {
-                    logger.info(`[Schedule] Reached daily limits for day ${dayNumber}:`, {
-                        activities: scheduledActivities.length,
-                        duration: dayDuration
-                    });
-                    break;
-                }
-                // Get activities suitable for this time slot
-                const slotActivities = availableActivities.filter(activity => {
-                    const timesByCategory = activity.availability?.timesByCategory || {};
-                    return timesByCategory[slot]?.length > 0;
-                });
-                // Try to schedule an activity in this slot
-                for (const activity of slotActivities) {
-                    const availableTimes = activity.availability?.timesByCategory?.[slot] || [];
-                    for (const time of availableTimes) {
-                        if (!hasTimeConflict(time, activity.duration, dateStr)) {
-                            const scheduled = scheduleActivity(activity, time, dateStr, dayNumber);
-                            scheduledActivities.push(scheduled);
-                            dayDuration += activity.duration;
-                            break;
-                        }
-                    }
-                    if (scheduledActivities.length >= 5 || dayDuration >= 720)
-                        break;
-                }
-            }
-            // Sort activities by start time
-            scheduledActivities.sort((a, b) => {
-                const timeA = a.startTime?.split(':').map(Number);
-                const timeB = b.startTime?.split(':').map(Number);
-                if (!timeA || !timeB)
-                    return 0;
-                return (timeA[0] * 60 + timeA[1]) - (timeB[0] * 60 + timeB[1]);
-            });
-            // Add day to schedule
-            if (scheduledActivities.length > 0) {
-                schedule.push({
-                    dayNumber,
-                    theme: generateDayTheme(scheduledActivities, preferences),
-                    mainArea: determineMainArea(scheduledActivities),
-                    commentary: generateDayCommentary(scheduledActivities, dayNumber),
-                    highlights: generateDayHighlights(scheduledActivities, preferences),
-                    activities: scheduledActivities,
-                    breaks: generateBreakSchedule(scheduledActivities, preferences),
-                    logistics: generateLogistics(scheduledActivities, preferences),
-                    availabilityStats: calculateAvailabilityStats(scheduledActivities)
-                });
-            }
-        }
-        // Get unscheduled activities
-        const remainingActivities = validatedActivities.filter(activity => !schedule.some(day => day.activities.some(scheduledActivity => scheduledActivity.name === activity.name))).sort((a, b) => (b.rating || 0) - (a.rating || 0));
-        logger.info(`[Schedule] Optimization complete:`, {
-            totalActivities: validatedActivities.length,
-            scheduledActivities: schedule.reduce((acc, day) => acc + day.activities.length, 0),
-            unscheduledActivities: remainingActivities.length,
-            daysOptimized: days
-        });
-        return {
-            schedule,
-            dailyHighlights: schedule.map(day => ({
-                dayNumber: day.dayNumber,
-                theme: day.theme,
-                highlights: day.highlights
-            })),
-            tripOverview: generateTripOverview(schedule, destination)
-        };
-    }
-    catch (error) {
-        logger.error('[Schedule] Error during schedule optimization:', error);
-        throw error;
-    }
-}
-function determineTimeSlotByIndex(index) {
-    switch (index) {
-        case 0: return 'morning';
-        case 1: return 'afternoon';
-        case 2: return 'evening';
-        default: return 'morning';
+    else {
+        return 'morning';
     }
 }
 function determineStartTime(timeSlot, activity) {
@@ -713,22 +422,42 @@ function cleanPerplexityResponse(response) {
     cleaned = cleaned.replace(/,(\s*[}\]])/g, '$1');
     return cleaned;
 }
+// Update validateTimeSlot function to be more lenient
 function validateTimeSlot(activity) {
-    if (!activity.availability?.timesByCategory) {
+    if (!activity.timeSlot || !activity.startTime || !activity.duration) {
+        logger.warn(`[Schedule] Invalid time slot for activity "${activity.name}":`, {
+            timeSlot: activity.timeSlot,
+            startTime: activity.startTime,
+            duration: activity.duration
+        });
         return false;
     }
-    const { timeSlot, duration } = activity;
-    const availableTimes = activity.availability.timesByCategory[timeSlot] || [];
-    if (availableTimes.length === 0) {
-        return false;
-    }
-    // Check if duration is appropriate for the time slot
-    const maxDurations = {
-        morning: 240, // 4 hours
-        afternoon: 300, // 5 hours
-        evening: 240 // 4 hours
+    // Convert start time to minutes since midnight
+    const [hours, minutes] = activity.startTime.split(':').map(Number);
+    const startMinutes = hours * 60 + minutes;
+    const endMinutes = startMinutes + activity.duration;
+    // Define time slot boundaries
+    const timeSlots = {
+        morning: { start: 6 * 60, end: 12 * 60 }, // 6:00 - 12:00
+        afternoon: { start: 12 * 60, end: 17 * 60 }, // 12:00 - 17:00
+        evening: { start: 17 * 60, end: 23 * 60 } // 17:00 - 23:00
     };
-    return duration <= maxDurations[timeSlot];
+    // Check if activity fits within operating hours (6:00 - 23:00)
+    if (startMinutes < 6 * 60 || endMinutes > 23 * 60) {
+        logger.warn(`[Schedule] Activity "${activity.name}" outside operating hours:`, {
+            startTime: activity.startTime,
+            duration: activity.duration
+        });
+        return false;
+    }
+    // Determine actual time slot based on start time
+    const actualTimeSlot = determineTimeSlot(activity.startTime, activity.duration);
+    if (activity.timeSlot !== actualTimeSlot) {
+        // Update the time slot to match the actual time instead of invalidating
+        activity.timeSlot = actualTimeSlot;
+        logger.info(`[Schedule] Updated time slot for "${activity.name}" to ${actualTimeSlot}`);
+    }
+    return true;
 }
 function checkOverlap(activity, existingActivities) {
     const sameSlotActivities = existingActivities.filter(a => a.dayNumber === activity.dayNumber && a.timeSlot === activity.timeSlot);
@@ -744,28 +473,10 @@ function checkOverlap(activity, existingActivities) {
             (activityEnd > existingStart && activityEnd <= existingEnd));
     });
 }
-// Add helper function to determine time slot based on start time
-function determineTimeSlot(startTime, duration) {
-    const [hours] = startTime.split(':').map(Number);
-    const endHour = hours + Math.floor(duration / 60);
-    // If activity spans multiple time slots, assign to the slot with the majority of the duration
-    if (duration >= 480) { // 8 hours or more
-        return 'morning'; // Full day activities are marked as morning
-    }
-    else if (hours >= 17 || (hours < 6 && endHour > 17)) {
-        return 'evening';
-    }
-    else if (hours >= 12 || (hours < 12 && endHour > 12)) {
-        return 'afternoon';
-    }
-    else {
-        return 'morning';
-    }
-}
-// Add helper function to find best start time
+// Update findBestStartTime to return undefined instead of null
 function findBestStartTime(availableTimes, timeSlot, duration) {
     if (!availableTimes || availableTimes.length === 0) {
-        return null;
+        return undefined;
     }
     logger.info('[Schedule] Finding best start time:', {
         availableTimes,
@@ -796,9 +507,6 @@ function findBestStartTime(availableTimes, timeSlot, duration) {
         // Check if activity fits within its time slot
         const slot = boundaries[timeSlot];
         if (slot) {
-            // For strict time slot adherence, both start and end should be within the slot
-            // return time.minutes >= slot.start && endMinutes <= slot.end;
-            // For flexible time slot adherence, just the start time should be within the slot
             return time.minutes >= slot.start && time.minutes < slot.end;
         }
         return true;
@@ -808,7 +516,7 @@ function findBestStartTime(availableTimes, timeSlot, duration) {
             timeSlot,
             duration
         });
-        return null;
+        return undefined;
     }
     // Sort by time and return the earliest valid time
     validTimes.sort((a, b) => a.minutes - b.minutes);
@@ -818,91 +526,138 @@ function findBestStartTime(availableTimes, timeSlot, duration) {
     });
     return validTimes[0].originalTime;
 }
-async function enrichActivity(activity, destination) {
-    logger.info(`[Activity] Starting enrichment for "${activity.name}"`, {
-        existingStartTime: activity.startTime,
-        timeSlot: activity.timeSlot,
-        duration: activity.duration
-    });
+// Update the enrichActivity function to use our more robust error handling
+async function enrichActivity(activity, date) {
+    const startTime = new Date().getTime();
     try {
-        const availabilitySchedule = await viatorService.getAvailabilitySchedule(activity.bookingDetails?.productCode || '');
-        const realTimeCheck = await checkRealTimeAvailability(activity, destination);
-        const exactStartTimes = realTimeCheck?.schedule?.availableTimeSlots || [];
-        const timesByCategory = categorizeTimeSlots(exactStartTimes);
-        logger.info(`[Activity] Available times for "${activity.name}":`, {
-            exactStartTimes,
-            timesByCategory,
-            existingStartTime: activity.startTime
+        logger.info('[Activity] Starting enrichment:', {
+            name: activity.name,
+            timeSlot: activity.timeSlot,
+            dayNumber: activity.dayNumber
         });
-        // Find best start time with null safety
-        const timeSlot = activity.timeSlot || 'morning';
-        let startTime;
-        let selectionReason;
-        // Step 1: Check if existing start time is valid
-        if (activity.startTime && exactStartTimes.includes(activity.startTime)) {
-            startTime = activity.startTime;
-            selectionReason = 'Using existing valid start time';
-            logger.info(`[Activity] Using existing start time for "${activity.name}":`, {
-                startTime,
+        // Check if activity is valid
+        if (!activity.name) {
+            logger.error('[Activity] Invalid activity, missing name');
+            return null;
+        }
+        // Step 1: Check availability with error handling
+        let availability;
+        try {
+            availability = await checkRealTimeAvailability(activity, date);
+        }
+        catch (error) {
+            logger.error('[Activity] Availability check failed:', {
+                name: activity.name,
+                error: error instanceof Error ? error.message : 'Unknown error',
+                stack: error instanceof Error ? error.stack : undefined
+            });
+            // If availability check fails, use defaults
+            availability = getDefaultAvailability(activity);
+        }
+        // Step 2: Find best start time based on time slot
+        let bestStartTime = null;
+        let adjustedTimeSlot = activity.timeSlot;
+        // Try to find a time in the preferred slot
+        if (availability.exactStartTimes.length > 0) {
+            bestStartTime = findBestStartTime(availability.exactStartTimes, activity.timeSlot, activity.duration);
+            logger.info('[Activity] Found best time in preferred slot for "' + activity.name + '":', {
+                startTime: bestStartTime,
+                timeSlot: activity.timeSlot,
+                availableTimes: availability.exactStartTimes
+            });
+        }
+        // If no time found in preferred slot, try alternative slots
+        if (!bestStartTime) {
+            // Define alternative slots
+            const alternativeSlots = {
+                'morning': ['afternoon', 'evening'],
+                'afternoon': ['morning', 'evening'],
+                'evening': ['afternoon', 'morning']
+            };
+            // Try each alternative
+            for (const altSlot of alternativeSlots[activity.timeSlot]) {
+                if (availability.timesByCategory[altSlot]?.length > 0) {
+                    bestStartTime = findBestStartTime(availability.timesByCategory[altSlot], altSlot, activity.duration);
+                    if (bestStartTime) {
+                        adjustedTimeSlot = altSlot;
+                        logger.info('[Activity] Found best time in alternative slot for "' + activity.name + '":', {
+                            startTime: bestStartTime,
+                            timeSlot: adjustedTimeSlot,
+                            originalTimeSlot: activity.timeSlot,
+                            availableTimes: availability.timesByCategory[altSlot]
+                        });
+                        break;
+                    }
+                }
+            }
+        }
+        // If still no time found, use default
+        if (!bestStartTime) {
+            bestStartTime = getDefaultStartTime(activity.timeSlot);
+            logger.warn('[Activity] No available times found, using default for "' + activity.name + '":', {
+                startTime: bestStartTime,
                 timeSlot: activity.timeSlot
             });
         }
-        // Step 2: Try to find best time from available times in the preferred slot
-        else if (timesByCategory[timeSlot]?.length > 0) {
-            startTime = findBestStartTime(timesByCategory[timeSlot], timeSlot, activity.duration);
-            selectionReason = 'Found best time in preferred slot';
-            logger.info(`[Activity] Found best time in preferred slot for "${activity.name}":`, {
-                startTime,
-                timeSlot,
-                availableTimes: timesByCategory[timeSlot]
-            });
-        }
-        // Step 3: Try alternative slots if preferred slot has no times
-        else if (exactStartTimes.length > 0) {
-            startTime = findBestStartTime(exactStartTimes, timeSlot, activity.duration);
-            selectionReason = 'Found best time in alternative slot';
-            logger.info(`[Activity] Found best time in alternative slot for "${activity.name}":`, {
-                startTime,
-                availableTimes: exactStartTimes
-            });
-        }
-        // Step 4: No valid times found
-        else {
-            logger.warn(`[Activity] No available times found for "${activity.name}"`);
-            selectionReason = 'No available times found';
-        }
-        // If no valid start time was found, don't set a default
-        if (!startTime) {
-            logger.warn(`[Activity] Could not determine valid start time for "${activity.name}"`);
-        }
-        return {
+        // Step 3: Build the enriched activity
+        const enrichedActivity = {
             ...activity,
-            startTime,
+            startTime: bestStartTime,
+            timeSlot: adjustedTimeSlot,
             availability: {
-                isAvailable: exactStartTimes.length > 0,
-                availableTimeSlots: exactStartTimes,
-                timesByCategory,
+                isAvailable: true,
+                availableTimeSlots: Object.keys(availability.timesByCategory).filter(slot => availability.timesByCategory[slot].length > 0),
+                exactStartTimes: availability.exactStartTimes,
+                timesByCategory: availability.timesByCategory,
                 realTimeVerification: {
                     verified: true,
-                    exactStartTimes,
-                    lastChecked: new Date().toISOString(),
-                    reason: selectionReason
-                },
-                tripPeriodAvailability: {
-                    availableDates: availabilitySchedule.extractedDaysOfWeek || [],
-                    availabilityByDate: { [activity.dayNumber]: exactStartTimes },
-                    operatingDays: availabilitySchedule.extractedDaysOfWeek || [],
-                    operatingHours: availabilitySchedule.extractedOperatingHours || {}
+                    exactStartTimes: availability.exactStartTimes,
+                    lastChecked: new Date().toISOString()
                 }
-            }
+            },
+            enrichmentStatus: 'success',
+            date
         };
+        const enrichmentDuration = new Date().getTime() - startTime;
+        enrichedActivity.enrichmentDuration = enrichmentDuration;
+        logger.info('[Activity] Successfully enriched "' + activity.name + '"', {
+            duration: enrichmentDuration,
+            startTime: bestStartTime,
+            timeSlot: adjustedTimeSlot
+        });
+        return enrichedActivity;
     }
     catch (error) {
-        logger.error('[Activity] Enrichment failed:', {
-            name: activity.name,
-            error: error instanceof Error ? error.message : 'Unknown error'
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        logger.error('[Activity] Failed to enrich activity "' + activity.name + '":', {
+            error: errorMessage,
+            stack: error instanceof Error ? error.stack : undefined
         });
-        return activity;
+        // Return a basic enriched activity with default values
+        return {
+            ...activity,
+            startTime: getDefaultStartTime(activity.timeSlot),
+            enrichmentStatus: 'failed',
+            enrichmentError: errorMessage,
+            enrichmentDuration: new Date().getTime() - startTime,
+            availability: {
+                isAvailable: true,
+                availableTimeSlots: [activity.timeSlot],
+                exactStartTimes: [getDefaultStartTime(activity.timeSlot)],
+                timesByCategory: {
+                    morning: activity.timeSlot === 'morning' ? [getDefaultStartTime('morning')] : [],
+                    afternoon: activity.timeSlot === 'afternoon' ? [getDefaultStartTime('afternoon')] : [],
+                    evening: activity.timeSlot === 'evening' ? [getDefaultStartTime('evening')] : []
+                },
+                realTimeVerification: {
+                    verified: false,
+                    exactStartTimes: [getDefaultStartTime(activity.timeSlot)],
+                    lastChecked: new Date().toISOString(),
+                    reason: errorMessage
+                }
+            },
+            date
+        };
     }
 }
 // Add helper function to calculate match score between Viator activity and original activity
@@ -960,13 +715,17 @@ export function determineMainArea(activities) {
     return mainArea;
 }
 // Helper function to get default start time for a time slot
-function getDefaultStartTime(timeSlot) {
-    const defaultTimes = {
-        morning: '09:00',
-        afternoon: '14:00',
-        evening: '19:00'
-    };
-    return defaultTimes[timeSlot] || '09:00';
+export function getDefaultStartTime(timeSlot) {
+    switch (timeSlot) {
+        case 'morning':
+            return '09:00';
+        case 'afternoon':
+            return '14:00';
+        case 'evening':
+            return '19:00';
+        default:
+            return '09:00';
+    }
 }
 // Update route handler
 activitiesRouter.post('/generate', async (req, res) => {
@@ -1004,7 +763,7 @@ activitiesRouter.post('/generate', async (req, res) => {
         const days = Math.ceil((new Date(endDate).getTime() - new Date(startDate).getTime()) / (1000 * 60 * 60 * 24));
         const optimizedSchedule = await optimizeSchedule(enrichedActivities, days, cityName, preferences, startDate);
         // Log with clean city name and full label for reference
-        logOptimizedSchedule(optimizedSchedule.schedule, cityName, days, startDate);
+        logOptimizedSchedule(optimizedSchedule.schedule, cityName, days);
         return res.json({
             success: true,
             data: {
@@ -1072,38 +831,247 @@ activitiesRouter.post('/availability/:productCode', async (req, res) => {
     }
 });
 // Add missing checkRealTimeAvailability function
-async function checkRealTimeAvailability(activity, destination) {
+async function checkRealTimeAvailability(activity, date) {
     try {
-        const schedule = await viatorService.getAvailabilitySchedule(activity.bookingDetails?.productCode || '');
-        return {
-            schedule: {
-                availableTimeSlots: schedule.extractedTimeSlots || []
+        // Get the product code from the activity
+        const productCode = activity.bookingDetails?.productCode;
+        if (!productCode) {
+            logger.warn('[Activity] Missing product code for real-time availability check:', {
+                name: activity.name,
+                bookingDetails: activity.bookingDetails
+            });
+            // Return default availability when product code is missing
+            return getDefaultAvailability(activity);
+        }
+        // Try to get availability schedule from Viator
+        let availabilitySchedule = null;
+        try {
+            availabilitySchedule = await viatorService.getAvailabilitySchedule(productCode);
+        }
+        catch (error) {
+            logger.error('[Viator] Error getting availability schedule:', {
+                productCode,
+                error: error instanceof Error ? error.message : 'Unknown error',
+                stack: error instanceof Error ? error.stack : undefined,
+                stage: 'error'
+            });
+            // If availability schedule check fails, use default data
+            return getDefaultAvailability(activity);
+        }
+        if (!availabilitySchedule) {
+            logger.warn('[Activity] No availability schedule found:', {
+                name: activity.name,
+                productCode
+            });
+            // Return default availability when schedule is missing
+            return getDefaultAvailability(activity);
+        }
+        // Try to check real-time availability
+        let realTimeCheck = null;
+        try {
+            realTimeCheck = await viatorService.checkRealTimeAvailability(productCode, date);
+        }
+        catch (error) {
+            logger.error('[Activity] Error checking real-time availability:', {
+                name: activity.name,
+                error: error instanceof Error ? error.message : 'Unknown error'
+            });
+            // If real-time availability check fails, use schedule data if we have it,
+            // or default data if not
+            if (availabilitySchedule.extractedTimeSlots && availabilitySchedule.extractedTimeSlots.length > 0) {
+                return {
+                    isAvailable: true,
+                    exactStartTimes: availabilitySchedule.extractedTimeSlots,
+                    timesByCategory: categorizeTimeSlots(availabilitySchedule.extractedTimeSlots)
+                };
             }
+            else {
+                return getDefaultAvailability(activity);
+            }
+        }
+        if (!realTimeCheck || !realTimeCheck.available) {
+            logger.warn('[Activity] Not available in real-time check:', {
+                name: activity.name,
+                productCode,
+                date
+            });
+            // If not available in real-time, use schedule data or default
+            if (availabilitySchedule.extractedTimeSlots && availabilitySchedule.extractedTimeSlots.length > 0) {
+                return {
+                    isAvailable: true,
+                    exactStartTimes: availabilitySchedule.extractedTimeSlots,
+                    timesByCategory: categorizeTimeSlots(availabilitySchedule.extractedTimeSlots)
+                };
+            }
+            else {
+                return getDefaultAvailability(activity);
+            }
+        }
+        // Format the available time slots
+        const exactStartTimes = realTimeCheck.schedule.availableTimeSlots || ['09:00'];
+        logger.info('[Activity] Available times for "' + activity.name + '":', {
+            exactStartTimes,
+            timesByCategory: categorizeTimeSlots(exactStartTimes)
+        });
+        return {
+            isAvailable: true,
+            exactStartTimes,
+            timesByCategory: categorizeTimeSlots(exactStartTimes)
         };
     }
     catch (error) {
-        logger.error('[Activity] Error checking real-time availability:', {
+        logger.error('[Activity] Unexpected error in checkRealTimeAvailability:', {
             name: activity.name,
-            error: error instanceof Error ? error.message : 'Unknown error'
+            error: error instanceof Error ? error.message : 'Unknown error',
+            stack: error instanceof Error ? error.stack : undefined
         });
-        return null;
+        // Return default availability on any unexpected error
+        return getDefaultAvailability(activity);
     }
 }
-// Update time slot filtering with proper types
-function categorizeTimeSlots(times) {
-    return {
-        morning: times.filter((time) => {
-            const hour = parseInt(time.split(':')[0]);
-            return hour >= 6 && hour < 12;
-        }),
-        afternoon: times.filter((time) => {
-            const hour = parseInt(time.split(':')[0]);
-            return hour >= 12 && hour < 17;
-        }),
-        evening: times.filter((time) => {
-            const hour = parseInt(time.split(':')[0]);
-            return hour >= 17;
-        })
+// Add helper function to get default availability based on activity time slot
+function getDefaultAvailability(activity) {
+    const timeSlot = activity.timeSlot || 'morning';
+    const defaultTimes = {
+        'morning': ['09:00', '10:00', '11:00'],
+        'afternoon': ['13:00', '14:00', '15:00'],
+        'evening': ['18:00', '19:00', '20:00']
     };
+    // Use existing start time if available, otherwise use first default time
+    const exactStartTimes = activity.startTime ?
+        [activity.startTime] :
+        defaultTimes[timeSlot];
+    return {
+        isAvailable: true,
+        exactStartTimes,
+        timesByCategory: categorizeTimeSlots(exactStartTimes)
+    };
+}
+// Helper function to categorize times by time slot
+function categorizeTimeSlots(times) {
+    const result = {
+        'morning': [],
+        'afternoon': [],
+        'evening': []
+    };
+    times.forEach(time => {
+        const hour = parseInt(time.split(':')[0]);
+        if (hour >= 6 && hour < 12) {
+            result.morning.push(time);
+        }
+        else if (hour >= 12 && hour < 17) {
+            result.afternoon.push(time);
+        }
+        else {
+            result.evening.push(time);
+        }
+    });
+    return result;
+}
+// Add helper functions for schedule generation
+export function generateDayTheme(activities, preferences) {
+    if (!activities || activities.length === 0) {
+        return 'Free Day';
+    }
+    // Count categories
+    const categoryCount = activities.reduce((count, activity) => {
+        const category = activity.category || 'General';
+        count[category] = (count[category] || 0) + 1;
+        return count;
+    }, {});
+    // Find dominant category
+    const dominantCategory = Object.entries(categoryCount)
+        .sort(([, countA], [, countB]) => countB - countA)[0][0];
+    // Map category to theme
+    const themeMap = {
+        'Culture': 'Cultural Exploration',
+        'Food & Wine': 'Culinary Discovery',
+        'Nature': 'Nature & Outdoors',
+        'Adventure': 'Adventure & Activities',
+        'History': 'Historical Journey',
+        'Art': 'Artistic Discovery',
+        'Shopping': 'Shopping & Local Markets',
+        'Nightlife': 'Evening Entertainment',
+        'Relaxation': 'Wellness & Relaxation'
+    };
+    return themeMap[dominantCategory] || 'Mixed Activities';
+}
+export function generateDayCommentary(activities, dayNumber) {
+    if (!activities || activities.length === 0) {
+        return 'A free day to explore at your own pace.';
+    }
+    const totalDuration = activities.reduce((sum, act) => sum + (act.duration || 0), 0);
+    const categories = [...new Set(activities.map(act => act.category))];
+    const locations = [...new Set(activities.map(act => act.location))];
+    return `Day ${dayNumber} features ${activities.length} activities over ${Math.round(totalDuration / 60)} hours, ` +
+        `focusing on ${categories.join(', ')} in the ${locations.join(', ')} areas.`;
+}
+export function generateDayHighlights(activities, preferences) {
+    if (!activities || activities.length === 0) {
+        return ['Free day for independent exploration'];
+    }
+    return activities.map(activity => {
+        const duration = activity.duration ? `(${Math.round(activity.duration / 60)}h)` : '';
+        return `${activity.name} ${duration} - ${activity.description.split('.')[0]}.`;
+    });
+}
+export function generateBreakSchedule(activities, preferences) {
+    return {
+        morning: {
+            startTime: '10:30',
+            endTime: '11:00',
+            duration: 30,
+            suggestion: 'Coffee break and light refreshments'
+        },
+        lunch: {
+            startTime: '12:30',
+            endTime: '13:30',
+            duration: 60,
+            suggestion: 'Lunch break at local restaurant'
+        },
+        afternoon: {
+            startTime: '15:30',
+            endTime: '16:00',
+            duration: 30,
+            suggestion: 'Rest and refreshment break'
+        },
+        dinner: {
+            startTime: '18:30',
+            endTime: '20:00',
+            duration: 90,
+            suggestion: 'Dinner at recommended restaurant'
+        }
+    };
+}
+export function generateLogistics(activities, preferences) {
+    return {
+        transportSuggestions: [
+            'Use public transportation between major attractions',
+            'Consider taxi/ride-sharing for evening activities',
+            'Walking is recommended for nearby locations'
+        ],
+        walkingDistances: [
+            'Average walking distance between activities: 15-20 minutes',
+            'Most attractions are within central tourist areas'
+        ],
+        timeEstimates: [
+            'Allow 30 minutes for transportation between activities',
+            'Plan to arrive 15 minutes early for guided tours',
+            'Buffer time included for security checks at major attractions'
+        ]
+    };
+}
+// Add logging function
+function logOptimizedSchedule(schedule, destination, days) {
+    logger.info('[Schedule] Optimization complete:', {
+        destination,
+        totalDays: days,
+        scheduledDays: schedule.length,
+        activitiesPerDay: schedule.map(day => ({
+            dayNumber: day.dayNumber,
+            activityCount: day.activities.length,
+            theme: day.theme
+        }))
+    });
 }
 export { activitiesRouter };

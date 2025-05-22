@@ -71,6 +71,106 @@ app.get('/health', (_req: Request, res: Response) => {
   }
 });
 
+// Public endpoint for airport city names
+app.get('/api/public/airport-city-names', (req: Request, res: Response) => {
+  try {
+    const { codes } = req.query;
+    
+    if (!codes || typeof codes !== 'string') {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing or invalid airport codes parameter'
+      });
+    }
+    
+    const airportCodes = codes.split(',');
+    console.log('Fetching city names for airport codes:', { count: airportCodes.length });
+    
+    // Common airport code to city name mapping
+    const airportCityMapping: Record<string, string> = {
+      // North America
+      'JFK': 'New York',
+      'LGA': 'New York',
+      'EWR': 'Newark',
+      'LAX': 'Los Angeles',
+      'SFO': 'San Francisco',
+      'ORD': 'Chicago',
+      'ATL': 'Atlanta',
+      'DFW': 'Dallas',
+      'MIA': 'Miami',
+      'YYZ': 'Toronto',
+      'YUL': 'Montreal',
+      'MEX': 'Mexico City',
+      
+      // Europe
+      'LHR': 'London',
+      'LGW': 'London',
+      'CDG': 'Paris',
+      'ORY': 'Paris',
+      'AMS': 'Amsterdam',
+      'FRA': 'Frankfurt',
+      'MAD': 'Madrid',
+      'BCN': 'Barcelona',
+      'FCO': 'Rome',
+      'MUC': 'Munich',
+      'VIE': 'Vienna',
+      'ZRH': 'Zurich',
+      'BRU': 'Brussels',
+      'CPH': 'Copenhagen',
+      'ARN': 'Stockholm',
+      'OSL': 'Oslo',
+      
+      // Asia & Middle East
+      'HND': 'Tokyo',
+      'NRT': 'Tokyo',
+      'PEK': 'Beijing',
+      'PVG': 'Shanghai',
+      'HKG': 'Hong Kong',
+      'SIN': 'Singapore',
+      'BKK': 'Bangkok',
+      'KUL': 'Kuala Lumpur',
+      'DEL': 'Delhi',
+      'BOM': 'Mumbai',
+      'DXB': 'Dubai',
+      'DOH': 'Doha',
+      
+      // Australia & Oceania
+      'SYD': 'Sydney',
+      'MEL': 'Melbourne',
+      'BNE': 'Brisbane',
+      'AKL': 'Auckland',
+      
+      // Africa
+      'JNB': 'Johannesburg',
+      'CPT': 'Cape Town',
+      'CAI': 'Cairo'
+    };
+    
+    // Create mapping of requested airport codes to city names
+    const cityNames: Record<string, string> = {};
+    for (const code of airportCodes) {
+      const trimmedCode = code.trim().toUpperCase();
+      cityNames[trimmedCode] = airportCityMapping[trimmedCode] || trimmedCode;
+    }
+    
+    console.log('Successfully mapped airport codes to city names', {
+      requestedCount: airportCodes.length,
+      mappedCount: Object.keys(cityNames).length
+    });
+    
+    return res.json({
+      success: true,
+      data: cityNames
+    });
+  } catch (error) {
+    console.error('Error fetching airport city names:', error);
+    return res.status(500).json({
+      success: false,
+      error: 'Internal server error'
+    });
+  }
+});
+
 app.get('/api/public/locations', async (_req: Request, res: Response) => {
   try {
     res.json({
