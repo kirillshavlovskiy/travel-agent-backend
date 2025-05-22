@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { perplexityClient } from '../services/perplexity.js';
-import { ViatorService, ViatorAvailabilityResponse, ViatorAvailabilitySchedule } from '../services/viator';
+import { ViatorService } from '../services/viator';
 import { logger } from '../utils/logger.js';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -1258,6 +1258,59 @@ activitiesRouter.post('/availability/:productCode', async (req: Request<{product
     });
     return res.status(500).json({
       error: 'Failed to check availability',
+      details: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
+// Add enrich endpoint
+activitiesRouter.post('/enrich', async (req: Request, res: Response) => {
+  try {
+    const { activityId, referenceUrl, name } = req.body;
+
+    if (!referenceUrl) {
+      return res.status(400).json({
+        error: 'Reference URL is required for enrichment'
+      });
+    }
+
+    logger.info('[Activities] Enriching activity:', {
+      activityId,
+      referenceUrl,
+      name
+    });
+
+    // Create a minimal activity object with the necessary info
+    const activity: any = {
+      id: activityId,
+      name: name || 'Unknown Activity',
+      referenceUrl,
+      bookingDetails: {
+        referenceUrl
+      }
+    };
+
+    // Call the enrichActivityDetails method
+    const enrichedActivity = await viatorService.enrichActivityDetails(activity);
+
+    logger.info('[Activities] Activity enriched successfully:', {
+      name: enrichedActivity.name,
+      hasDetails: !!enrichedActivity.details,
+      hasReviews: !!enrichedActivity.reviews,
+      hasItinerary: !!enrichedActivity.itinerary,
+      enrichmentStatus: enrichedActivity.enrichmentStatus
+    });
+
+    // Return the enriched data
+    return res.json(enrichedActivity);
+  } catch (error) {
+    logger.error('[Activities] Error enriching activity:', {
+      error: error instanceof Error ? error.message : 'Unknown error',
+      stack: error instanceof Error ? error.stack : undefined
+    });
+
+    return res.status(500).json({
+      error: 'Failed to enrich activity',
       details: error instanceof Error ? error.message : 'Unknown error'
     });
   }

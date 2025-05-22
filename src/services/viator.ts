@@ -1563,13 +1563,22 @@ export class ViatorService {
       }
 
       const data = await response.json();
+      
+      logger.info('[Viator] Product details response:', {
+        productCode,
+        hasData: !!data,
+        hasItinerary: !!data?.itinerary,
+        hasReviews: !!data?.reviews,
+        hasBookingInfo: !!data?.bookingInfo
+      });
+      
       return data;
     } catch (error) {
       logger.error('[Viator API] Error getting product details:', {
         productCode,
         error: error instanceof Error ? error.message : 'Unknown error'
       });
-      return null;
+      throw error;
     }
   }
 
@@ -1971,299 +1980,356 @@ export class ViatorService {
     }
   }
 
-  async enrichActivityDetails(activity: Activity): Promise<Activity> {
+  async enrichActivityDetails(activity: Activity): Promise<any> {
     try {
       const startTime = Date.now();
+      const productCode = activity.bookingDetails?.productCode || 
+                         activity.referenceUrl?.match(/\-([a-zA-Z0-9]+)(?:\?|$)/)?.[1];
       
-      logger.info('[Viator] Starting activity enrichment', {
+      logger.info('[Viator] Starting comprehensive activity enrichment', {
         name: activity.name,
-        location: activity.location,
+        productCode,
+        referenceUrl: activity.referenceUrl,
         stage: 'start'
       });
 
-      // Extract destination from location
-      const cityName = activity.location.split(',')[0].trim();
-      
-      if (!cityName) {
-        logger.error('[Viator] No city name available for enrichment', {
+      if (!productCode) {
+        logger.error('[Viator] No product code available for enrichment', {
           activity: activity.name,
-          location: activity.location
+          referenceUrl: activity.referenceUrl
         });
         return {
           ...activity,
           enrichmentStatus: 'failed' as const,
-          enrichmentError: 'No city name available'
+          enrichmentError: 'No product code available'
         };
       }
 
-      // Get destination ID
-      let destinationId;
       try {
-        destinationId = await this.getDestinationId(cityName);
-        logger.info('[Viator] Found destination ID', {
-          cityName,
-          destinationId,
-          stage: 'destination_found'
-        });
-      } catch (error) {
-        logger.error('[Viator] Failed to get destination ID', {
-          cityName,
-          error: error instanceof Error ? error.message : 'Unknown error'
-        });
-        return {
-          ...activity,
-          enrichmentStatus: 'failed' as const,
-          enrichmentError: `Failed to get destination ID: ${error instanceof Error ? error.message : 'Unknown error'}`
-        };
-      }
-
-      // Search for the activity
-      let searchResults;
-      try {
-        const activityDate = activity.date || new Date().toISOString().split('T')[0];
-        const endDate = new Date(new Date(activityDate).getTime() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+        // Get detailed product information
+        const productDetails = await this.getProductDetails(productCode);
         
-        searchResults = await this.searchActivity(
-          activity.name,
-          destinationId,
-          activityDate,
-          endDate
-        );
-        
-        logger.info('[Viator] Search results received', {
-          activity: activity.name,
-          resultsCount: searchResults?.length || 0,
-          destinationId,
-          stage: 'search_complete'
-        });
-      } catch (error) {
-        logger.error('[Viator] Failed to search for activity', {
-          activity: activity.name,
-          destinationId,
-          error: error instanceof Error ? error.message : 'Unknown error'
-        });
-        return {
-          ...activity,
-          enrichmentStatus: 'failed' as const,
-          enrichmentError: `Search failed: ${error instanceof Error ? error.message : 'Unknown error'}`
-        };
-      }
-
-      if (!searchResults || searchResults.length === 0) {
-        logger.warn('[Viator] No matching activities found', {
-          activity: activity.name,
-          destinationId
-        });
-        return {
-          ...activity,
-          enrichmentStatus: 'failed' as const,
-          enrichmentError: 'No matching activities found'
-        };
-      }
-
-      // Find best unused match
-      let bestMatch = null;
-      let bestScore = 0;
-
-      for (const result of searchResults) {
-        // Skip if product code already used
-        if (this.usedProductCodes.has(result.productCode)) {
-          logger.debug('[Viator] Skipping used product code:', {
-            productCode: result.productCode,
-            usedFor: this.usedProductCodes.get(result.productCode)
+        if (!productDetails || productDetails.status !== 'ACTIVE') {
+          logger.warn('[Viator] Product not active or details unavailable', {
+            productCode,
+            status: productDetails?.status
           });
-          continue;
+          throw new Error('Product not active or details unavailable');
         }
 
-        const score = this.stringSimilarity(
-          activity.name.toLowerCase(),
-          result.title.toLowerCase()
-        );
-
-        if (score > bestScore) {
-          bestScore = score;
-          bestMatch = result;
-        }
-      }
-
-      if (!bestMatch) {
-        logger.warn('[Viator] No unused product codes available', {
-          activity: activity.name,
-          usedCodes: Array.from(this.usedProductCodes.entries())
+        // Get availability schedule for pricing and schedules
+        let availabilitySchedule;
+        try {
+          availabilitySchedule = await this.getAvailabilitySchedule(productCode);
+          logger.info('[Viator] Availability schedule retrieved', {
+            productCode,
+            hasSchedule: !!availabilitySchedule,
+            stage: 'availability_retrieved'
         });
-        return {
-          ...activity,
-          enrichmentStatus: 'failed' as const,
-          enrichmentError: 'No unused product codes available'
+      } catch (error) {
+          logger.warn('[Viator] Failed to get availability schedule', {
+            productCode,
+          error: error instanceof Error ? error.message : 'Unknown error'
+        });
+        }
+        
+        // Extract meeting point and location information
+        const logistics = productDetails.logistics || {};
+        const travelerPickup = logistics.travelerPickup || {};
+        const start = logistics.start?.[0] || {};
+        const end = logistics.end?.[0] || {};
+
+        const locationInfo = {
+          address: start.location?.address || '',
+          meetingPoints: [] as string[],
+          startingLocations: [] as string[]
         };
-      }
 
-      // Track the used product code
-      this.usedProductCodes.set(bestMatch.productCode, activity.name);
-      logger.info('[Viator] Reserved product code:', {
-        productCode: bestMatch.productCode,
-        activity: activity.name,
-        similarityScore: bestScore
-      });
+        // Add start location information
+        if (start.description) {
+          locationInfo.startingLocations.push(start.description);
+        }
 
-      // Get availability schedule
-      let availabilitySchedule;
-      try {
-        availabilitySchedule = await this.getAvailabilitySchedule(bestMatch.productCode);
-        logger.info('[Viator] Availability schedule retrieved', {
-          activity: activity.name,
-          productCode: bestMatch.productCode,
-          hasSchedule: !!availabilitySchedule,
-          timeSlots: availabilitySchedule?.extractedTimeSlots?.length || 0,
-          extractedTimeSlots: availabilitySchedule?.extractedTimeSlots,
-          stage: 'schedule_retrieved'
-        });
-      } catch (error) {
-        logger.warn('[Viator] Failed to get availability schedule', {
-          activity: activity.name,
-          productCode: bestMatch.productCode,
-          error: error instanceof Error ? error.message : 'Unknown error'
-        });
-      }
+        // Add end location information
+        if (end.description) {
+          locationInfo.startingLocations.push(`End point: ${end.description}`);
+        }
 
-      // Get product details
-      let productDetails;
-      try {
-        productDetails = await this.getProductDetails(bestMatch.productCode);
-        logger.info('[Viator] Product details retrieved', {
-          activity: activity.name,
-          productCode: bestMatch.productCode,
-          hasDetails: !!productDetails,
-          stage: 'details_retrieved'
-        });
-      } catch (error) {
-        logger.warn('[Viator] Failed to get product details', {
-          activity: activity.name,
-          productCode: bestMatch.productCode,
-          error: error instanceof Error ? error.message : 'Unknown error'
-        });
-      }
+        // Add pickup locations if available
+        if (travelerPickup.additionalInfo) {
+          locationInfo.meetingPoints.push(travelerPickup.additionalInfo);
+        }
 
-      // Construct enriched activity with schedule information
+        // Add specific meeting point from start location
+        if (start.location?.address) {
+          locationInfo.meetingPoints.push(start.location.address);
+          locationInfo.address = start.location.address;
+        }
+
+        // Extract itinerary information based on type
+        const itinerary = productDetails.itinerary;
+        let structuredItinerary: ItineraryType | undefined;
+
+        if (itinerary) {
+          switch (itinerary.itineraryType) {
+            case 'STANDARD':
+              structuredItinerary = {
+                itineraryType: 'STANDARD',
+                skipTheLine: itinerary.skipTheLine,
+                privateTour: itinerary.privateTour,
+                maxTravelersInSharedTour: itinerary.maxTravelersInSharedTour,
+                duration: {
+                  fixedDurationInMinutes: itinerary.duration?.fixedDurationInMinutes
+                },
+                itineraryItems: itinerary.itineraryItems || []
+              };
+              break;
+
+            case 'ACTIVITY':
+              structuredItinerary = {
+                itineraryType: 'ACTIVITY',
+                skipTheLine: itinerary.skipTheLine,
+                privateTour: itinerary.privateTour,
+                maxTravelersInSharedTour: itinerary.maxTravelersInSharedTour,
+                duration: {
+                  fixedDurationInMinutes: itinerary.duration?.fixedDurationInMinutes
+                },
+                pointsOfInterest: itinerary.pointsOfInterest || [],
+                activityInfo: itinerary.activityInfo,
+                foodMenus: itinerary.foodMenus
+              };
+              break;
+
+            case 'MULTI_DAY_TOUR':
+              structuredItinerary = {
+                itineraryType: 'MULTI_DAY_TOUR',
+                skipTheLine: itinerary.skipTheLine,
+                privateTour: itinerary.privateTour,
+                maxTravelersInSharedTour: itinerary.maxTravelersInSharedTour,
+                duration: {
+                  fixedDurationInMinutes: itinerary.duration?.fixedDurationInMinutes
+                },
+                days: itinerary.days || []
+              };
+              break;
+
+            case 'HOP_ON_HOP_OFF':
+              structuredItinerary = {
+                itineraryType: 'HOP_ON_HOP_OFF',
+                skipTheLine: itinerary.skipTheLine,
+                privateTour: itinerary.privateTour,
+                maxTravelersInSharedTour: itinerary.maxTravelersInSharedTour,
+                duration: itinerary.duration,
+                routes: itinerary.routes || []
+              };
+              break;
+
+            case 'UNSTRUCTURED':
+              structuredItinerary = {
+                itineraryType: 'UNSTRUCTURED',
+                skipTheLine: itinerary.skipTheLine,
+                privateTour: itinerary.privateTour,
+                maxTravelersInSharedTour: itinerary.maxTravelersInSharedTour,
+                unstructuredDescription: itinerary.unstructuredDescription
+              };
+              break;
+          }
+        }
+
+        // Extract detailed product information
+        const details: ViatorProductDetails = {
+          overview: productDetails.description?.trim() || '',
+          whatIncluded: {
+            included: (productDetails.inclusions || [])
+              .map((inc: ViatorInclusion) => inc.otherDescription?.trim())
+              .filter((desc: string | undefined) => desc && desc.length > 0),
+            excluded: (productDetails.exclusions || [])
+              .map((exc: ViatorExclusion) => exc.otherDescription?.trim())
+              .filter((desc: string | undefined) => desc && desc.length > 0)
+          },
+          meetingAndPickup: {
+            meetingPoint: {
+              name: start.location?.name?.trim() || '',
+              address: start.description?.trim() || locationInfo.meetingPoints[0]?.trim() || '',
+              googleMapsUrl: start.location?.googleMapsUrl,
+              coordinates: start.location?.coordinates
+            },
+            endPoint: end.description?.trim() || travelerPickup.additionalInfo?.trim() || 'Returns to departure point'
+          },
+          whatToExpect: (productDetails.itinerary?.itineraryItems || [])
+            .map((item: ViatorItineraryItem, index: number) => {
+              const location = item.pointOfInterestLocation?.location;
+              const isPassBy = item.passByWithoutStopping;
+              
+              const stopData: WhatToExpectStop = {
+                location: location?.name?.trim() || item.description?.split('.')[0]?.trim() || `Stop ${index + 1}`,
+                description: item.description?.trim() || '',
+                duration: item.duration?.fixedDurationInMinutes ? 
+                  `${item.duration.fixedDurationInMinutes} minutes` : 
+                  'Duration not specified',
+                admissionType: isPassBy ? 'Pass By' : (item.admissionIncluded || 'Admission Ticket Free'),
+                isPassBy,
+                coordinates: location?.coordinates ? {
+                  lat: location.coordinates.latitude,
+                  lng: location.coordinates.longitude
+                } : undefined,
+                attractionId: item.pointOfInterestLocation?.attractionId,
+                stopNumber: index + 1
+              };
+
+              return stopData;
+            })
+            .filter((stop: WhatToExpectStop) => stop.description || stop.coordinates || stop.location !== `Stop ${stop.stopNumber}`),
+          highlights: productDetails.highlights || [],
+          additionalInfo: {
+            confirmation: productDetails.bookingConfirmationSettings?.confirmationType?.trim() || '',
+            accessibility: (productDetails.additionalInfo || [])
+              .map((info: ViatorAdditionalInfo) => info.description?.trim())
+              .filter((desc: string | undefined) => desc && desc.length > 0),
+            restrictions: productDetails.restrictions || [],
+            maxTravelers: productDetails.bookingRequirements?.maxTravelersPerBooking || 0,
+            cancellationPolicy: {
+              description: productDetails.cancellationPolicy?.description?.trim() || '',
+              refundEligibility: productDetails.cancellationPolicy?.refundEligibility || []
+            }
+          }
+        };
+
+        // Map reviews to frontend format
+        const reviews = productDetails.reviews ? {
+          reviewCountTotals: {
+            averageRating: productDetails.reviews.combinedAverageRating || 0,
+            totalReviews: productDetails.reviews.totalReviews || 0,
+            stats: productDetails.reviews.reviewCountTotals?.map((count: { rating: number; count: number }) => ({
+              rating: count.rating,
+              count: count.count,
+              percentage: ((count.count / productDetails.reviews.totalReviews) * 100).toFixed(1)
+            })) || [],
+            sources: productDetails.reviews.sources?.map((source: { provider: string; totalCount: number }) => ({
+              provider: source.provider,
+              count: source.totalCount
+            })) || []
+          },
+          items: productDetails.reviews.featuredReviews?.map((review: { 
+            author: string; 
+            publishedDate: string; 
+            rating: number; 
+            text: string;
+            title?: string;
+          }) => ({
+            author: review.author,
+            date: review.publishedDate,
+            rating: review.rating,
+            text: review.text,
+            title: review.title
+          })) || []
+        } : undefined;
+
+        // Extract product options
+        const productOptions = productDetails.productOptions?.map((option: ViatorProductOption) => ({
+          productOptionCode: option.productOptionCode,
+          description: option.description,
+          title: option.title,
+          languageGuides: option.languageGuides
+        }));
+
+        // Extract availability and pricing information
+        const bookingInfo = {
+          productCode,
+          cancellationPolicy: productDetails.cancellationPolicy?.description || 
+                             activity.bookingDetails?.cancellationPolicy || 
+                             'Standard cancellation policy',
+          instantConfirmation: productDetails.bookingConfirmationSettings?.confirmationType === 'INSTANT',
+          mobileTicket: productDetails.ticketInfo?.ticketTypes?.includes('MOBILE') || true,
+          languages: productDetails.languageGuides?.map((lg: any) => lg.language) || ['English'],
+          minParticipants: activity.bookingDetails?.minParticipants || 1,
+          maxParticipants: activity.bookingDetails?.maxParticipants || 999,
+          availability: availabilitySchedule ? {
+            seasons: availabilitySchedule.bookableItems?.[0]?.seasons || [],
+            bookableItems: availabilitySchedule.bookableItems || []
+          } : undefined,
+          operatingDays: availabilitySchedule?.extractedDaysOfWeek || [],
+          timeSlots: availabilitySchedule?.extractedTimeSlots || []
+        };
+
+        // Extract high quality images
+        const images = (productDetails.images || [])
+          .map((img: any) => {
+            if (img.variants && Array.isArray(img.variants)) {
+              // Sort variants by size and get the largest one
+              const sortedVariants = [...img.variants].sort((a, b) => 
+                (b.width * b.height) - (a.width * a.height)
+              );
+              return sortedVariants[0]?.url || '';
+            }
+            return '';
+          })
+          .filter(Boolean);
+
+        // Extract location with coordinates
+        const location = {
+          address: locationInfo.address || 
+                  (typeof activity.location === 'object' ? activity.location.address : activity.location) || 
+                  productDetails.location?.address || 
+                  '',
+          coordinates: start.location?.coordinates || 
+                      productDetails.location?.coordinates ||
+                      (typeof activity.location === 'object' ? activity.location.coordinates : undefined),
+          cityName: productDetails.destinations?.[0]?.name?.split(',')[0],
+          countryName: productDetails.destinations?.[0]?.name?.split(',')[1]?.trim()
+        };
+
+        // Construct the enriched activity
       const enrichedActivity = {
         ...activity,
-        name: bestMatch.title || activity.name,
-        description: bestMatch.description?.trim() || activity.description,
-        duration: bestMatch.duration?.fixedDurationInMinutes || activity.duration,
-        price: {
-          amount: availabilitySchedule?.extractedPricing?.amount || 
-                  bestMatch.pricing?.summary?.fromPrice || 
-                  activity.price?.amount || 0,
-          currency: availabilitySchedule?.currency || 
-                   bestMatch.pricing?.currency || 
-                   activity.price?.currency || 'USD'
-        },
-        rating: bestMatch.reviews?.combinedAverageRating,
-        numberOfReviews: bestMatch.reviews?.totalReviews,
-        highlights: bestMatch.highlights || [],
-        // Use available times from the schedule
-        startTime: availabilitySchedule?.extractedTimeSlots?.[0] || activity.startTime,
-        timeSlot: this.getTimeSlotCategory(availabilitySchedule?.extractedTimeSlots?.[0] || activity.startTime || '09:00'),
-        availability: {
-          isAvailable: true,
-          availableTimeSlots: [],
-          exactStartTimes: availabilitySchedule?.extractedTimeSlots || [],
-          timesByCategory: {
-            morning: availabilitySchedule?.extractedTimeSlots?.filter(time => {
-              const hour = parseInt(time.split(':')[0]);
-              return hour >= 6 && hour < 12;
-            }) || [],
-            afternoon: availabilitySchedule?.extractedTimeSlots?.filter(time => {
-              const hour = parseInt(time.split(':')[0]);
-              return hour >= 12 && hour < 17;
-            }) || [],
-            evening: availabilitySchedule?.extractedTimeSlots?.filter(time => {
-              const hour = parseInt(time.split(':')[0]);
-              return hour >= 17 && hour < 23;
-            }) || []
+          name: productDetails.title || activity.name,
+          description: productDetails.description || activity.description,
+          location,
+          images,
+          details,
+          reviews,
+          bookingInfo,
+          itinerary: structuredItinerary,
+          productDetails: {
+            ...activity.productDetails,
+            productOptions
           },
-          realTimeVerification: {
-            verified: true,
-            exactStartTimes: availabilitySchedule?.extractedTimeSlots || [],
-            lastChecked: new Date().toISOString(),
-            pricing: {
-              fromPrice: availabilitySchedule?.extractedPricing?.amount || 0,
-              currency: availabilitySchedule?.currency || 'USD'
-            }
-          },
-          operatingHours: availabilitySchedule?.extractedOperatingHours ? 
-            Object.entries(availabilitySchedule.extractedOperatingHours)
-              .map(([day, hours]) => `${day}: ${hours.map(h => `${h.opensAt}-${h.closesAt}`).join(', ')}`)
-              .join('; ') : undefined
-        },
-        bookingDetails: {
-          provider: 'Viator',
-          productCode: bestMatch.productCode,
-          referenceUrl: this.constructBookingUrl(bestMatch),
-          cancellationPolicy: productDetails?.bookingInfo?.cancellationPolicy || bestMatch.bookingInfo?.cancellationPolicy || 'Standard cancellation policy',
-          instantConfirmation: bestMatch.confirmationType === 'INSTANT',
-          mobileTicket: bestMatch.bookingInfo?.mobileTicketing || true,
-          languages: bestMatch.bookingInfo?.languages || ['English'],
-          minParticipants: bestMatch.bookingInfo?.minParticipants || 1,
-          maxParticipants: bestMatch.bookingInfo?.maxParticipants || undefined
-        },
+          highlights: productDetails.highlights || [],
+          commentary: activity.commentary || details.overview,
+          itineraryHighlight: activity.itineraryHighlight || 
+                             `Visit ${productDetails.title} ${details.whatToExpect?.[0]?.description || ''}`,
         enrichmentStatus: 'success' as const,
-        enrichmentDuration: Date.now() - startTime,
-        availability: {
-          isAvailable: true,
-          availableTimeSlots: [],
-          exactStartTimes: availabilitySchedule?.extractedTimeSlots || [],
-          timesByCategory: {
-            morning: availabilitySchedule?.extractedTimeSlots?.filter(time => {
-              const hour = parseInt(time.split(':')[0]);
-              return hour >= 6 && hour < 12;
-            }) || [],
-            afternoon: availabilitySchedule?.extractedTimeSlots?.filter(time => {
-              const hour = parseInt(time.split(':')[0]);
-              return hour >= 12 && hour < 17;
-            }) || [],
-            evening: availabilitySchedule?.extractedTimeSlots?.filter(time => {
-              const hour = parseInt(time.split(':')[0]);
-              return hour >= 17 && hour < 23;
-            }) || []
-          },
-          realTimeVerification: {
-            verified: true,
-            exactStartTimes: availabilitySchedule?.extractedTimeSlots || [],
-            lastChecked: new Date().toISOString(),
-            pricing: {
-              fromPrice: availabilitySchedule?.extractedPricing?.amount || 0,
-              currency: availabilitySchedule?.currency || 'USD'
-            }
-          },
-          operatingHours: availabilitySchedule?.extractedOperatingHours ? 
-            Object.entries(availabilitySchedule.extractedOperatingHours)
-              .map(([day, hours]) => `${day}: ${hours.map(h => `${h.opensAt}-${h.closesAt}`).join(', ')}`)
-              .join('; ') : undefined
-        }
-      };
+          enrichmentDuration: Date.now() - startTime
+        };
 
-      logger.info('[Viator] Successfully enriched activity:', {
+        logger.info('[Viator] Successfully enriched activity with full details:', {
         name: enrichedActivity.name,
-        productCode: bestMatch.productCode,
-        price: enrichedActivity.price,
-        availability: {
-          isAvailable: enrichedActivity.availability?.isAvailable,
-          timeSlots: enrichedActivity.availability?.availableTimeSlots
-        },
+          productCode,
+          hasDetails: !!enrichedActivity.details,
+          hasReviews: !!enrichedActivity.reviews,
+          hasItinerary: !!enrichedActivity.itinerary,
+          hasBookingInfo: !!enrichedActivity.bookingInfo,
+          imageCount: enrichedActivity.images?.length || 0,
         stage: 'enrichment_complete'
       });
-
-      // Enhance activity with accessibility information
-      if (activity.bookingDetails) {
-        activity.bookingDetails.accessibility = this.determineAccessibility(productDetails);
-        activity.bookingDetails.restrictions = this.extractRestrictions(productDetails);
-      }
       
       return enrichedActivity;
 
     } catch (error) {
-      logger.error('[Viator] Error enriching activity', {
+        logger.error('[Viator] Error enriching activity details', {
+          name: activity.name,
+          productCode,
+          error: error instanceof Error ? error.message : 'Unknown error',
+          stack: error instanceof Error ? error.stack : undefined
+        });
+        return {
+          ...activity,
+          enrichmentStatus: 'failed' as const,
+          enrichmentError: error instanceof Error ? error.message : 'Unknown error'
+        };
+      }
+    } catch (error) {
+      logger.error('[Viator] Error in enrichActivityDetails', {
         name: activity.name,
         error: error instanceof Error ? error.message : 'Unknown error'
       });
