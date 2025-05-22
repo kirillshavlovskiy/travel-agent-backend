@@ -1073,7 +1073,7 @@ export class ViatorService {
             }
         }
 
-        if (bestMatch && bestScore > 0.8) { // 80% similarity threshold
+        if (bestMatch && bestScore > 0.6) { // Lowered threshold from 0.8 to 0.6 to accept more fuzzy matches
             logger.info('[Viator] Found fuzzy destination match', {
                 cityName,
                 destinationId: bestMatch.destinationId,

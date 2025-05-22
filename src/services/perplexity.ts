@@ -266,6 +266,8 @@ export class PerplexityService {
         duration: activity.duration || 120,
         timeSlot: activity.timeSlot || this.determineTimeSlot(activity),
         category: activity.category || this.determineCategory(activity),
+        // Ensure location is always the main city name, not a neighborhood
+        location: destination,
         availability: {
           isAvailable: true,
           availableTimeSlots: ['morning', 'afternoon', 'evening'] as ('morning' | 'afternoon' | 'evening')[],
@@ -1498,7 +1500,7 @@ EXPECTED FORMAT:
       "duration": 120,
       "price": {"amount": 50, "currency": "${currency}"},
       "category": "One of: ${preferences.interests.join(' | ')}",
-      "location": "Specific area/neighborhood in ${destination}",
+      "location": "${destination}", // IMPORTANT: MUST be city name, not neighborhood or landmark
       "timeSlot": "morning|afternoon|evening",
       "dayNumber": 1,
       "tier": "budget|medium|premium"
@@ -1510,6 +1512,7 @@ IMPORTANT:
 - Do NOT include activities that don't match the specified interests
 - Activities MUST align with the ${preferences.travelStyle} travel style
 - Respect the ${preferences.pacePreference} pace preference
+- CRITICAL: The "location" field MUST be the main city/town name "${destination}", NOT neighborhoods or landmarks within the city
 - Only return valid JSON - no commentary or explanations`;
   }
 
@@ -1622,37 +1625,126 @@ IMPORTANT:
             });
           }
         });
+      }
 
-        // Group activities by day
-        const activitiesByDay = activities.reduce((acc: Record<number, {
-          dayNumber: number;
-          theme: string;
-          mainArea: string;
-          activities: Activity[];
-        }>, activity) => {
-          const dayNumber = activity.dayNumber;
-          if (!acc[dayNumber]) {
-            acc[dayNumber] = {
-              dayNumber,
-              theme: 'Mixed Activities',
-              mainArea: 'City Center',
-              activities: []
-            };
+      // Try to extract activities from schedule if activities array is empty
+      if ((!activities || activities.length === 0) && content.schedule && Array.isArray(content.schedule)) {
+        logger.info('[Activity Transform] No activities array found, extracting from schedule');
+        content.schedule.forEach((day: any) => {
+          if (day.activities && Array.isArray(day.activities)) {
+            day.activities.forEach((activity: any) => {
+              try {
+                // Create a unique key for deduplication
+                const activityKey = `${activity.name || activity.id}-${day.dayNumber}-${activity.timeSlot || 'morning'}`;
+                if (seenActivities.has(activityKey)) {
+                  return; // Skip duplicate activities
+                }
+                seenActivities.add(activityKey);
+
+                // Extract or default values
+                const name = activity.name || activity.id || `Activity on Day ${day.dayNumber}`;
+                const timeSlot = (activity.timeSlot || 'morning').toLowerCase();
+                if (!['morning', 'afternoon', 'evening'].includes(timeSlot)) {
+                  return; // Skip activities with invalid timeSlot
+                }
+
+                const transformedActivity: Activity = {
+                  id: activity.id || crypto.randomUUID(),
+                  name: name,
+                  description: activity.description || `Activity in ${day.mainArea || 'City Center'}`,
+                  duration: activity.duration || 120,
+                  price: {
+                    amount: 50, // Default price
+                    currency: 'USD'
+                  },
+                  category: activity.category || 'Sightseeing',
+                  location: day.mainArea || 'City Center',
+                  timeSlot: timeSlot as 'morning' | 'afternoon' | 'evening',
+                  dayNumber: day.dayNumber,
+                  date: day.date,
+                  startTime: activity.startTime || '09:00',
+                  selected: activity.selected || false,
+                  rating: activity.rating || 0,
+                  numberOfReviews: activity.numberOfReviews || 0,
+                  bookingDetails: {
+                    provider: 'Viator',
+                    productCode: '',
+                    referenceUrl: '',
+                    cancellationPolicy: '',
+                    instantConfirmation: false,
+                    mobileTicket: false,
+                    languages: [],
+                    minParticipants: 1,
+                    maxParticipants: 10,
+                    pickupIncluded: false,
+                    pickupLocation: '',
+                    accessibility: [],
+                    restrictions: []
+                  },
+                  availability: {
+                    isAvailable: true,
+                    availableTimeSlots: [activity.startTime || '09:00'],
+                    exactStartTimes: [activity.startTime || '09:00'],
+                    timesByCategory: {
+                      morning: [],
+                      afternoon: [],
+                      evening: []
+                    },
+                    realTimeVerification: {
+                      verified: false,
+                      exactStartTimes: [activity.startTime || '09:00'],
+                      lastChecked: new Date().toISOString()
+                    },
+                    tripPeriodAvailability: {
+                      availableDates: [],
+                      availabilityByDate: {},
+                      operatingDays: [],
+                      operatingHours: {}
+                    }
+                  }
+                };
+
+                activities.push(transformedActivity);
+              } catch (activityError) {
+                logger.warn('[Activity Transform] Failed to transform activity from schedule:', {
+                  error: activityError instanceof Error ? activityError.message : 'Unknown error',
+                  activity: JSON.stringify(activity).substring(0, 200)
+                });
+              }
+            });
           }
-          acc[dayNumber].activities.push(activity);
-          return acc;
-        }, {});
-
-        // Convert to schedule array
-        Object.values(activitiesByDay).forEach((day) => {
-          schedule.push({
-            ...day,
-            activities: day.activities.sort((a, b) => {
-              return this.getTimeSlotValue(a.timeSlot) - this.getTimeSlotValue(b.timeSlot);
-            })
-          });
         });
       }
+
+      // Group activities by day
+      const activitiesByDay = activities.reduce((acc: Record<number, {
+        dayNumber: number;
+        theme: string;
+        mainArea: string;
+        activities: Activity[];
+      }>, activity) => {
+        const dayNumber = activity.dayNumber;
+        if (!acc[dayNumber]) {
+          acc[dayNumber] = {
+            dayNumber,
+            theme: 'Mixed Activities',
+            mainArea: 'City Center',
+            activities: []
+          };
+        }
+        acc[dayNumber].activities.push(activity);
+        return acc;
+      }, {});
+
+      // Convert to schedule array
+      Object.values(activitiesByDay).forEach((day) => {
+        schedule.push({
+          ...day,
+          activities: day.activities.sort((a, b) => {
+            return this.getTimeSlotValue(a.timeSlot) - this.getTimeSlotValue(b.timeSlot);
+          })
+        });
+      });
 
       logger.info('[Activity Transform] Completed transformation:', {
         totalActivities: activities.length,
@@ -1960,7 +2052,10 @@ Provide enriched details including:
       }
     })();
     
-    return `Optimize a ${days}-day schedule for a trip to Paris from ${startDate}. Create a daily plan that distributes these activities across ${days} days with dates: ${dates.join(', ')}.
+    // Extract destination from activities (they all should have the same location as city name)
+    const destination = activities[0]?.location || 'Unknown Destination';
+    
+    return `Optimize a ${days}-day schedule for a trip to ${destination} from ${startDate}. Create a daily plan that distributes these activities across ${days} days with dates: ${dates.join(', ')}.
 
 ACTIVITIES TO SCHEDULE:
 ${JSON.stringify(activities.map(a => ({
@@ -1980,6 +2075,7 @@ SCHEDULING REQUIREMENTS:
 - ${paceRequirements}
 - Prioritize activities matching user interests: ${preferences.interests.join(', ')}
 - Ensure schedule reflects ${preferences.travelStyle} travel style${accessibilityRequirements}${dietaryRequirements}
+- IMPORTANT: Always use the main city name for location, NOT neighborhoods or landmarks
 
 RETURN FORMAT:
 {
@@ -1988,7 +2084,7 @@ RETURN FORMAT:
       "dayNumber": 1,
       "date": "${dates[0]}",
       "theme": "Day theme based on activities",
-      "mainArea": "Main area/neighborhood for the day",
+      "mainArea": "Main city name", // Use city name, not neighborhood
       "commentary": "Brief description of the day's plan",
       "activities": [
         // Array of activity IDs in chronological order
