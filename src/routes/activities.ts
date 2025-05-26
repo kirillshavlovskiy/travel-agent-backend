@@ -1070,7 +1070,20 @@ export function determineMainArea(activities: Activity[]): string {
 
   // Count occurrences of each area
   const areaCount = activities.reduce((count, activity) => {
-    const area = activity.location?.split(',')[0]?.trim() || 'City Center';
+    let area = 'City Center';
+    
+    // Handle both string and object location types
+    if (typeof activity.location === 'string') {
+      area = activity.location.split(',')[0]?.trim() || 'City Center';
+    } else if (activity.location && typeof activity.location === 'object') {
+      // Handle location object case
+      const locationObj = activity.location as any;
+      area = locationObj.address?.split(',')[0]?.trim() || 
+             locationObj.cityName || 
+             locationObj.name || 
+             'City Center';
+    }
+    
     count[area] = (count[area] || 0) + 1;
     return count;
   }, {} as Record<string, number>);
@@ -1266,17 +1279,17 @@ activitiesRouter.post('/availability/:productCode', async (req: Request<{product
 // Add enrich endpoint
 activitiesRouter.post('/enrich', async (req: Request, res: Response) => {
   try {
-    const { activityId, referenceUrl, name } = req.body;
+    const { activityId, productCode, name } = req.body;
 
-    if (!referenceUrl) {
+    if (!productCode) {
       return res.status(400).json({
-        error: 'Reference URL is required for enrichment'
+        error: 'Product code is required for enrichment'
       });
     }
 
     logger.info('[Activities] Enriching activity:', {
       activityId,
-      referenceUrl,
+      productCode,
       name
     });
 
@@ -1284,9 +1297,9 @@ activitiesRouter.post('/enrich', async (req: Request, res: Response) => {
     const activity: any = {
       id: activityId,
       name: name || 'Unknown Activity',
-      referenceUrl,
       bookingDetails: {
-        referenceUrl
+        productCode,
+        referenceUrl: `https://www.viator.com/tours/${productCode}`
       }
     };
 

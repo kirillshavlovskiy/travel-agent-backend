@@ -21,12 +21,11 @@ import {
   getDefaultStartTime
 } from './activities.js';
 import { DestinationsService } from '../services/destinations.js';
-import { ViatorService, ViatorAvailabilityResponse } from '../services/viator.js';
+import { ViatorService } from '../services/viator.js';
 import * as fs from 'fs';
 import * as path from 'path';
 import { enhanceDailyPlansWithPreferences } from '../utils/itinerary';
 import { createProximityBasedSchedule } from '../utils/proximity';
-import amadeusService from '../services/amadeus';
 
 const router = Router();
 const amadeusService = new AmadeusService();
@@ -1095,11 +1094,23 @@ router.post('/calculate', async (req: Request, res: Response) => {
               );
 
                   if (!searchResults?.length) {
-                    logger.warn('[Budget] No search results found for activity:', {
-                  name: activity.name,
+                    logger.warn('[Budget] No search results found for activity, trying enrichment anyway:', {
+                      name: activity.name,
                       location: cityName
                     });
-                    return activity;
+                    
+                    // 🎯 FIX: Still call enrichActivityDetails even without search results
+                    // This allows the new Viator search functionality to find product codes by name
+                    try {
+                      const enriched = await viatorService.enrichActivityDetails(activity);
+                      return enriched || activity;
+                    } catch (error) {
+                      logger.error('[Budget] Failed to enrich activity without search results:', {
+                        activity: activity.name,
+                        error: error instanceof Error ? error.message : 'Unknown error'
+                      });
+                      return activity;
+                    }
                   }
 
                   // Find best unused match
@@ -1195,31 +1206,57 @@ router.post('/calculate', async (req: Request, res: Response) => {
               stage: 'enrichment_summary'
             });
 
-        // First, we'll declare the variable outside the if/else block
-        let optimizationResult;
+        // Apply proximity-based coordinate enrichment for ALL activities FIRST
+        const days = calculateDays(transformedRequest.startDate, transformedRequest.endDate);
+        
+        console.log('[Budget Route] Before proximity enrichment:', {
+          totalActivities: enrichedActivities.length,
+          activitiesWithLocationDetails: enrichedActivities.filter(a => a.locationDetails?.coordinates).length,
+          sampleActivityLocationDetails: enrichedActivities[0]?.locationDetails
+        });
+
+        const activitiesWithCoordinates = createProximityBasedSchedule(enrichedActivities, days);
+        
+        console.log('[Budget Route] After proximity enrichment:', {
+          totalActivities: activitiesWithCoordinates.length,
+          activitiesWithLocationDetails: activitiesWithCoordinates.filter(a => a.locationDetails?.coordinates).length,
+          sampleEnrichedActivity: {
+            id: activitiesWithCoordinates[0]?.id,
+            name: activitiesWithCoordinates[0]?.name,
+            locationDetails: activitiesWithCoordinates[0]?.locationDetails
+          },
+          allActivitiesLocationDetails: activitiesWithCoordinates.slice(0, 3).map(a => ({
+            id: a.id,
+            name: a.name,
+            locationDetails: a.locationDetails
+          }))
+        });
 
         // Then in the if block
+        let proximityScheduledActivities: any[] = [];
+        let optimizationResult;
+        
         if (req.body.preferences.accessibility?.length || req.body.preferences.dietaryRestrictions?.length) {
           logger.info('[Budget Route] Filtering activities based on accessibility and dietary preferences', {
             accessibility: req.body.preferences.accessibility || [],
             dietaryRestrictions: req.body.preferences.dietaryRestrictions || []
           });
           
-          // Filter enriched activities
+          // Filter the coordinate-enriched activities
           const requirementsFilter = {
             accessibility: req.body.preferences.accessibility,
             dietaryRestrictions: req.body.preferences.dietaryRestrictions
           };
           
           const filteredActivities = viatorService.filterActivitiesByRequirements(
-            enrichedActivities,
+            activitiesWithCoordinates, // Use coordinate-enriched activities
             requirementsFilter
           );
 
           logger.info('[Budget Route] Activity filtering results', {
-            totalActivities: enrichedActivities.length,
+            totalActivities: activitiesWithCoordinates.length,
             filteredActivities: filteredActivities.length,
-            filteredOut: enrichedActivities.length - filteredActivities.length
+            filteredOut: activitiesWithCoordinates.length - filteredActivities.length
           });
           
           // Now apply proximity-based scheduling if accessibility needs or pace preferences are specified
@@ -1231,11 +1268,8 @@ router.post('/calculate', async (req: Request, res: Response) => {
               accessibility: (req.body.preferences.accessibility || []).length > 0
             });
             
-            // Determine number of days
-            const days = calculateDays(transformedRequest.startDate, transformedRequest.endDate);
-            
-            // Apply proximity-based scheduling with pace preference
-            const proximityScheduledActivities = createProximityBasedSchedule(
+            // Apply proximity-based scheduling with pace preference on filtered activities
+            proximityScheduledActivities = createProximityBasedSchedule(
               filteredActivities,
               days,
               req.body.preferences.accessibility || [],
@@ -1252,23 +1286,59 @@ router.post('/calculate', async (req: Request, res: Response) => {
             optimizationResult = await optimizeSchedule(
               proximityScheduledActivities,
               days,
+              transformedRequest.destinations[0].label,
+              transformedRequest.preferences,
               transformedRequest.startDate
             );
           } else {
-            // Use filtered activities without proximity scheduling
+            // Use filtered but coordinate-enriched activities
             optimizationResult = await optimizeSchedule(
               filteredActivities,
-              calculateDays(transformedRequest.startDate, transformedRequest.endDate),
+              days,
+              transformedRequest.destinations[0].label,
+              transformedRequest.preferences,
               transformedRequest.startDate
             );
           }
         } else {
-          // Original code to execute if no filtering needed
-          optimizationResult = await optimizeSchedule(
-            enrichedActivities,
-            calculateDays(transformedRequest.startDate, transformedRequest.endDate),
-            transformedRequest.startDate
-          );
+          // Check if we should use proximity-based scheduling for pace preferences
+          if (req.body.preferences.pacePreference) {
+            logger.info('[Budget Route] Using proximity-based scheduling for pace preference only:', {
+              pacePreference: req.body.preferences.pacePreference
+            });
+            
+            // Apply proximity-based scheduling with pace preference on coordinate-enriched activities
+            proximityScheduledActivities = createProximityBasedSchedule(
+              activitiesWithCoordinates,
+              days,
+              [],
+              req.body.preferences.pacePreference || 'moderate'
+            );
+            
+            logger.info('[Budget Route] Created proximity-based schedule', {
+              totalActivities: proximityScheduledActivities.length,
+              days,
+              pacePreference: req.body.preferences.pacePreference || 'moderate'
+            });
+            
+            // Use these activities for the schedule optimization
+            optimizationResult = await optimizeSchedule(
+              proximityScheduledActivities,
+              days,
+              transformedRequest.destinations[0].label,
+              transformedRequest.preferences,
+              transformedRequest.startDate
+            );
+          } else {
+            // Use coordinate-enriched activities even without pace preferences
+            optimizationResult = await optimizeSchedule(
+              activitiesWithCoordinates,
+              days,
+              transformedRequest.destinations[0].label,
+              transformedRequest.preferences,
+              transformedRequest.startDate
+            );
+          }
         }
 
         // Make sure we have a valid result before enhancing plans
@@ -1293,12 +1363,38 @@ router.post('/calculate', async (req: Request, res: Response) => {
         const updatedDailyPlans = optimizationResult.schedule.map(day => ({
           ...day,
           activities: day.activities?.map((activity) => {
-            const enriched = enrichedActivities.find(
-              (ea) => ea.name === activity.name && ea.dayNumber === day.dayNumber
-            );
+            // First try to find from proximity-scheduled activities if they exist
+            let enriched;
+            if (proximityScheduledActivities && proximityScheduledActivities.length > 0) {
+              enriched = proximityScheduledActivities.find(
+                (ea) => ea.name === activity.name && ea.dayNumber === day.dayNumber
+              );
+            }
+            
+            // Fallback to original enriched activities if not found
+            if (!enriched) {
+              enriched = enrichedActivities.find(
+                (ea) => ea.name === activity.name && ea.dayNumber === day.dayNumber
+              );
+            }
+            
             return enriched || activity;
           }) || []
         })) || [];
+
+        // Extract all optimized activities with availability data from the schedule
+        const optimizedActivitiesWithAvailability = optimizationResult.schedule.flatMap(day => 
+          day.activities?.map(activity => ({
+            ...activity,
+            // Ensure we preserve the availability data from the optimized schedule
+            availability: activity.availability || {
+              isAvailable: null,
+              exactStartTimes: null,
+              timesByCategory: null,
+              realTimeVerification: null
+            }
+          })) || []
+        );
 
         // Log the optimized plan to a file
         const logEntry = {
@@ -1327,7 +1423,7 @@ router.post('/calculate', async (req: Request, res: Response) => {
             currency: transformedRequest.currency,
             budgetLimit: transformedRequest.budget
           },
-          activities: enrichedActivities,
+          activities: optimizedActivitiesWithAvailability, // Use optimized activities with availability data
               dailyPlans: updatedDailyPlans,
           tripOverview: optimizationResult.tripOverview || agentResult.tripSummary?.overview || 'Trip overview not available',
           activityFitNotes: optimizationResult.activityFitNotes || agentResult.organizationLogic?.overview || 'Activity fit notes not available',

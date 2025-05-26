@@ -75,58 +75,164 @@ const PARIS_NEIGHBORHOODS = {
   'Saint-Germain-des-Prés': { lat: 48.8534, lng: 2.3342, radius: 0.8 }
 };
 
+// London landmarks for activities
+const LONDON_LANDMARKS = {
+  'Tower Bridge': { lat: 51.5055, lng: -0.0754 },
+  'Big Ben': { lat: 51.4994, lng: -0.1245 },
+  'London Eye': { lat: 51.5033, lng: -0.1196 },
+  'Buckingham Palace': { lat: 51.5014, lng: -0.1419 },
+  'Westminster Abbey': { lat: 51.4994, lng: -0.1273 },
+  'Tower of London': { lat: 51.5081, lng: -0.0759 },
+  'British Museum': { lat: 51.5194, lng: -0.1270 },
+  'Tate Modern': { lat: 51.5076, lng: -0.0994 },
+  'St. Paul\'s Cathedral': { lat: 51.5138, lng: -0.0984 },
+  'Covent Garden': { lat: 51.5118, lng: -0.1226 },
+  'Camden Market': { lat: 51.5414, lng: -0.1460 },
+  'Hyde Park': { lat: 51.5074, lng: -0.1657 },
+  'Piccadilly Circus': { lat: 51.5100, lng: -0.1347 },
+  'Oxford Street': { lat: 51.5154, lng: -0.1447 },
+  'Thames': { lat: 51.5074, lng: -0.1278 }
+};
+
+// Destination landmarks mapping
+const DESTINATION_LANDMARKS = {
+  'PARIS': PARIS_LANDMARKS,
+  'LONDON': LONDON_LANDMARKS
+};
+
+// Destination centers for fallback
+const DESTINATION_CENTERS = {
+  'PARIS': { lat: 48.8566, lng: 2.3522 },
+  'LONDON': { lat: 51.5074, lng: -0.1278 }
+};
+
+/**
+ * Detects the destination from activity data
+ */
+function detectDestination(activity: Activity): string {
+  // Check activity location first
+  const location = typeof activity.location === 'string' ? 
+    activity.location.toLowerCase() : 
+    (activity.location as any)?.address?.toLowerCase() || '';
+  
+  // Check activity name and description
+  const name = activity.name.toLowerCase();
+  const description = (activity.description || '').toLowerCase();
+  
+  // Combine all text for analysis
+  const allText = `${location} ${name} ${description}`;
+  
+  // Check for London indicators
+  if (allText.includes('london') || 
+      allText.includes('england') || 
+      allText.includes('uk') || 
+      allText.includes('britain') ||
+      allText.includes('westminster') ||
+      allText.includes('thames') ||
+      allText.includes('tower bridge') ||
+      allText.includes('big ben') ||
+      allText.includes('buckingham')) {
+    return 'LONDON';
+  }
+  
+  // Default to Paris (most common destination in our system)
+  return 'PARIS';
+}
+
 /**
  * Extracts coordinates from activity or estimates them based on name/description
  */
 export function getActivityCoordinates(activity: Activity): { lat: number, lng: number } {
-  // First check if activity already has coordinates
+  console.log(`[Proximity] Getting coordinates for activity: "${activity.name}"`);
+  
+  // First check if activity already has coordinates in locationDetails
   if (activity.locationDetails?.coordinates?.lat && activity.locationDetails?.coordinates?.lng) {
+    console.log(`[Proximity] Activity "${activity.name}" already has coordinates:`, {
+      lat: activity.locationDetails.coordinates.lat,
+      lng: activity.locationDetails.coordinates.lng,
+      source: 'existing_locationDetails'
+    });
     return {
       lat: activity.locationDetails.coordinates.lat,
       lng: activity.locationDetails.coordinates.lng
     };
   }
+
+  console.log(`[Proximity] No specific coordinates found for activity "${activity.name}", using landmark matching`);
+
+  // Fallback to landmark-based coordinates
+  const destination = detectDestination(activity);
+  const landmarks = DESTINATION_LANDMARKS[destination as keyof typeof DESTINATION_LANDMARKS] || DESTINATION_LANDMARKS['PARIS'];
   
-  // Try to extract from location name or description
+  // Get activity name and description for matching
   const activityName = activity.name.toLowerCase();
   const activityDescription = (activity.description || '').toLowerCase();
-  const locationName = (activity.location || '').toLowerCase();
   
-  // Check against known landmarks
-  for (const [landmark, coordinates] of Object.entries(PARIS_LANDMARKS)) {
-    if (activityName.includes(landmark.toLowerCase()) || 
-        activityDescription.includes(landmark.toLowerCase()) ||
-        locationName.includes(landmark.toLowerCase())) {
+  console.log(`[Proximity] Matching activity "${activity.name}" against ${Object.keys(landmarks).length} landmarks in ${destination}`);
+
+  // Try to match against landmarks
+  for (const [landmarkName, coordinates] of Object.entries(landmarks)) {
+    const landmarkNameLower = landmarkName.toLowerCase();
+    
+    if (activityName.includes(landmarkNameLower) || activityDescription.includes(landmarkNameLower)) {
+      console.log(`[Proximity] Matched activity "${activity.name}" to landmark "${landmarkName}":`, {
+        lat: coordinates.lat,
+        lng: coordinates.lng,
+        destination,
+        source: 'landmark_match'
+      });
       return coordinates;
     }
   }
-  
-  // Try some smart matching based on key terms
-  if (activityName.includes('louvre') || activityDescription.includes('louvre')) {
-    return PARIS_LANDMARKS['Louvre Museum'];
+
+  // Additional specific matching patterns for London
+  if (destination === 'LONDON') {
+    const londonLandmarks = LONDON_LANDMARKS;
+    if (activityName.includes('tower bridge') || activityDescription.includes('tower bridge')) {
+      const coords = londonLandmarks['Tower Bridge'];
+      if (coords) {
+        console.log(`[Proximity] Matched "${activity.name}" to Tower Bridge:`, {
+          lat: coords.lat,
+          lng: coords.lng,
+          source: 'pattern_match_tower_bridge'
+        });
+        return coords;
+      }
+    }
+    if (activityName.includes('big ben') || activityDescription.includes('big ben') ||
+        activityName.includes('westminster') || activityDescription.includes('westminster')) {
+      const coords = londonLandmarks['Big Ben'];
+      if (coords) {
+        console.log(`[Proximity] Matched "${activity.name}" to Big Ben:`, {
+          lat: coords.lat,
+          lng: coords.lng,
+          source: 'pattern_match_big_ben'
+        });
+        return coords;
+      }
+    }
+    if (activityName.includes('london eye') || activityDescription.includes('london eye')) {
+      const coords = londonLandmarks['London Eye'];
+      if (coords) {
+        console.log(`[Proximity] Matched "${activity.name}" to London Eye:`, {
+          lat: coords.lat,
+          lng: coords.lng,
+          source: 'pattern_match_london_eye'
+        });
+        return coords;
+      }
+    }
   }
-  
-  if (activityName.includes('eiffel') || activityDescription.includes('eiffel')) {
-    return PARIS_LANDMARKS['Eiffel Tower'];
-  }
-  
-  if (activityName.includes('seine') || activityDescription.includes('seine') ||
-      activityName.includes('cruise') || activityDescription.includes('cruise') ||
-      activityName.includes('river') || activityDescription.includes('river')) {
-    return PARIS_LANDMARKS['Seine River'];
-  }
-  
-  if (activityName.includes('versailles') || activityDescription.includes('versailles')) {
-    return PARIS_LANDMARKS['Versailles'];
-  }
-  
-  if (activityName.includes('notre dame') || activityDescription.includes('notre dame') ||
-      activityName.includes('notre-dame') || activityDescription.includes('notre-dame')) {
-    return PARIS_LANDMARKS['Notre Dame'];
-  }
-  
-  // Default to central Paris if no match found
-  return { lat: 48.8566, lng: 2.3522 }; // Center of Paris
+
+  // Default to destination center if no match found
+  const destinationCenter = DESTINATION_CENTERS[destination as keyof typeof DESTINATION_CENTERS] || DESTINATION_CENTERS['PARIS'];
+  console.log(`[Proximity] No landmark match found for activity "${activity.name}", using ${destination} center:`, {
+    lat: destinationCenter.lat,
+    lng: destinationCenter.lng,
+    destination,
+    source: 'destination_center_fallback'
+  });
+  return destinationCenter;
 }
 
 /**

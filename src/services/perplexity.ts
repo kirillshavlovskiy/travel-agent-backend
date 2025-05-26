@@ -510,14 +510,42 @@ IMPORTANT:
       }
 
       if (transformedContent.activities.length === 0) {
-        logger.warn('[Activity Generation] No activities after transformation');
-        throw new Error('No activities generated after transformation');
+        logger.error('[Activity Generation] No activities after transformation');
+        throw new Error('No activities generated from Perplexity API');
       }
 
-      // Validate price information
+      // Validate price information - be more lenient and assign default prices if needed
       const activitiesWithPrice = transformedContent.activities.filter((a: Activity) => a.price?.amount > 0);
+      
+      // If no activities have valid prices, assign default prices based on category and travel style
       if (activitiesWithPrice.length === 0) {
-        logger.error('[Activity Generation] No activities with valid prices');
+        logger.warn('[Activity Generation] No activities with valid prices, assigning default prices');
+        
+        transformedContent.activities.forEach((activity: Activity) => {
+          if (!activity.price || activity.price.amount <= 0) {
+            // Assign default price based on category and tier
+            const defaultPrice = this.getDefaultPrice(activity.category, activity.tier);
+            activity.price = {
+              amount: defaultPrice,
+              currency: activity.price?.currency || 'USD'
+            };
+          }
+        });
+        
+        // Recount activities with valid prices
+        const updatedActivitiesWithPrice = transformedContent.activities.filter((a: Activity) => a.price?.amount > 0);
+        
+        logger.info('[Activity Generation] Assigned default prices', {
+          activitiesUpdated: transformedContent.activities.length,
+          activitiesWithPrice: updatedActivitiesWithPrice.length,
+          averagePrice: updatedActivitiesWithPrice.reduce((sum: number, a: Activity) => sum + (a.price?.amount || 0), 0) / updatedActivitiesWithPrice.length
+        });
+      }
+
+      // Final validation - if still no valid prices, this indicates a deeper issue
+      const finalActivitiesWithPrice = transformedContent.activities.filter((a: Activity) => a.price?.amount > 0);
+      if (finalActivitiesWithPrice.length === 0) {
+        logger.error('[Activity Generation] Still no activities with valid prices after default assignment');
         throw new Error('No activities with valid prices found');
       }
 
@@ -568,8 +596,66 @@ IMPORTANT:
       }
       cleaned = jsonMatch[0];
 
+      // Additional cleaning for malformed JSON
+      // Remove any text after the closing brace/bracket
+      const lastBrace = Math.max(cleaned.lastIndexOf('}'), cleaned.lastIndexOf(']'));
+      if (lastBrace !== -1 && lastBrace < cleaned.length - 1) {
+        cleaned = cleaned.substring(0, lastBrace + 1);
+      }
+
+      // Fix common JSON formatting issues
+      // Handle unescaped quotes in strings
+      cleaned = cleaned.replace(/([^\\])"([^"]*)"([^,}\]:])/g, '$1"$2\\"$3');
+      
+      // Handle missing quotes around property names
+      cleaned = cleaned.replace(/([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:/g, '$1"$2":');
+      
+      // Handle single quotes instead of double quotes
+      cleaned = cleaned.replace(/'/g, '"');
+      
+      // Remove control characters and invalid Unicode
+      cleaned = cleaned.replace(/[\u0000-\u001F\u007F-\u009F]/g, '');
+      
+      // Fix broken escape sequences
+      cleaned = cleaned.replace(/\\(?!["\\/bfnrt]|u[0-9a-fA-F]{4})/g, '\\\\');
+
       // Clean up any remaining whitespace and newlines
       cleaned = cleaned.trim();
+
+      // Validate JSON by attempting to parse it
+      try {
+        JSON.parse(cleaned);
+      } catch (parseError) {
+        logger.warn('[JSON Cleaning] Initial cleaning failed, attempting advanced repair:', {
+          error: parseError instanceof Error ? parseError.message : 'Unknown error',
+          position: parseError instanceof SyntaxError ? (parseError as any).position : 'unknown'
+        });
+        
+        // Advanced JSON repair - try to fix common issues
+        // Remove any incomplete objects/arrays at the end
+        let braceCount = 0;
+        let bracketCount = 0;
+        let lastValidIndex = -1;
+        
+        for (let i = 0; i < cleaned.length; i++) {
+          const char = cleaned[i];
+          if (char === '{') braceCount++;
+          else if (char === '}') braceCount--;
+          else if (char === '[') bracketCount++;
+          else if (char === ']') bracketCount--;
+          
+          if (braceCount === 0 && bracketCount === 0) {
+            lastValidIndex = i;
+          }
+        }
+        
+        if (lastValidIndex > 0 && lastValidIndex < cleaned.length - 1) {
+          cleaned = cleaned.substring(0, lastValidIndex + 1);
+        }
+        
+        // Try parsing again
+        JSON.parse(cleaned);
+      }
 
       logger.debug('[JSON Cleaning] Cleaned JSON string:', {
         originalLength: str.length,
@@ -581,10 +667,58 @@ IMPORTANT:
     } catch (error) {
       logger.error('[JSON Cleaning] Error cleaning JSON string:', {
         error: error instanceof Error ? error.message : 'Unknown error',
-        originalString: str.substring(0, 100) + '...'
+        originalString: str.substring(0, 200) + '...',
+        cleanedAttempt: str.length > 0 ? 'attempted' : 'empty input'
       });
+      
+      // As a last resort, try to extract just the activities array if possible
+      const activitiesMatch = str.match(/"activities"\s*:\s*\[[\s\S]*?\]/);
+      if (activitiesMatch) {
+        const activitiesJson = `{${activitiesMatch[0]}}`;
+        try {
+          JSON.parse(activitiesJson);
+          logger.info('[JSON Cleaning] Successfully extracted activities array as fallback');
+          return activitiesJson;
+        } catch (e) {
+          // Even the activities extraction failed
+        }
+      }
+      
       throw error;
     }
+  }
+
+  private getDefaultPrice(category: string, tier?: string): number {
+    // Base prices by category (in USD)
+    const basePrices = {
+      'Cultural & Historical': 45,
+      'Food & Entertainment': 65,
+      'Nature & Adventure': 55,
+      'Lifestyle & Local': 35,
+      'Sightseeing': 40
+    };
+
+    // Get base price for category
+    let basePrice = basePrices[category as keyof typeof basePrices] || 50;
+
+    // Adjust based on tier
+    if (tier) {
+      switch (tier.toLowerCase()) {
+        case 'budget':
+          basePrice = Math.round(basePrice * 0.6); // 40% discount
+          break;
+        case 'premium':
+          basePrice = Math.round(basePrice * 1.8); // 80% premium
+          break;
+        case 'medium':
+        default:
+          // Keep base price
+          break;
+      }
+    }
+
+    // Ensure minimum price of $10
+    return Math.max(basePrice, 10);
   }
 
   private getTimeSlot(time: string): string {
@@ -1548,8 +1682,8 @@ IMPORTANT:
               price = activity.price.toLowerCase() === 'free' ? 0 : parseFloat(activity.price) || 0;
             }
 
-            // Determine tier based on price
-            const tier = price <= 30 ? 'budget' : price <= 100 ? 'medium' : 'premium';
+            // Determine tier based on price - use consistent thresholds
+            const tier = price <= 50 ? 'budget' : price <= 150 ? 'medium' : 'premium';
 
             // Ensure timeSlot is one of the valid values
             const timeSlot = (activity.timeSlot || 'morning').toLowerCase();
@@ -1560,6 +1694,9 @@ IMPORTANT:
               });
               return; // Skip activities with invalid timeSlot
             }
+
+            // Get proper start time based on time slot instead of hardcoded 09:00
+            const startTime = activity.startTime || this.getDefaultStartTime(timeSlot);
 
             const transformedActivity: Activity = {
               id: activity.id || crypto.randomUUID(),
@@ -1575,7 +1712,7 @@ IMPORTANT:
               timeSlot: timeSlot as 'morning' | 'afternoon' | 'evening',
               dayNumber: activity.dayNumber || 1,
               date: activity.date,
-              startTime: activity.startTime || '09:00',
+              startTime: startTime,
               selected: activity.selected || false,
               rating: activity.rating || 0,
               numberOfReviews: activity.numberOfReviews || 0,
@@ -1596,16 +1733,16 @@ IMPORTANT:
               },
               availability: {
                 isAvailable: true,
-                availableTimeSlots: [activity.startTime || '09:00'],
-                exactStartTimes: [activity.startTime || '09:00'],
+                availableTimeSlots: [startTime],
+                exactStartTimes: [startTime],
                 timesByCategory: {
-                  morning: [],
-                  afternoon: [],
-                  evening: []
+                  morning: timeSlot === 'morning' ? [startTime] : [],
+                  afternoon: timeSlot === 'afternoon' ? [startTime] : [],
+                  evening: timeSlot === 'evening' ? [startTime] : []
                 },
                 realTimeVerification: {
                   verified: false,
-                  exactStartTimes: [activity.startTime || '09:00'],
+                  exactStartTimes: [startTime],
                   lastChecked: new Date().toISOString()
                 },
                 tripPeriodAvailability: {
@@ -1716,35 +1853,35 @@ IMPORTANT:
         });
       }
 
-      // Group activities by day
-      const activitiesByDay = activities.reduce((acc: Record<number, {
-        dayNumber: number;
-        theme: string;
-        mainArea: string;
-        activities: Activity[];
-      }>, activity) => {
-        const dayNumber = activity.dayNumber;
-        if (!acc[dayNumber]) {
-          acc[dayNumber] = {
-            dayNumber,
-            theme: 'Mixed Activities',
-            mainArea: 'City Center',
-            activities: []
-          };
-        }
-        acc[dayNumber].activities.push(activity);
-        return acc;
-      }, {});
+        // Group activities by day
+        const activitiesByDay = activities.reduce((acc: Record<number, {
+          dayNumber: number;
+          theme: string;
+          mainArea: string;
+          activities: Activity[];
+        }>, activity) => {
+          const dayNumber = activity.dayNumber;
+          if (!acc[dayNumber]) {
+            acc[dayNumber] = {
+              dayNumber,
+              theme: 'Mixed Activities',
+              mainArea: 'City Center',
+              activities: []
+            };
+          }
+          acc[dayNumber].activities.push(activity);
+          return acc;
+        }, {});
 
-      // Convert to schedule array
-      Object.values(activitiesByDay).forEach((day) => {
-        schedule.push({
-          ...day,
-          activities: day.activities.sort((a, b) => {
-            return this.getTimeSlotValue(a.timeSlot) - this.getTimeSlotValue(b.timeSlot);
-          })
+        // Convert to schedule array
+        Object.values(activitiesByDay).forEach((day) => {
+          schedule.push({
+            ...day,
+            activities: day.activities.sort((a, b) => {
+              return this.getTimeSlotValue(a.timeSlot) - this.getTimeSlotValue(b.timeSlot);
+            })
+          });
         });
-      });
 
       logger.info('[Activity Transform] Completed transformation:', {
         totalActivities: activities.length,
@@ -2116,8 +2253,39 @@ RETURN FORMAT:
 
   // Add getTimeSlotValue function inside the class
   private getTimeSlotValue(timeSlot: 'morning' | 'afternoon' | 'evening'): number {
-    const timeOrder = { morning: 1, afternoon: 2, evening: 3 };
-    return timeOrder[timeSlot];
+    switch (timeSlot) {
+      case 'morning': return 0;
+      case 'afternoon': return 1;
+      case 'evening': return 2;
+      default: return 0;
+    }
+  }
+
+  private generateFallbackActivityName(category: string, timeSlot: string): string {
+    const activityTemplates = {
+      'Cultural & Historical': {
+        morning: 'Museum Visit',
+        afternoon: 'Historical Walking Tour',
+        evening: 'Cultural Performance'
+      },
+      'Food & Entertainment': {
+        morning: 'Local Market Tour',
+        afternoon: 'Cooking Class',
+        evening: 'Dinner Experience'
+      },
+      'Nature & Adventure': {
+        morning: 'City Park Walk',
+        afternoon: 'Outdoor Adventure',
+        evening: 'Sunset Viewing'
+      }
+    };
+
+    const templates = activityTemplates[category as keyof typeof activityTemplates];
+    if (templates) {
+      return templates[timeSlot as keyof typeof templates] || 'Local Activity';
+    }
+    
+    return `${timeSlot.charAt(0).toUpperCase() + timeSlot.slice(1)} Activity`;
   }
 }
 

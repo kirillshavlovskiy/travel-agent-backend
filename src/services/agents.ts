@@ -1651,9 +1651,9 @@ For each activity you find, include:
   }
 
   private determineActivityTier(price: number): 'budget' | 'medium' | 'premium' {
-    if (price <= 30) return 'budget';
-    if (price <= 100) return 'medium';
-      return 'premium';
+    if (price <= 50) return 'budget';
+    if (price <= 150) return 'medium';
+    return 'premium';
   }
 
   async generateSingleActivity(params: ActivityGenerationParams): Promise<any> {
@@ -2198,42 +2198,10 @@ For each activity you find, include:
       for (let day = 1; day <= days; day++) {
         const dayActivities = groupedByDay[day] || [];
         
-        // Ensure we have activities for each time slot
-        const timeSlots = ['morning', 'afternoon', 'evening'];
-        const existingTimeSlots = new Set(dayActivities.map(a => a.timeSlot));
-        
-        for (const slot of timeSlots) {
-          const activitiesInSlot = dayActivities.filter(a => a.timeSlot === slot);
-          if (activitiesInSlot.length === 0) {
-            // Add placeholder activity if needed
-            const placeholderActivity: Activity = {
-              name: `Free Time - ${slot}`,
-              description: `Explore ${destination} at your own pace`,
-              category: 'Free Time',
-              timeSlot: slot,
-              dayNumber: day,
-              duration: 150,
-              price: { amount: 0, currency: 'USD' },
-              selected: true,
-              location: destination,
-              availability: {
-                isAvailable: true,
-                availableTimeSlots: [],
-                exactStartTimes: [],
-                timesByCategory: {
-                  morning: [],
-                  afternoon: [],
-                  evening: []
-                },
-                realTimeVerification: {
-                  verified: true,
-                  exactStartTimes: [],
-                  lastChecked: new Date().toISOString()
-                }
-              }
-            };
-            dayActivities.push(placeholderActivity);
-          }
+        // Skip days with no activities - don't create placeholder activities
+        if (dayActivities.length === 0) {
+          logger.warn(`[Agents] No activities found for day ${day}, skipping`);
+          continue;
         }
 
         // Sort activities within the day by time slot
@@ -2267,7 +2235,7 @@ For each activity you find, include:
 
 Activities to schedule:
 ${activities.map(a => `- ${a.name} (Duration: ${a.duration} minutes, Preferred time: ${a.timeSlot})
-  Available times: ${a.availability.exactStartTimes.join(', ')}
+  Available times: ${a.availability?.exactStartTimes?.join(', ') || 'Flexible'}
   Category: ${a.category}`).join('\n')}
 
 Requirements:
@@ -2304,8 +2272,61 @@ Return a JSON schedule with exact start times for each activity and day theme:
 
       // Get optimized schedule from Perplexity
       const result = await perplexityClient.chat(prompt);
-      const schedule = JSON.parse(result.choices[0].message.content);
       
+      // The perplexityClient.chat() returns a PerplexityApiResponse with activities array
+      // The actual JSON content should be in the first activity's name or description
+      let schedule: any;
+      
+      if (result.activities && result.activities.length > 0) {
+        const firstActivity = result.activities[0];
+        
+        // Try multiple fields where the JSON might be stored
+        const possibleJsonSources = [
+          firstActivity.description,
+          firstActivity.name,
+          JSON.stringify(firstActivity)
+        ];
+        
+        for (const source of possibleJsonSources) {
+          if (!source) continue;
+          
+          try {
+            // Try to parse directly first
+            schedule = JSON.parse(source);
+            if (schedule.optimizedSchedule && Array.isArray(schedule.optimizedSchedule)) {
+              break;
+            }
+          } catch (e) {
+            // Try to extract JSON from the text
+            const jsonMatch = source.match(/\{[\s\S]*\}/);
+            if (jsonMatch) {
+              try {
+                schedule = JSON.parse(jsonMatch[0]);
+                if (schedule.optimizedSchedule && Array.isArray(schedule.optimizedSchedule)) {
+                  break;
+                }
+              } catch (e2) {
+                // Continue to next source
+              }
+            }
+          }
+        }
+      }
+      
+      // If we still don't have a valid schedule, log the full response and throw error
+      if (!schedule || !schedule.optimizedSchedule || !Array.isArray(schedule.optimizedSchedule)) {
+        logger.error('[Agents] Failed to parse Perplexity response:', {
+          dayNumber,
+          fullResult: JSON.stringify(result, null, 2),
+          firstActivityContent: result.activities?.[0] ? {
+            name: result.activities[0].name,
+            description: result.activities[0].description,
+            category: result.activities[0].category
+          } : 'No activities in result'
+        });
+        throw new Error(`Failed to parse valid schedule from Perplexity API for day ${dayNumber}`);
+      }
+
       // Log the theme information
       logger.info(`[Schedule] Day ${dayNumber} theme generated:`, {
         theme: schedule.dayTheme,
@@ -2334,22 +2355,24 @@ Return a JSON schedule with exact start times for each activity and day theme:
             availability: {
               ...activity.availability,
               timesByCategory: {
-                morning: activity.availability.exactStartTimes.filter(time => {
+                morning: activity.availability?.exactStartTimes?.filter(time => {
                   const hour = parseInt(time.split(':')[0]);
                   return hour >= 6 && hour < 12;
-                }),
-                afternoon: activity.availability.exactStartTimes.filter(time => {
+                }) || [],
+                afternoon: activity.availability?.exactStartTimes?.filter(time => {
                   const hour = parseInt(time.split(':')[0]);
                   return hour >= 12 && hour < 17;
-                }),
-                evening: activity.availability.exactStartTimes.filter(time => {
+                }) || [],
+                evening: activity.availability?.exactStartTimes?.filter(time => {
                   const hour = parseInt(time.split(':')[0]);
                   return hour >= 17;
-                })
+                }) || []
               },
               realTimeVerification: {
-                ...activity.availability.realTimeVerification,
-                verified: true
+                ...activity.availability?.realTimeVerification,
+                verified: true,
+                exactStartTimes: activity.availability?.exactStartTimes || [],
+                lastChecked: new Date().toISOString()
               }
             }
           };
@@ -2361,8 +2384,62 @@ Return a JSON schedule with exact start times for each activity and day theme:
         dayNumber,
         error: error instanceof Error ? error.message : 'Unknown error'
       });
-      return activities;
+      throw error; // Propagate the error instead of using fallbacks
     }
+  }
+
+  private generateFallbackSchedule(activities: Activity[], dayNumber: number): any {
+    // Generate a theme based on activity categories
+    const categories = activities.map(a => a.category);
+    const uniqueCategories = [...new Set(categories)];
+    
+    let dayTheme: string;
+    let themeExplanation: string;
+    
+    if (uniqueCategories.length === 1) {
+      const category = uniqueCategories[0];
+      dayTheme = `${category} Discovery`;
+      themeExplanation = `This day focuses entirely on ${category.toLowerCase()} experiences`;
+    } else if (uniqueCategories.includes('Cultural & Historical') && uniqueCategories.includes('Food & Entertainment')) {
+      dayTheme = 'Culture & Cuisine Experience';
+      themeExplanation = 'A perfect blend of cultural exploration and culinary delights';
+    } else if (uniqueCategories.includes('Nature & Adventure')) {
+      dayTheme = 'Adventure & Exploration';
+      themeExplanation = 'An active day combining outdoor adventures with local discoveries';
+    } else {
+      dayTheme = `Day ${dayNumber} Highlights`;
+      themeExplanation = `A diverse day featuring ${uniqueCategories.join(', ').toLowerCase()} activities`;
+    }
+
+    // Generate optimized schedule with default start times
+    const timeSlotDefaults = {
+      morning: '09:00',
+      afternoon: '14:00',
+      evening: '19:00'
+    };
+
+    const optimizedSchedule = activities.map(activity => {
+      const startTime = timeSlotDefaults[activity.timeSlot as keyof typeof timeSlotDefaults] || '09:00';
+      const [hours, minutes] = startTime.split(':').map(Number);
+      const endMinutes = hours * 60 + minutes + activity.duration;
+      const endHours = Math.floor(endMinutes / 60);
+      const endMins = endMinutes % 60;
+      const endTime = `${endHours.toString().padStart(2, '0')}:${endMins.toString().padStart(2, '0')}`;
+
+      return {
+        activityName: activity.name,
+        startTime,
+        endTime,
+        timeSlot: activity.timeSlot
+      };
+    });
+
+    return {
+      dayTheme,
+      themeExplanation,
+      optimizedSchedule,
+      fallback: true
+    };
   }
 
   private getDayTheme(activities: Activity[]): string {
